@@ -154,7 +154,7 @@ can create defensive visibility.
 
 A live demonstration is available on LinkedIn:
 
-🔗 https://www.linkedin.com/posts/ibadovulfat_cybersecurity-mastersapplication-aisecurity-activity-7389739702834286592-qzpy
+🔗 https://youtu.be/wcn79OrndJY
 
 The demo showcases:
 - Real-time telemetry visualization
