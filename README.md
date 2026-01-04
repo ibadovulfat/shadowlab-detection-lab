@@ -154,7 +154,7 @@ can create defensive visibility.
 
 A live demonstration is available on LinkedIn:
 
-🔗 https://youtu.be/wcn79OrndJY
+🔗 https://www.youtube.com/watch?v=wcn79OrndJY
 
 The demo showcases:
 - Real-time telemetry visualization
