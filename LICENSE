@@ -1,21 +1,34 @@
-MIT License
-
 Copyright (c) 2026 Ulfat Ibadov
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+All rights reserved.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This software and associated documentation files (the "Software")
+are the exclusive intellectual property of the author.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+NO PERMISSION IS GRANTED to use, copy, modify, merge, publish,
+distribute, sublicense, or sell copies of the Software without
+explicit prior written permission from the copyright holder.
+
+The Software may be viewed and evaluated for academic or
+educational reference purposes ONLY.
+
+The following actions are strictly prohibited without
+explicit written consent from the author:
+
+- Running the Software in production environments
+- Commercial use of any kind
+- Redistribution or public hosting
+- Modification or creation of derivative works
+- Use for offensive, malicious, or unlawful activities
+- Use in red team, penetration testing, or adversary simulation
+  outside isolated and authorized lab environments
+
+This Software is provided "AS IS", without warranty of any kind,
+express or implied, including but not limited to the warranties
+of merchantability, fitness for a particular purpose, and
+noninfringement.
+
+In no event shall the author be liable for any claim, damages,
+or other liability arising from the use of the Software.
+
+For permission requests, contact the author directly.
