@@ -1,0 +1,22 @@
+# Monitoring settings
+duration: 90
+interval: 1.0
+
+# Event IDs to monitor
+defender_ids:
+    1006: "Malware detected (scan)"
+    1116: "Malware detected (on-access)"
+    1117: "Remediation action taken"
+    1118: "Remediation failed"
+    5007: "Configuration changed"
+
+sysmon_ids:
+    1:  "Process creation"
+    2:  "File creation time changed"
+    3:  "Network connection"
+    7:  "Image loaded"
+    8:  "CreateRemoteThread"
+    11: "File create"
+    12: "Registry add"
+    13: "Registry set"
+    22: "DNS query"
