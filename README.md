@@ -102,11 +102,11 @@ The web dashboard provides **real-time visibility** into:
 
 ---
 
-## OLD Demo Video (Live Research Preview)
+## Demo Video (Live Research Preview)
 
 A live demonstration is available on YouTube:
 
-🔗 https://www.youtube.com/watch?v=P_eaxR9eia8
+🔗 https://www.youtube.com/watch?v=5mdvXMRVc80
 
 ---
 
