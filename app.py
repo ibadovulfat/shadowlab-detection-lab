@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 import streamlit as st
 import pandas as pd
+import psutil
 import monitor_core
 
 PLOTLY_AVAILABLE = False
@@ -262,7 +263,11 @@ with tab_main:
 
             st.write("**Windows Defender (Operational)**")
             for event, count in def_sum.get("by_id", {}).items():
-                event_id = int(event.split(" ")[1])
+                try:
+                    event_id = int(event.split(" ")[1])
+                except:
+                    event_id = 0
+
                 techniques = get_attack_technique(event_id)
                 if techniques:
                     st.write(f"- {event}: {count} (ATT&CK: {', '.join(techniques)})")
@@ -273,7 +278,10 @@ with tab_main:
 
             st.write("**Sysmon (Operational)**")
             for event, count in sys_sum.get("by_id", {}).items():
-                event_id = int(event.split(" ")[1])
+                try:
+                    event_id = int(event.split(" ")[1])
+                except:
+                    event_id = 0
                 techniques = get_attack_technique(event_id)
                 if techniques:
                     st.write(f"- {event}: {count} (ATT&CK: {', '.join(techniques)})")
@@ -499,7 +507,6 @@ with tab_procs:
                                  # Use the selected row data directly
                                  proc_dict = selected_proc.to_dict()
                                  scan_res = scan_process(proc_dict, vt_api_key)
-                                 scan_res = scan_process(proc_dict, vt_api_key)
                                  st.session_state.vt_scan_results[pid] = scan_res
                                  st.rerun()
 
@@ -669,11 +676,6 @@ with tab_procs:
 
 
 
-
-with tab_tree:
-    st.subheader("Process Lineage Tree")
-    st.markdown("Visualizing parent-child relationships. Suspicious if `cmd.exe` or `powershell.exe` spawns from non-standard parents (e.g. `winword.exe`).")
-    
 
 with tab_tree:
     st.subheader("Process Lineage Tree (Interactive)")

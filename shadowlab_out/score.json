@@ -1,0 +1,17 @@
+{
+  "likelihood": 0.8423666666666667,
+  "parts": {
+    "cpu_activity": 0.16941666666666666,
+    "threads": 0.0465,
+    "tcp_conns": 0.09000000000000001,
+    "defender_events": 0.3,
+    "sys_activity": 0.0,
+    "ml_component": 1.0
+  },
+  "notes": [
+    "Elevated CPU: 33.9%",
+    "Multiple TCP connections: 9",
+    "Defender events observed: 759",
+    "ML probability is illustrative \u2014 not a real detector"
+  ]
+}

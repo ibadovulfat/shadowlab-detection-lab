@@ -1,12 +1,25 @@
+# --- Core Framework & UI ---
+streamlit==1.37.1
+pandas==2.2.2
+numpy==1.26.4
+PyYAML==6.0.1
+
+# --- System Monitoring & Telemetry ---
 psutil==5.9.8
 pywin32==306; platform_system=="Windows"
+
+# --- Analysis & ML ---
 matplotlib==3.8.4
 scikit-learn==1.4.2
-numpy==1.26.4
-pandas==2.2.2
-streamlit==1.37.1
-openai>=1.0.0
-reportlab==4.2.0
-PyYAML==6.0.1
-pyvis==0.3.2
 plotly==5.20.0
+pyvis==0.3.2
+
+# --- Security & Plugins ---
+scapy==2.5.0
+yara-python==4.5.0
+pyautogui==0.9.54
+
+# --- Utilities ---
+openai>=1.0.0
+requests==2.31.0
+reportlab==4.2.0
