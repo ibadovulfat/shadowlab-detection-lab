@@ -4,8 +4,6 @@
 
 **Created by [Ulfat Ibadov](https://www.linkedin.com/in/ibadovulfat/)**
 
-![banner](static/shadowlab_banner.png)
-
 ShadowLab is an API-first cybersecurity research platform focused on:
 
 - behavioral telemetry collection

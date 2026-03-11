@@ -44,10 +44,14 @@ def generate_pdf(out_dir: Path, author: str = "Ulfat Ibadov", sections: List[str
     c = canvas.Canvas(str(pdf_path), pagesize=A4)
     W, H = A4
 
-    # Header banner (if exists)
+    # Header branding
     try:
-        banner = ImageReader("static/shadowlab_banner.png")
-        c.drawImage(banner, 10*mm, H-45*mm, width=W-20*mm, height=30*mm, preserveAspectRatio=True, mask='auto')
+        logo = ImageReader("static/shadowlab-logo-active.png")
+        c.drawImage(logo, 20*mm, H-34*mm, width=18*mm, height=18*mm, preserveAspectRatio=True, mask='auto')
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(44*mm, H-22*mm, "ShadowLab")
+        c.setFont("Helvetica", 11)
+        c.drawString(44*mm, H-29*mm, "Created by Ulfat Ibadov")
     except Exception:
         c.setFont("Helvetica-Bold", 18)
         c.drawString(20*mm, H-20*mm, "ShadowLab")
