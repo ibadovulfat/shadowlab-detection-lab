@@ -15,6 +15,14 @@ ShadowLab is an API-first cybersecurity research platform focused on:
 - incident artifact generation
 - advanced hunt workflows across local host telemetry and forensic modules
 
+
+## Demo Video
+
+A full walkthrough of ShadowLab is available on YouTube:
+
+[Watch the demo](https://www.youtube.com/watch?v=tnK1ilsuWpo)
+
+
 The project is now **API-first**. Streamlit has been removed from runtime. Current architecture:
 
 - `FastAPI` backend for Docker and automation
