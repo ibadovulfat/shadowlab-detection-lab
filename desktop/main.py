@@ -9,7 +9,7 @@ from PySide6.QtCore import QSettings, Qt, QUrl
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
+    QApplication, QBoxLayout, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
     QInputDialog, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QSpinBox,
     QFrame, QScrollArea, QSplitter, QStatusBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QTextEdit,
     QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -21,7 +21,7 @@ class ShadowLabDesktop(QMainWindow):
         super().__init__()
         self.setWindowTitle("ShadowLab")
         self.resize(1760, 980)
-        self.settings = QSettings("ShadowLab", "DesktopWorkstation")
+        self.settings = QSettings("ShadowLab", "Desktop")
         self.logo_path = Path(__file__).resolve().parent.parent / "static" / "shadowlab-logo-active.png"
         if self.logo_path.exists():
             self.setWindowIcon(QIcon(str(self.logo_path)))
@@ -88,9 +88,9 @@ class ShadowLabDesktop(QMainWindow):
         layout.addWidget(hero)
 
         controls = QWidget()
-        controls_row = QHBoxLayout(controls)
-        controls_row.setContentsMargins(0, 0, 0, 0)
-        controls_row.setSpacing(18)
+        self.controls_row = QHBoxLayout(controls)
+        self.controls_row.setContentsMargins(0, 0, 0, 0)
+        self.controls_row.setSpacing(18)
         self.base = QLineEdit("http://127.0.0.1:8000")
         self.duration = QSpinBox(); self.duration.setRange(5, 600); self.duration.setValue(30)
         self.interval = QDoubleSpinBox(); self.interval.setRange(0.1, 10.0); self.interval.setValue(1.0)
@@ -161,8 +161,9 @@ class ShadowLabDesktop(QMainWindow):
         adv_layout.addLayout(adv_form)
         self.advanced_card = adv_card
 
-        controls_row.addWidget(ops_card, 1)
-        controls_row.addWidget(adv_card, 1)
+        self.ops_card = ops_card
+        self.controls_row.addWidget(ops_card, 1)
+        self.controls_row.addWidget(adv_card, 1)
         layout.addWidget(controls)
 
         top = QWidget()
@@ -207,6 +208,7 @@ class ShadowLabDesktop(QMainWindow):
         scroll.setWidget(content)
         self.setCentralWidget(scroll)
         self._load_settings()
+        self._update_controls_layout()
 
     def _overview_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w)
@@ -476,10 +478,22 @@ class ShadowLabDesktop(QMainWindow):
         label = QLabel(label_text)
         label.setStyleSheet("color:#d7e2ef;font-size:12px;font-weight:600;")
         if hasattr(widget, "setMinimumHeight"):
-            widget.setMinimumHeight(40)
+            widget.setMinimumHeight(44)
         layout.addWidget(label)
         layout.addWidget(widget)
         return block
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_controls_layout()
+
+    def _update_controls_layout(self) -> None:
+        available_width = self.width()
+        stacked = available_width < 1680
+        self.controls_row.setDirection(QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight)
+        self.controls_row.setSpacing(14 if stacked else 18)
+        self.ops_card.setMinimumWidth(0 if stacked else 620)
+        self.advanced_card.setMinimumWidth(0 if stacked else 720)
 
     def _show_error(self, widget: QTextEdit, title: str, exc: Exception) -> None:
         widget.setPlainText(f"{title}:\n{exc}")

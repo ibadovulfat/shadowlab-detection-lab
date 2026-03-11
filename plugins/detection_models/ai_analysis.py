@@ -25,7 +25,7 @@ def explain_detection(score_json: Dict[str, Any], def_sum: Dict[str, Any], sys_s
     if err: return err
     prompt = (
         "You are a senior cybersecurity mentor. Provide a concise, structured analysis of this "
-        "ShadowLab Defender run. Explain likely causes of detection signals, risk drivers, and "
+        "ShadowLab run. Explain likely causes of detection signals, risk drivers, and "
         "benign vs suspicious interpretations. Avoid making claims about real bypasses.\n\n"
         f"Score JSON:\n{json.dumps(score_json, indent=2)}\n\n"
         f"Defender Summary:\n{json.dumps(def_sum, indent=2)}\n\n"

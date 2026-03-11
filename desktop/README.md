@@ -1,6 +1,6 @@
-# ShadowLab Desktop
+# ShadowLab Desktop Client
 
-This folder is now a working PySide6 client for the local FastAPI backend.
+This folder contains the PySide6 desktop client for the local ShadowLab FastAPI backend.
 
 Current features:
 

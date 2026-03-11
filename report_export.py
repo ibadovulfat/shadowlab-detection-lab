@@ -50,7 +50,7 @@ def generate_pdf(out_dir: Path, author: str = "Ulfat Ibadov", sections: List[str
         c.drawImage(banner, 10*mm, H-45*mm, width=W-20*mm, height=30*mm, preserveAspectRatio=True, mask='auto')
     except Exception:
         c.setFont("Helvetica-Bold", 18)
-        c.drawString(20*mm, H-20*mm, "ShadowLab Defender Web Simulator")
+        c.drawString(20*mm, H-20*mm, "ShadowLab")
         c.setFont("Helvetica", 11)
         c.drawString(20*mm, H-28*mm, "Created by Ulfat Ibadov")
 

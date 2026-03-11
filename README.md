@@ -1,4 +1,4 @@
-# ShadowLab Defensive Operations Platform
+# ShadowLab
 
 > Note: Use only in owned, isolated, lab environments.
 
@@ -6,7 +6,7 @@
 
 ![banner](static/shadowlab_banner.png)
 
-ShadowLab is an ethical, lab-only defensive research platform focused on:
+ShadowLab is an API-first cybersecurity research platform focused on:
 
 - behavioral telemetry collection
 - Windows event visibility
@@ -15,19 +15,15 @@ ShadowLab is an ethical, lab-only defensive research platform focused on:
 - deception controls
 - threat-intelligence enrichment
 - incident artifact generation
-- advanced hunt workflows across legacy ShadowLab modules
+- advanced hunt workflows across local host telemetry and forensic modules
 
-The project is now **API-first**. Streamlit has been removed from runtime. Current architecture is:
+The project is now **API-first**. Streamlit has been removed from runtime. Current architecture:
 
 - `FastAPI` backend for Docker and automation
-- `desktop/` PySide6 client for the future Windows EXE path
+- `desktop/` PySide6 client for the Windows EXE path
 - modular `services/`, `core/`, and `detections/` layers
 
-## Current Direction
-
-ShadowLab is moving toward a **Windows defensive operations workstation** rather than a demo dashboard.
-
-Core goals:
+## Focus Areas
 
 - local host visibility
 - investigation workflows
@@ -43,6 +39,7 @@ Core goals:
 - Rule-based and scored behavioral detections
 - Incident bundle generation
 - Incident and case lifecycle storage
+- Timeline, host inventory, and quarantine tracking
 - Process intelligence with command line, SHA-256, and signature status
 - Persistence discovery on Windows and macOS
 - Persistence remediation for supported Windows startup mechanisms
@@ -60,6 +57,7 @@ Core goals:
 - Process tree and AI-analyst summaries
 - Honeypot, ransomware canary, and evidence-locker controls
 - ARP discovery and lab-only network warfare controls
+- PySide6 desktop client with overview, hunt, threat intel, network, incidents, artifacts, and FAQ views
 
 ## Project Layout
 
@@ -69,7 +67,8 @@ core/        Domain models and normalization
 services/    Telemetry, detection, process, response, incident services
 detections/  YAML rule packs and rule engine
 plugins/     Host-native forensic, persistence, sniffer, and lab modules
-desktop/     Windows desktop shell scaffold
+desktop/     PySide6 desktop client
+static/      Branding, banner, and icon assets
 ```
 
 ## Quickstart
