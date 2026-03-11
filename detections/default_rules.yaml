@@ -1,0 +1,63 @@
+- id: elevated_cpu_burst
+  title: Elevated CPU Burst
+  severity: medium
+  summary: Sustained CPU usage suggests intense execution or compression/encryption behavior.
+  when:
+    metric: avg_cpu
+    gte: 35
+  score: 0.18
+  tags: [execution, impact]
+
+- id: suspicious_thread_profile
+  title: Suspicious Thread Profile
+  severity: medium
+  summary: High thread counts can indicate injection, unpacking, or aggressive multitasking.
+  when:
+    metric: avg_threads
+    gte: 45
+  score: 0.12
+  tags: [defense-evasion, execution]
+
+- id: network_fanout
+  title: Network Fan-out
+  severity: medium
+  summary: Multiple simultaneous TCP connections can indicate beaconing or rapid lateral activity.
+  when:
+    metric: avg_tcp_conns
+    gte: 6
+  score: 0.10
+  tags: [command-and-control, lateral-movement]
+
+- id: defender_hits
+  title: Defender Activity Detected
+  severity: high
+  summary: Windows Defender recorded a meaningful volume of events during execution.
+  when:
+    metric: defender_total
+    gte: 3
+  score: 0.25
+  tags: [detection, antivirus]
+
+- id: sysmon_network_dns_chain
+  title: Sysmon Network and DNS Chain
+  severity: high
+  summary: Combined Sysmon network and DNS activity points to active communications behavior.
+  when:
+    metric: sysmon_total
+    gte: 5
+  score: 0.20
+  tags: [command-and-control, discovery]
+
+- id: data_exfil_pattern
+  title: Data Transfer Pattern
+  severity: medium
+  summary: High outbound throughput with active connections may indicate exfiltration or staging.
+  when:
+    all:
+      - metric: avg_bytes_sent_rate
+        gte: 50000
+      - metric: avg_tcp_conns
+        gte: 3
+  score: 0.15
+  tags: [exfiltration]
+

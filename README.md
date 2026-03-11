@@ -1,114 +1,76 @@
-# ShadowLab Defender Web Simulator
+# ShadowLab Defensive Operations Platform
 
-> **Note:** Usage requires explicit permission from the author.
+> Note: Use only in owned, isolated, lab environments.
 
 **Created by [Ulfat Ibadov](https://www.linkedin.com/in/ibadovulfat/)**
 
 ![banner](static/shadowlab_banner.png)
 
-ShadowLab Defender Web Simulator is an **ethical, lab-only behavioral research platform**
-designed to **study how Microsoft Defender and modern EDR solutions interpret system behavior**
-through local telemetry, Windows security event logs, and an **AI-assisted behavioral scoring engine**.
+ShadowLab is an ethical, lab-only defensive research platform focused on:
 
-**No bypass. No exploit. No payload.**  
-This project focuses on **behavioral visibility and defensive understanding**, not evasion.
+- behavioral telemetry collection
+- Windows event visibility
+- process investigation
+- persistence hunting
+- deception controls
+- threat-intelligence enrichment
+- incident artifact generation
+- advanced hunt workflows across legacy ShadowLab modules
 
----
+The project is now **API-first**. Streamlit has been removed from runtime. Current architecture is:
 
-## What Is ShadowLab?
+- `FastAPI` backend for Docker and automation
+- `desktop/` PySide6 client for the future Windows EXE path
+- modular `services/`, `core/`, and `detections/` layers
 
-ShadowLab is a **comprehensive behavioral security platform** designed for both **defensive research (Blue Team)** and **controlled offensive simulation (Red Team)**.
+## Current Direction
 
-It provides a high-fidelity **behavioral detection environment** that replicates how:
-- **Legitimate users** and **adversarial actors** interact with the system.
-- **Modern EDR/AV solutions** (like Microsoft Defender) interpret various telemetry signals.
-- **Security analysts** can hunt for persistence, analyze internals, and take active response actions.
+ShadowLab is moving toward a **Windows defensive operations workstation** rather than a demo dashboard.
 
-By combining defensive monitoring with controlled offensive modules (like ARP spoofing and stress scenarios), it allows for **full-spectrum defensive understanding**—seeing the attack, the telemetry it generates, and the response it requires.
+Core goals:
 
----
+- local host visibility
+- investigation workflows
+- detection scoring and rule correlation
+- safer response actions
+- operator-driven triage and case handling
+- portable backend for Docker or future UI clients
 
-## Purpose
+## Key Capabilities
 
-ShadowLab was developed as part of an **Advanced Cybersecurity Portfolio**
-to demonstrate a holistic range of **applied offensive and defensive research skills**, including:
+- Telemetry monitoring with CPU, memory, thread, handle, file, TCP, and bandwidth metrics
+- Windows Defender and Sysmon event summarization
+- Rule-based and scored behavioral detections
+- Incident bundle generation
+- Incident and case lifecycle storage
+- Process intelligence with command line, SHA-256, and signature status
+- Persistence discovery on Windows and macOS
+- Persistence remediation for supported Windows startup mechanisms
+- Response orchestration with audited `suspend`, `resume`, and `kill`
+- Advanced response actions including `kill-tree` and `quarantine`
+- Threat intel enrichment with VirusTotal, MalwareBazaar, and AbuseIPDB
+- Simulated memory-forensics workflow
+- Auto triage endpoint for one-shot process investigation
+- Host inventory, timeline, quarantine center, and webhook alerting
+- Process internals review for open handles and loaded modules
+- Binary string extraction with keyword hit surfacing
+- YARA scanning of on-disk process executables
+- Curated external YARA pack sourced from Neo23x0 Signature-Base plus local basic rules
+- Sandbox-style trace of new file and network activity
+- Process tree and AI-analyst summaries
+- Honeypot, ransomware canary, and evidence-locker controls
+- ARP discovery and lab-only network warfare controls
 
-- **Advanced Behavioral Detection**: Monitoring and scoring complex process activities.
-- **Forensic Internals**: Deep-dive analysis of process memory, handles, and loaded modules.
-- **Incident Response**: Implementation of active mitigation (Suspend/Kill) and audit logging.
-- **Deception Technology**: Deploying and monitoring honeypots and ransomware canary files.
-- **Threat Intelligence**: Automated correlation of telemetry with VirusTotal, AbuseIPDB, and MITRE ATT&CK.
-- **Offensive Network Warfare**: Mastering layer-2 discovery and ARP spoofing from a defensive perspective.
-- **Generative AI Analysis**: Integrating LLMs for contextual threat explainability.
+## Project Layout
 
-All activity is conducted **strictly for research and educational purposes in isolated lab environments**.
-
----
-
-## How It Works (High-Level)
-
-ShadowLab operates as a continuous behavioral analysis pipeline:
-
-### 1. Telemetry & Deep Internals
-- **Live Monitoring**: CPU, RAM, Disk, and Network telemetry via `psutil`.
-- **Hacker Internals**: Enumeration of open Handles (Files/Sockets) and loaded Modules (DLL/dylib).
-- **String Inspector**: Printable ASCII/Unicode extraction from binaries.
-
-### 2. Advanced Threat Hunting
-- **Process Tree**: Interactive parent-child relationship visualization via `pyvis`.
-- **YARA Scanning**: Deep scanning of process binaries using custom weaponized rules.
-- **Network Sniffer**: Real-time packet capture and DNS query analysis via `scapy`.
-- **Sandbox Tracer**: Real-time syscall-like monitoring of file handles and network connections.
-- **Persistence Hunting**: Detection of LaunchAgents, Daemons, and Cron persistence.
-
-### 3. Enterprise Defense & AI
-- **Deception (Honeypot)**: Hidden honey-files that trigger immediate alerts on access.
-- **Ransomware Canary**: Watchdog-monitored decoy files to detect unauthorized encryption.
-- **AI Analyst (GenAI)**: LLM-powered interpretation of process behavior for better explainability.
-- **Evidence Locker**: Automated screen capture triggered by high-severity incidents.
-
-### 4. Network Warfare (Red Team)
-- **ARP Discovery**: Local subnet scanner to discover connected devices (Phones, IoT, PCs).
-- **WiFi Kicker**: Targeted ARP Spoofing to disconnect specific devices from the network.
-
----
-
-## Technical Features & Stack
-
-### Core Technologies
-- **Traffic Analysis**: [Scapy](https://scapy.net/) (ARP/ICMP/TCP engineering)
-- **Malware Signatures**: [YARA](https://github.com/VirusTotal/yara-python)
-- **Host Telemetry**: [psutil](https://psutil.readthedocs.io/)
-- **Visuals**: [Pyvis](https://pyvis.readthedocs.io/) (Dynamic Graphviz)
-- **Forensics**: [Watchdog](https://github.com/gorakhargosh/watchdog), [PyAutoGUI](https://pyautogui.readthedocs.io/)
-
-### Advanced Capabilities
-- **MITRE ATT&CK Mapping**: Automatic correlation of security events to industry-standard techniques.
-- **Scenario Simulation**: Dynamic stress profiles (CPU/RAM/Net/Disk) to test EDR visibility.
-- **Statistical Anomaly Detection**: Z-Score based outlier detection for anomalous processes.
-- **Fleet Management**: Simulation of multi-agent command and control (C2).
-- **Response Actions**: Immediate process Suspend/Kill/Resume with audit logging.
-
----
-
-## Interactive Dashboard
-
-The web dashboard provides **real-time visibility** into:
-- System and process telemetry
-- Advanced Hunting & Forensic Internals
-- Automated Deception & Ransomware Protection
-- Network Warfare & Offensive Simulation
-- MITRE-aligned event logs and historical data
-
----
-
-## Demo Video (Live Research Preview)
-
-A live demonstration is available on YouTube:
-
-🔗 https://www.youtube.com/watch?v=5mdvXMRVc80
-
----
+```text
+api/         FastAPI entrypoint and routes
+core/        Domain models and normalization
+services/    Telemetry, detection, process, response, incident services
+detections/  YAML rule packs and rule engine
+plugins/     Host-native forensic, persistence, sniffer, and lab modules
+desktop/     Windows desktop shell scaffold
+```
 
 ## Quickstart
 
@@ -120,5 +82,185 @@ venv\Scripts\activate
 source venv/bin/activate
 
 pip install -r requirements.txt
-streamlit run app.py
+python app.py
 ```
+
+API starts on `http://127.0.0.1:8000`.
+
+Desktop client:
+
+```bash
+python desktop/main.py
+```
+
+Windows EXE packaging:
+
+```powershell
+pip install pyinstaller
+desktop\build_exe.ps1
+```
+
+## Docker
+
+```bash
+docker build -t shadowlab-api .
+docker run --rm -p 8000:8000 --name shadowlab shadowlab-api
+```
+
+## Main API Endpoints
+
+```text
+GET  /health
+GET  /config
+POST /monitor/run
+GET  /processes
+GET  /processes/{pid}
+POST /processes/{pid}/scan
+GET  /processes/{pid}/memory-analysis?process_name=...
+GET  /processes/{pid}/tree
+GET  /processes/{pid}/internals
+POST /processes/{pid}/strings
+GET  /processes/{pid}/yara
+POST /processes/{pid}/sandbox-trace
+GET  /processes/{pid}/ai-analysis
+POST /processes/{pid}/actions/{action}?process_name=...
+GET  /persistence
+GET  /threat-intel/ip/{ip}
+GET  /threat-intel/hash/{sha256}
+GET  /history/telemetry
+GET  /history/responses
+GET  /incidents
+PATCH /incidents/{incident_id}
+POST /persistence/remediate
+GET  /quarantine
+POST /quarantine/{quarantine_id}/restore
+DELETE /quarantine/{quarantine_id}
+GET  /timeline
+GET  /hosts
+POST /alerts/test
+POST /alerts/configure
+POST /triage/{pid}
+POST /scenario/run
+POST /deception/honeypot/deploy
+GET  /deception/honeypot/status
+DELETE /deception/honeypot
+POST /deception/canary/deploy
+GET  /deception/canary/status
+DELETE /deception/canary
+POST /evidence/capture
+GET  /evidence
+DELETE /evidence/{filename}
+GET  /network/connections
+POST /network/sniff
+POST /network/warfare/scan
+POST /network/warfare/block
+DELETE /network/warfare/block
+GET  /artifacts
+GET  /artifacts/{filename}
+```
+
+## Example Requests
+
+Run a monitor session:
+
+```bash
+curl -X POST http://127.0.0.1:8000/monitor/run ^
+  -H "Content-Type: application/json" ^
+  -d "{\"duration\": 30, \"interval\": 1.0}"
+```
+
+List processes:
+
+```bash
+curl http://127.0.0.1:8000/processes
+```
+
+Query a hash in MalwareBazaar:
+
+```bash
+curl http://127.0.0.1:8000/threat-intel/hash/<sha256>
+```
+
+Run deeper hunt on a process:
+
+```bash
+curl http://127.0.0.1:8000/processes/<pid>/internals
+curl -X POST http://127.0.0.1:8000/processes/<pid>/strings -H "Content-Type: application/json" -d "{\"min_length\": 4, \"patterns\": [\"http\", \"password\"]}"
+curl http://127.0.0.1:8000/processes/<pid>/yara
+```
+
+Run one-click auto triage:
+
+```bash
+curl -X POST http://127.0.0.1:8000/triage/<pid> ^
+  -H "Content-Type: application/json" ^
+  -d "{\"yara_pack\": \"hybrid\", \"trace_duration\": 3, \"strings_min_length\": 4, \"strings_patterns\": [\"http\", \"password\"]}"
+```
+
+## Environment Variables
+
+Optional threat-intelligence configuration:
+
+- `ABUSEIPDB_API_KEY`
+- `MALWAREBAZAAR_AUTH_KEY`
+
+Per-request configuration:
+
+- VirusTotal API key is currently supplied to `POST /processes/{pid}/scan`
+
+Runtime configuration:
+
+- `SHADOWLAB_HOST`
+- `SHADOWLAB_PORT`
+
+## Desktop Path
+
+The future EXE route starts in:
+
+- [desktop/main.py](desktop/main.py)
+- [desktop/README.md](desktop/README.md)
+
+The desktop now exposes:
+
+- Overview with monitor output and CPU trend chart
+- Processes with profile, response actions, memory analysis, internals, strings, YARA, sandbox trace, process tree, AI analyst, and auto triage
+- Persistence with remediation actions
+- Threat Intel with lookup history and process auto-fill
+- Network, Hosts, Timeline, Quarantine, History, Artifacts, Scenarios
+- Deception tab for honeypot, canary, and evidence locker workflows
+- toolbar shortcuts with custom button support
+
+This keeps the backend reusable while allowing a native Windows client and packaged EXE path.
+
+## YARA Packs
+
+ShadowLab supports three YARA pack modes:
+
+- `basic`: local project rules only
+- `curated`: selected external rules vendored from Neo23x0 Signature-Base
+- `hybrid`: local `basic` rules plus the curated external pack
+
+The desktop client exposes this as the `YARA Rule Pack` selector.
+
+Vendored curated rules live in:
+
+- `plugins/vendor/signature_base/yara/`
+
+Source attribution:
+
+- [Neo23x0/signature-base](https://github.com/Neo23x0/signature-base)
+- license mirrored in `plugins/vendor/signature_base/LICENSE`
+
+## Verification Status
+
+Latest local validation completed for:
+
+- FastAPI app import
+- route registration
+- Python syntax compilation of key modules
+- backend health check
+- smoke tests for `/hosts`, `/timeline`, `/incidents`, and `/triage/{pid}`
+
+## Safety
+
+This repository includes research-oriented and lab-only capabilities. Do not use offensive or disruptive network features outside systems and networks you own and control.

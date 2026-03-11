@@ -1,5 +1,5 @@
 
-# ShadowLab Defender Web Simulator — Docker build (Linux base)
+# ShadowLab API — Docker build (Linux base)
 FROM python:3.11-slim
 
 # Avoid interactive prompts
@@ -16,9 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-# Expose Streamlit default port
-EXPOSE 8501
+# Expose API port
+EXPOSE 8000
 
-# Streamlit will run app.py
-ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["python", "app.py"]

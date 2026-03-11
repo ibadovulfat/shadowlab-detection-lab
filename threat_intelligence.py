@@ -1,17 +1,20 @@
 
 import os
 import requests
-import streamlit as st
 import hashlib
+import logging
 
 ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
+MALWAREBAZAAR_AUTH_KEY = os.environ.get("MALWAREBAZAAR_AUTH_KEY")
+MALWAREBAZAAR_API_URL = "https://mb-api.abuse.ch/api/v1/"
+logger = logging.getLogger(__name__)
 
 def check_ip(ip: str) -> dict | None:
     """
     Check an IP address against the AbuseIPDB API.
     """
     if not ABUSEIPDB_API_KEY:
-        st.warning("ABUSEIPDB_API_KEY not set. Skipping threat intelligence check.")
+        logger.warning("ABUSEIPDB_API_KEY not set. Skipping threat intelligence check.")
         return None
 
     url = "https://api.abuseipdb.com/api/v2/check"
@@ -29,7 +32,7 @@ def check_ip(ip: str) -> dict | None:
         response.raise_for_status()
         return response.json().get("data")
     except requests.exceptions.RequestException as e:
-        st.error(f"Error checking IP {ip}: {e}")
+        logger.error("Error checking IP %s: %s", ip, e)
         return None
 
 def calculate_file_hash(filepath: str) -> str | None:
@@ -73,9 +76,55 @@ def check_file_vt(file_hash: str, api_key: str) -> dict | None:
     except Exception as e:
         return {"error": str(e)}
 
+
+def check_file_malwarebazaar(file_hash: str) -> dict | None:
+    """
+    Query MalwareBazaar for hash intelligence.
+    """
+    headers = {}
+    if MALWAREBAZAAR_AUTH_KEY:
+        headers["Auth-Key"] = MALWAREBAZAAR_AUTH_KEY
+
+    payload = {
+        "query": "get_info",
+        "hash": file_hash,
+    }
+
+    try:
+        response = requests.post(
+            MALWAREBAZAAR_API_URL,
+            data=payload,
+            headers=headers,
+            timeout=20,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("query_status") == "ok":
+            data = result.get("data", [])
+            if data:
+                first_hit = data[0]
+                return {
+                    "query_status": result.get("query_status"),
+                    "sha256_hash": first_hit.get("sha256_hash"),
+                    "file_name": first_hit.get("file_name"),
+                    "file_type": first_hit.get("file_type"),
+                    "signature": first_hit.get("signature"),
+                    "tags": first_hit.get("tags", []),
+                    "first_seen": first_hit.get("first_seen"),
+                    "reporter": first_hit.get("reporter"),
+                }
+            return {"query_status": "ok", "data": []}
+        return {
+            "query_status": result.get("query_status", "unknown"),
+            "message": result.get("message"),
+        }
+    except Exception as exc:
+        logger.error("Error querying MalwareBazaar for %s: %s", file_hash, exc)
+        return {"error": str(exc)}
+
 def scan_process(proc_info: dict, api_key: str) -> dict:
     """
-    Scan a single process using VirusTotal.
+    Scan a single process using VirusTotal and MalwareBazaar.
     """
     exe_path = proc_info.get("exe")
     if not exe_path:
@@ -86,9 +135,11 @@ def scan_process(proc_info: dict, api_key: str) -> dict:
         return {"status": "skipped", "reason": "Could not hash file"}
         
     vt_result = check_file_vt(file_hash, api_key)
+    malwarebazaar_result = check_file_malwarebazaar(file_hash)
     return {
         "process": proc_info.get("name"),
         "pid": proc_info.get("pid"),
         "hash": file_hash,
-        "result": vt_result
+        "virustotal": vt_result,
+        "malwarebazaar": malwarebazaar_result,
     }
