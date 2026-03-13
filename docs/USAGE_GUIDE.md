@@ -102,7 +102,7 @@ Recommended operator sequence:
 
 1. List processes.
 2. Inspect a suspicious PID profile.
-3. Run strings, YARA, and sandbox trace.
+3. Run strings, YARAify lookup, and sandbox trace.
 4. Use one-click triage for a correlated view.
 5. Contain with response actions only after review.
 
@@ -144,6 +144,11 @@ Supported providers in the codebase:
 - MalwareBazaar
 - YARAify
 - AbuseIPDB
+
+YARA behavior:
+
+- `POST /processes/{pid}/yara` is backed by YARAify, not a local vendored YARA pack
+- paste only the abuse.ch `Auth Key` value into the desktop `YARAify Auth-Key` field
 
 ## History, Timeline, and Graph Views
 

@@ -60,8 +60,7 @@ The project is now **API-first**. Streamlit has been removed from runtime. Curre
 - Host inventory, timeline, quarantine center, and webhook alerting
 - Process internals review for open handles and loaded modules
 - Binary string extraction with keyword hit surfacing
-- YARA scanning of on-disk process executables
-- Curated external YARA pack sourced from Neo23x0 Signature-Base plus local basic rules
+- YARAify-backed hash lookups for on-disk process executables
 - Sandbox-style trace of new file and network activity
 - Process tree and AI-analyst summaries
 - Honeypot, ransomware canary, and evidence-locker controls
@@ -150,7 +149,7 @@ GET  /processes/{pid}/memory-analysis?process_name=...
 GET  /processes/{pid}/tree
 GET  /processes/{pid}/internals
 POST /processes/{pid}/strings
-GET  /processes/{pid}/yara
+POST /processes/{pid}/yara
 POST /processes/{pid}/sandbox-trace
 GET  /processes/{pid}/ai-analysis
 POST /processes/{pid}/actions/{action}?process_name=...
@@ -310,24 +309,20 @@ The desktop now exposes:
 
 This keeps the backend reusable while allowing a native Windows client and packaged EXE path.
 
-## YARA Packs
+## YARAify
 
-ShadowLab supports three YARA pack modes:
+ShadowLab currently uses `YARAify` for YARA-backed enrichment and hash lookups.
 
-- `basic`: local project rules only
-- `curated`: selected external rules vendored from Neo23x0 Signature-Base
-- `hybrid`: local `basic` rules plus the curated external pack
+Current behavior:
 
-The desktop client exposes this as the `YARA Rule Pack` selector.
+- `POST /processes/{pid}/yara` resolves the process hash and queries YARAify
+- `POST /triage/{pid}` includes YARAify enrichment when a `yaraify_auth_key` is supplied
+- `POST /threat-intel/hash/lookup` can query YARAify directly by hash
 
-Vendored curated rules live in:
+Desktop usage:
 
-- `plugins/vendor/signature_base/yara/`
-
-Source attribution:
-
-- [Neo23x0/signature-base](https://github.com/Neo23x0/signature-base)
-- license mirrored in `plugins/vendor/signature_base/LICENSE`
+- put only your abuse.ch `Auth Key` into the `YARAify Auth-Key` field
+- do not paste `curl`, `wget`, `Auth-Key:` labels, or quotes
 
 ## Verification Status
 
