@@ -15,13 +15,15 @@ ShadowLab is an API-first cybersecurity research platform focused on:
 - incident artifact generation
 - advanced hunt workflows across local host telemetry and forensic modules
 
-
 ## Demo Video
 
 A full walkthrough of ShadowLab is available on YouTube:
 
 [Watch the demo](https://www.youtube.com/watch?v=tnK1ilsuWpo)
 
+Detailed operator and feature usage guide:
+
+- `docs/USAGE_GUIDE.md`
 
 The project is now **API-first**. Streamlit has been removed from runtime. Current architecture:
 
@@ -37,6 +39,7 @@ The project is now **API-first**. Streamlit has been removed from runtime. Curre
 - safer response actions
 - operator-driven triage and case handling
 - portable backend for Docker or future UI clients
+- ShadowLab telemetry fabric integration for enterprise telemetry export
 
 ## Key Capabilities
 
@@ -75,6 +78,8 @@ detections/  YAML rule packs and rule engine
 plugins/     Host-native forensic, persistence, sniffer, and lab modules
 desktop/     PySide6 desktop client
 static/      Branding, banner, and icon assets
+config/      Telemetry fabric runtime and builder manifests
+scripts/     Build and operational helper scripts
 ```
 
 ## Quickstart
@@ -92,6 +97,12 @@ python app.py
 
 API starts on `http://127.0.0.1:8000`.
 
+Detailed operational usage:
+
+```text
+docs/USAGE_GUIDE.md
+```
+
 Desktop client:
 
 ```bash
@@ -103,6 +114,20 @@ Windows EXE packaging:
 ```powershell
 pip install pyinstaller
 desktop\build_exe.ps1
+```
+
+## Landing Site
+
+A standalone product showcase site is included in:
+
+```text
+site/
+```
+
+Open it directly:
+
+```text
+site/index.html
 ```
 
 ## Docker
@@ -134,16 +159,23 @@ GET  /threat-intel/ip/{ip}
 GET  /threat-intel/hash/{sha256}
 GET  /history/telemetry
 GET  /history/responses
+GET  /history/alerts
+GET  /history/remediations
 GET  /incidents
 PATCH /incidents/{incident_id}
 POST /persistence/remediate
+POST /persistence/rollback/{remediation_id}
 GET  /quarantine
 POST /quarantine/{quarantine_id}/restore
 DELETE /quarantine/{quarantine_id}
 GET  /timeline
+GET  /timeline/graph
 GET  /hosts
+GET  /graph/entity-map
+GET  /graph/entity-map/html
 POST /alerts/test
 POST /alerts/configure
+POST /agents/register
 POST /triage/{pid}
 POST /scenario/run
 POST /deception/honeypot/deploy
@@ -160,8 +192,14 @@ POST /network/sniff
 POST /network/warfare/scan
 POST /network/warfare/block
 DELETE /network/warfare/block
+GET  /reports/html
 GET  /artifacts
 GET  /artifacts/{filename}
+GET  /integrations/telemetry-fabric/status
+POST /integrations/telemetry-fabric/start
+POST /integrations/telemetry-fabric/stop
+POST /integrations/telemetry-fabric/export/incidents/{incident_id}
+GET  /integrations/telemetry-fabric/exports
 ```
 
 ## Example Requests
@@ -191,7 +229,7 @@ Run deeper hunt on a process:
 ```bash
 curl http://127.0.0.1:8000/processes/<pid>/internals
 curl -X POST http://127.0.0.1:8000/processes/<pid>/strings -H "Content-Type: application/json" -d "{\"min_length\": 4, \"patterns\": [\"http\", \"password\"]}"
-curl http://127.0.0.1:8000/processes/<pid>/yara
+curl -X POST http://127.0.0.1:8000/processes/<pid>/yara -H "Content-Type: application/json" -d "{\"yaraify_auth_key\": \"<key>\"}"
 ```
 
 Run one-click auto triage:
@@ -199,7 +237,7 @@ Run one-click auto triage:
 ```bash
 curl -X POST http://127.0.0.1:8000/triage/<pid> ^
   -H "Content-Type: application/json" ^
-  -d "{\"yara_pack\": \"hybrid\", \"trace_duration\": 3, \"strings_min_length\": 4, \"strings_patterns\": [\"http\", \"password\"]}"
+  -d "{\"virustotal_api_key\": \"<vt>\", \"malwarebazaar_auth_key\": \"<mb>\", \"yaraify_auth_key\": \"<yaraify>\", \"trace_duration\": 3, \"strings_min_length\": 4, \"strings_patterns\": [\"http\", \"password\"]}"
 ```
 
 ## Environment Variables
@@ -217,6 +255,40 @@ Runtime configuration:
 
 - `SHADOWLAB_HOST`
 - `SHADOWLAB_PORT`
+- `SHADOWLAB_OTLP_HTTP_ENDPOINT`
+- `SHADOWLAB_OTELCOL_BIN`
+- `SHADOWLAB_OTELCOL_CONFIG`
+- `SHADOWLAB_OTEL_ZPAGES_URL`
+
+## Telemetry Fabric Integration
+
+ShadowLab now exports monitor-session metrics, incident logs, and run traces to its telemetry fabric over OTLP/HTTP while keeping ShadowLab as the primary platform.
+
+Bundled telemetry runtime configuration:
+
+```text
+config/telemetry-fabric-runtime.yaml
+```
+
+Bundled telemetry builder manifest:
+
+```text
+config/telemetry-fabric-builder.yaml
+```
+
+Windows build helper:
+
+```text
+scripts/build_telemetry_fabric.ps1
+```
+
+Default integration flow:
+
+- ShadowLab continues generating telemetry, detections, and incident artifacts locally.
+- `POST /monitor/run` automatically pushes OTLP metrics, logs, and traces when `telemetry_fabric.enabled` is true.
+- Export attempts are audited in the `integration_export_log` table and exposed via `GET /integrations/telemetry-fabric/exports`.
+- Telemetry fabric lifecycle can be managed through the new API start, stop, and status endpoints.
+- A custom Windows telemetry binary can be generated from the upstream collector builder with `scripts/build_telemetry_fabric.ps1`.
 
 ## Desktop Path
 
@@ -224,6 +296,7 @@ The future EXE route starts in:
 
 - [desktop/main.py](desktop/main.py)
 - [desktop/README.md](desktop/README.md)
+- `docs/USAGE_GUIDE.md`
 
 The desktop now exposes:
 
@@ -262,9 +335,10 @@ Latest local validation completed for:
 
 - FastAPI app import
 - route registration
-- Python syntax compilation of key modules
+- Python syntax compilation of backend, services, desktop, and scripts
 - backend health check
-- smoke tests for `/hosts`, `/timeline`, `/incidents`, and `/triage/{pid}`
+- telemetry fabric runtime validation
+- smoke checks for monitor export and integration status
 
 ## Safety
 

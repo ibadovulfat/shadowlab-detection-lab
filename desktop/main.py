@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import html
 import json
 import sys
 from pathlib import Path
 
 import requests
 from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QPen, QPixmap
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtWidgets import (
     QApplication, QBoxLayout, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
     QInputDialog, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QSpinBox,
-    QFrame, QScrollArea, QSplitter, QStatusBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QTextEdit,
+    QFrame, QScrollArea, QSplitter, QSizePolicy, QStatusBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QTextEdit,
     QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -29,6 +30,8 @@ class ShadowLabDesktop(QMainWindow):
         self.persistence_items = []
         self.artifacts = {}
         self.evidence_items = []
+        self.latest_monitor_rows: list[dict] = []
+        self.latest_monitor_result: dict = {}
         self.threat_history: list[dict[str, str]] = []
         self.custom_toolbar_buttons: list[dict[str, str]] = []
         self._theme()
@@ -40,12 +43,14 @@ class ShadowLabDesktop(QMainWindow):
     def _theme(self) -> None:
         self.setStyleSheet(
             "QMainWindow,QWidget{background:#10151d;color:#e5edf5;}"
-            "QLineEdit,QTextEdit,QSpinBox,QDoubleSpinBox,QComboBox,QTableWidget,QListWidget{background:#16202c;color:#eef4fb;border:1px solid #243446;border-radius:6px;padding:4px;}"
-            "QPushButton{background:#1d7df2;color:white;border:none;border-radius:6px;padding:8px 12px;} QPushButton:hover{background:#3b8ff3;}"
-            "QTabWidget::pane{border:1px solid #243446;} QTabBar::tab{background:#16202c;color:#d7e2ef;padding:10px 16px;} QTabBar::tab:selected{background:#1d7df2;color:white;}"
+            "QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox{background:#16202c;color:#eef4fb;border:1px solid #243446;border-radius:8px;padding:4px 10px;}"
+            "QTextEdit,QTextBrowser,QTableWidget,QListWidget{background:#16202c;color:#eef4fb;border:1px solid #243446;border-radius:8px;padding:6px;}"
+            "QPushButton{background:#1d7df2;color:white;border:none;border-radius:8px;padding:9px 14px;font-weight:600;} QPushButton:hover{background:#3b8ff3;}"
+            "QTabWidget::pane{border:1px solid #243446;} QTabBar::tab{background:#16202c;color:#d7e2ef;padding:10px 12px;} QTabBar::tab:selected{background:#1d7df2;color:white;}"
             "QHeaderView::section{background:#16202c;color:#d7e2ef;border:1px solid #243446;padding:6px;}"
             "QTableWidget{gridline-color:#243446;alternate-background-color:#12202c;}"
             "QFrame[card='true']{background:#121b27;border:1px solid #243446;border-radius:10px;}"
+            "QTextEdit[role='brief'],QTextBrowser[role='brief']{background:#121b27;border:1px solid #2b425b;border-radius:10px;padding:12px;color:#eef4fb;font-size:13px;}"
         )
 
     def _toolbar(self) -> None:
@@ -62,18 +67,20 @@ class ShadowLabDesktop(QMainWindow):
 
     def _ui(self) -> None:
         content = QWidget()
+        self.content_widget = content
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(6, 6, 6, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignTop)
         hero = QWidget()
         hero_row = QHBoxLayout(hero)
         hero_row.setContentsMargins(0, 0, 0, 0)
-        hero_row.setSpacing(14)
+        hero_row.setSpacing(12)
         title_logo = QLabel()
         if self.logo_path.exists():
             title_logo.setPixmap(QPixmap(str(self.logo_path)).scaled(56, 56, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         title = QLabel("ShadowLab")
-        title.setStyleSheet("font-size:28px;font-weight:700;padding:8px;color:#f4f7fb;")
+        title.setStyleSheet("font-size:26px;font-weight:700;padding:6px;color:#f4f7fb;")
         title_block = QWidget()
         title_layout = QVBoxLayout(title_block)
         title_layout.setContentsMargins(0, 0, 0, 0)
@@ -90,17 +97,18 @@ class ShadowLabDesktop(QMainWindow):
         controls = QWidget()
         self.controls_row = QHBoxLayout(controls)
         self.controls_row.setContentsMargins(0, 0, 0, 0)
-        self.controls_row.setSpacing(18)
+        self.controls_row.setSpacing(14)
         self.base = QLineEdit("http://127.0.0.1:8000")
         self.duration = QSpinBox(); self.duration.setRange(5, 600); self.duration.setValue(30)
         self.interval = QDoubleSpinBox(); self.interval.setRange(0.1, 10.0); self.interval.setValue(1.0)
         self.vt_key = QLineEdit(); self.vt_key.setEchoMode(QLineEdit.Password)
+        self.malwarebazaar_key = QLineEdit(); self.malwarebazaar_key.setEchoMode(QLineEdit.Password)
+        self.yaraify_key = QLineEdit(); self.yaraify_key.setEchoMode(QLineEdit.Password)
         self.hash_input = QLineEdit()
         self.ip_input = QLineEdit()
         self.persist_filter = QLineEdit()
         self.strings_min_length = QSpinBox(); self.strings_min_length.setRange(3, 20); self.strings_min_length.setValue(4)
         self.strings_patterns = QLineEdit("http,powershell,cmd,token,password,api")
-        self.yara_pack = QComboBox(); self.yara_pack.addItems(["hybrid", "curated", "basic"])
         self.trace_duration = QSpinBox(); self.trace_duration.setRange(2, 60); self.trace_duration.setValue(5)
         self.trace_interval = QDoubleSpinBox(); self.trace_interval.setRange(0.1, 5.0); self.trace_interval.setValue(0.5)
         self.honeypot_filename = QLineEdit("passwords.txt")
@@ -110,18 +118,19 @@ class ShadowLabDesktop(QMainWindow):
         self.block_gateway = QLineEdit()
         self.webhook_url = QLineEdit()
 
-        ops_card = QFrame(); ops_card.setProperty("card", True); ops_card.setMinimumWidth(620)
+        ops_card = QFrame(); ops_card.setProperty("card", True); ops_card.setMinimumWidth(540)
+        ops_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         ops_layout = QVBoxLayout(ops_card)
         ops_layout.setContentsMargins(18, 18, 18, 18)
-        ops_layout.setSpacing(10)
+        ops_layout.setSpacing(8)
         ops_title = QLabel("Primary Controls")
         ops_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
         ops_sub = QLabel("Daily operations, monitor and fast lookups")
         ops_sub.setStyleSheet("color:#96a5b8;font-size:12px;")
         ops_form = QGridLayout()
         ops_form.setContentsMargins(0, 4, 0, 0)
-        ops_form.setHorizontalSpacing(16)
-        ops_form.setVerticalSpacing(12)
+        ops_form.setHorizontalSpacing(14)
+        ops_form.setVerticalSpacing(10)
         ops_form.addWidget(self._field_block("API Base URL", self.base), 0, 0, 1, 2)
         ops_form.addWidget(self._field_block("Monitor Duration (s)", self.duration), 1, 0)
         ops_form.addWidget(self._field_block("Monitor Interval (s)", self.interval), 1, 1)
@@ -133,32 +142,36 @@ class ShadowLabDesktop(QMainWindow):
         ops_layout.addWidget(ops_title)
         ops_layout.addWidget(ops_sub)
         ops_layout.addLayout(ops_form)
+        ops_layout.addStretch(1)
 
-        adv_card = QFrame(); adv_card.setProperty("card", True); adv_card.setMinimumWidth(720)
+        adv_card = QFrame(); adv_card.setProperty("card", True); adv_card.setMinimumWidth(600)
+        adv_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         adv_layout = QVBoxLayout(adv_card)
         adv_layout.setContentsMargins(18, 18, 18, 18)
-        adv_layout.setSpacing(10)
+        adv_layout.setSpacing(8)
         adv_title = QLabel("Advanced Hunt & Lab Settings")
         adv_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
         adv_sub = QLabel("Strings, sandbox, deception and network-warfare inputs")
         adv_sub.setStyleSheet("color:#96a5b8;font-size:12px;")
         adv_form = QGridLayout()
         adv_form.setContentsMargins(0, 4, 0, 0)
-        adv_form.setHorizontalSpacing(16)
-        adv_form.setVerticalSpacing(12)
-        adv_form.addWidget(self._field_block("Strings Min Length", self.strings_min_length), 0, 0)
-        adv_form.addWidget(self._field_block("Strings Patterns", self.strings_patterns), 0, 1)
-        adv_form.addWidget(self._field_block("YARA Rule Pack", self.yara_pack), 0, 2)
-        adv_form.addWidget(self._field_block("Trace Duration (s)", self.trace_duration), 1, 0)
-        adv_form.addWidget(self._field_block("Trace Interval (s)", self.trace_interval), 1, 1)
-        adv_form.addWidget(self._field_block("Honeypot Filename", self.honeypot_filename), 1, 2)
-        adv_form.addWidget(self._field_block("Evidence Alert Name", self.evidence_alert_name), 2, 0)
-        adv_form.addWidget(self._field_block("Network IP Range", self.net_range), 2, 1)
-        adv_form.addWidget(self._field_block("Blocker Target IP", self.block_target), 2, 2)
-        adv_form.addWidget(self._field_block("Blocker Gateway IP", self.block_gateway), 3, 0, 1, 3)
+        adv_form.setHorizontalSpacing(14)
+        adv_form.setVerticalSpacing(10)
+        adv_form.addWidget(self._field_block("MalwareBazaar Auth-Key", self.malwarebazaar_key), 0, 0)
+        adv_form.addWidget(self._field_block("YARAify Auth-Key", self.yaraify_key), 0, 1)
+        adv_form.addWidget(self._field_block("Strings Min Length", self.strings_min_length), 0, 2)
+        adv_form.addWidget(self._field_block("Strings Patterns", self.strings_patterns), 1, 0, 1, 2)
+        adv_form.addWidget(self._field_block("Trace Duration (s)", self.trace_duration), 1, 2)
+        adv_form.addWidget(self._field_block("Trace Interval (s)", self.trace_interval), 2, 0)
+        adv_form.addWidget(self._field_block("Honeypot Filename", self.honeypot_filename), 2, 1)
+        adv_form.addWidget(self._field_block("Evidence Alert Name", self.evidence_alert_name), 2, 2)
+        adv_form.addWidget(self._field_block("Network IP Range", self.net_range), 3, 0)
+        adv_form.addWidget(self._field_block("Blocker Target IP", self.block_target), 3, 1)
+        adv_form.addWidget(self._field_block("Blocker Gateway IP", self.block_gateway), 3, 2)
         adv_layout.addWidget(adv_title)
         adv_layout.addWidget(adv_sub)
         adv_layout.addLayout(adv_form)
+        adv_layout.addStretch(1)
         self.advanced_card = adv_card
 
         self.ops_card = ops_card
@@ -193,19 +206,36 @@ class ShadowLabDesktop(QMainWindow):
         self.tabs.addTab(self._deception_tab(), "Deception")
         self.tabs.addTab(self._network_tab(), "Network")
         self.tabs.addTab(self._hosts_tab(), "Hosts")
+        self.tabs.addTab(self._graph_tab(), "Graph")
         self.tabs.addTab(self._timeline_tab(), "Timeline")
         self.tabs.addTab(self._quarantine_tab(), "Quarantine")
         self.tabs.addTab(self._history_tab(), "History")
         self.tabs.addTab(self._artifacts_tab(), "Artifacts")
         self.tabs.addTab(self._scenario_tab(), "Scenarios")
         self.tabs.addTab(self._about_tab(), "About / FAQ")
+        self.tabs.setUsesScrollButtons(True)
         layout.addWidget(self.tabs)
+
+        shell = QWidget()
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        centered = QWidget()
+        centered_row = QHBoxLayout(centered)
+        centered_row.setContentsMargins(0, 0, 0, 0)
+        centered_row.setSpacing(0)
+        centered_row.addStretch(1)
+        centered_row.addWidget(content)
+        centered_row.addStretch(1)
+        shell_layout.addWidget(centered, 0, Qt.AlignTop)
+        shell_layout.addStretch(1)
         scroll = QScrollArea()
+        self.main_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setWidget(content)
+        scroll.setWidget(shell)
         self.setCentralWidget(scroll)
         self._load_settings()
         self._update_controls_layout()
@@ -219,6 +249,10 @@ class ShadowLabDesktop(QMainWindow):
         r.addStretch(1); l.addWidget(row)
         self.cpu_series = QLineSeries()
         self.cpu_chart = QChart()
+        self.cpu_chart.setTheme(QChart.ChartThemeDark)
+        self.cpu_chart.setBackgroundVisible(False)
+        self.cpu_chart.setPlotAreaBackgroundVisible(True)
+        self.cpu_chart.setPlotAreaBackgroundBrush(QColor("#121b27"))
         self.cpu_chart.legend().hide()
         self.cpu_chart.addSeries(self.cpu_series)
         self.cpu_chart.setTitle("Telemetry CPU Trend")
@@ -229,9 +263,20 @@ class ShadowLabDesktop(QMainWindow):
         self.cpu_series.attachAxis(self.cpu_axis_x)
         self.cpu_series.attachAxis(self.cpu_axis_y)
         self.cpu_chart_view = QChartView(self.cpu_chart)
-        self.cpu_chart_view.setMinimumHeight(260)
+        self.cpu_series.setColor(QColor("#28a0ff"))
+        self.cpu_series.setPointsVisible(True)
+        cpu_pen = QPen(QColor("#28a0ff"))
+        cpu_pen.setWidth(3)
+        self.cpu_series.setPen(cpu_pen)
+        self.cpu_chart_view.setMinimumHeight(280)
         l.addWidget(self.cpu_chart_view)
-        self.monitor_out = QTextEdit(); self.monitor_out.setReadOnly(True); l.addWidget(self.monitor_out)
+        self.monitor_out = QTextBrowser()
+        self.monitor_out.setReadOnly(True)
+        self.monitor_out.setProperty("role", "brief")
+        self.monitor_out.setMinimumHeight(170)
+        self.monitor_out.setMaximumHeight(240)
+        self.monitor_out.setOpenExternalLinks(True)
+        l.addWidget(self.monitor_out)
         return w
 
     def _process_tab(self) -> QWidget:
@@ -340,16 +385,35 @@ class ShadowLabDesktop(QMainWindow):
     def _hosts_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w)
         btn = QPushButton("Refresh Hosts"); btn.clicked.connect(self.refresh_hosts); l.addWidget(btn)
-        self.host_table = QTableWidget(0, 5); self.host_table.setHorizontalHeaderLabels(["Host","Platform","Boot Time","API Status","Role"]); self._style_table(self.host_table)
+        self.host_table = QTableWidget(0, 7); self.host_table.setHorizontalHeaderLabels(["Host","Platform","Boot Time","API Status","Role","IP","Version"]); self._style_table(self.host_table)
         l.addWidget(self.host_table)
+        return w
+
+    def _graph_tab(self) -> QWidget:
+        w = QWidget(); l = QVBoxLayout(w)
+        top = QWidget(); r = QHBoxLayout(top)
+        refresh_btn = QPushButton("Refresh Entity Graph"); refresh_btn.clicked.connect(self.refresh_entity_graph)
+        focus_btn = QPushButton("Build From Selected Process"); focus_btn.clicked.connect(self.refresh_selected_process_graph)
+        open_btn = QPushButton("Open Interactive Graph"); open_btn.clicked.connect(self.open_entity_graph)
+        r.addWidget(refresh_btn); r.addWidget(focus_btn); r.addWidget(open_btn); r.addStretch(1)
+        l.addWidget(top)
+        self.graph_summary = QTextBrowser(); self.graph_summary.setMinimumHeight(140)
+        split = QSplitter(Qt.Horizontal)
+        self.graph_nodes_table = QTableWidget(0, 3); self.graph_nodes_table.setHorizontalHeaderLabels(["Label","Group","Title"]); self._style_table(self.graph_nodes_table)
+        self.graph_edges_table = QTableWidget(0, 3); self.graph_edges_table.setHorizontalHeaderLabels(["From","To","Label"]); self._style_table(self.graph_edges_table)
+        split.addWidget(self.graph_nodes_table); split.addWidget(self.graph_edges_table)
+        split.setStretchFactor(0, 2); split.setStretchFactor(1, 2)
+        self.graph_detail = QTextEdit(); self.graph_detail.setReadOnly(True)
+        l.addWidget(self.graph_summary); l.addWidget(split); l.addWidget(self.graph_detail)
         return w
 
     def _timeline_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w)
         btn = QPushButton("Refresh Timeline"); btn.clicked.connect(self.refresh_timeline); l.addWidget(btn)
+        self.timeline_summary = QTextBrowser(); self.timeline_summary.setMinimumHeight(120)
         self.timeline_table = QTableWidget(0, 4); self.timeline_table.setHorizontalHeaderLabels(["Time","Type","Severity","Title"]); self.timeline_table.itemSelectionChanged.connect(self.show_selected_timeline); self._style_table(self.timeline_table)
         self.timeline_detail = QTextEdit(); self.timeline_detail.setReadOnly(True)
-        l.addWidget(self.timeline_table); l.addWidget(self.timeline_detail)
+        l.addWidget(self.timeline_summary); l.addWidget(self.timeline_table); l.addWidget(self.timeline_detail)
         return w
 
     def _quarantine_tab(self) -> QWidget:
@@ -378,12 +442,17 @@ class ShadowLabDesktop(QMainWindow):
         self.resp_table = QTableWidget(0, 4); self.resp_table.setHorizontalHeaderLabels(["Timestamp","Action","PID","Process"]); self._style_table(self.resp_table)
         self.tel_table = QTableWidget(0, 5); self.tel_table.setHorizontalHeaderLabels(["ts","cpu","mem","threads","tcp"]); self._style_table(self.tel_table)
         self.inc_table = QTableWidget(0, 5); self.inc_table.setHorizontalHeaderLabels(["Incident ID","Severity","Status","Owner","Title"]); self.inc_table.itemSelectionChanged.connect(self.show_selected_incident); self._style_table(self.inc_table)
-        s.addWidget(self.resp_table); s.addWidget(self.tel_table); s.addWidget(self.inc_table); l.addWidget(s); return w
+        self.alert_table = QTableWidget(0, 4); self.alert_table.setHorizontalHeaderLabels(["Created","Type","Severity","Status"]); self._style_table(self.alert_table)
+        self.rem_table = QTableWidget(0, 4); self.rem_table.setHorizontalHeaderLabels(["Created","Type","Target","Status"]); self._style_table(self.rem_table)
+        s.addWidget(self.resp_table); s.addWidget(self.tel_table); s.addWidget(self.inc_table)
+        bottom = QSplitter(Qt.Horizontal)
+        bottom.addWidget(self.alert_table); bottom.addWidget(self.rem_table)
+        l.addWidget(s); l.addWidget(bottom); return w
 
     def _artifacts_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); s = QSplitter(Qt.Horizontal)
         self.art_list = QListWidget(); self.art_list.itemSelectionChanged.connect(self.show_selected_artifact)
-        right = QWidget(); rl = QVBoxLayout(right); self.art_detail = QTextEdit(); self.art_detail.setReadOnly(True); open_btn = QPushButton("Open Selected Artifact"); open_btn.clicked.connect(self.open_selected_artifact); rl.addWidget(self.art_detail); rl.addWidget(open_btn)
+        right = QWidget(); rl = QVBoxLayout(right); self.art_preview = QTextBrowser(); self.art_preview.setMinimumHeight(180); self.art_detail = QTextEdit(); self.art_detail.setReadOnly(True); open_btn = QPushButton("Open Selected Artifact"); open_btn.clicked.connect(self.open_selected_artifact); rl.addWidget(self.art_preview); rl.addWidget(self.art_detail); rl.addWidget(open_btn)
         s.addWidget(self.art_list); s.addWidget(right); s.setStretchFactor(0, 1); s.setStretchFactor(1, 3); l.addWidget(s); return w
 
     def _scenario_tab(self) -> QWidget:
@@ -472,13 +541,16 @@ class ShadowLabDesktop(QMainWindow):
 
     def _field_block(self, label_text: str, widget: QWidget) -> QWidget:
         block = QWidget()
+        block.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(block)
-        layout.setContentsMargins(0, 0, 0, 6)
-        layout.setSpacing(5)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(4)
         label = QLabel(label_text)
         label.setStyleSheet("color:#d7e2ef;font-size:12px;font-weight:600;")
-        if hasattr(widget, "setMinimumHeight"):
-            widget.setMinimumHeight(44)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        if isinstance(widget, (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox)):
+            widget.setMinimumHeight(38)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(label)
         layout.addWidget(widget)
         return block
@@ -488,12 +560,24 @@ class ShadowLabDesktop(QMainWindow):
         self._update_controls_layout()
 
     def _update_controls_layout(self) -> None:
-        available_width = self.width()
-        stacked = available_width < 1680
+        available_width = max(1080, self.width() - 28)
+        workspace_width = min(1820, max(1320, available_width - 18))
+        if hasattr(self, "content_widget"):
+            self.content_widget.setFixedWidth(workspace_width)
+        stacked = available_width < 1420
         self.controls_row.setDirection(QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight)
-        self.controls_row.setSpacing(14 if stacked else 18)
+        self.controls_row.setSpacing(12 if stacked else 16)
         self.ops_card.setMinimumWidth(0 if stacked else 620)
-        self.advanced_card.setMinimumWidth(0 if stacked else 720)
+        self.advanced_card.setMinimumWidth(0 if stacked else 620)
+        if stacked or not self.advanced_card.isVisible():
+            self.ops_card.setFixedHeight(self.ops_card.sizeHint().height())
+            self.advanced_card.setFixedHeight(self.advanced_card.sizeHint().height())
+            return
+        self.ops_card.setFixedHeight(self.ops_card.sizeHint().height())
+        self.advanced_card.setFixedHeight(self.advanced_card.sizeHint().height())
+        equal_height = max(self.ops_card.height(), self.advanced_card.height())
+        self.ops_card.setFixedHeight(equal_height)
+        self.advanced_card.setFixedHeight(equal_height)
 
     def _show_error(self, widget: QTextEdit, title: str, exc: Exception) -> None:
         widget.setPlainText(f"{title}:\n{exc}")
@@ -502,11 +586,77 @@ class ShadowLabDesktop(QMainWindow):
     def _show_json(self, widget: QTextEdit, payload) -> None:
         widget.setPlainText(json.dumps(payload, indent=2, ensure_ascii=False))
 
+    def _render_monitor_brief(self, result: dict, incident: dict) -> str:
+        score = result.get("final_score", {}) or {}
+        likelihood = score.get("likelihood", "n/a")
+        severity = incident.get("severity", "unknown")
+        summary = incident.get("summary", "No summary generated.")
+        attack_chain = self._ensure_list(incident.get("attack_chain"))
+        tactics = self._ensure_list(incident.get("mitre_techniques") or incident.get("mitre_mapping"))
+        recommended = self._ensure_list(incident.get("recommended_actions")) or ["No analyst actions suggested yet."]
+        notes = self._ensure_list(incident.get("notes"))
+
+        attack_chain_html = "".join(f"<span style='color:#9fc7ff;'>{html.escape(str(item))}</span><br>" for item in attack_chain[:6])
+        tactics_html = "".join(f"<span style='color:#a8b8c8;'>{html.escape(str(item))}</span><br>" for item in tactics[:6])
+        notes_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in notes[:4])
+        actions_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in recommended)
+
+        return (
+            "<div style='font-family:Segoe UI, Arial, sans-serif;'>"
+            "<div style='display:flex;justify-content:space-between;gap:24px;'>"
+            "<div>"
+            "<div style='font-size:18px;font-weight:700;color:#f4f7fb;'>Monitor Session Complete</div>"
+            f"<div style='color:#9fb2c6;margin-top:4px;'>{html.escape(str(summary))}</div>"
+            "</div>"
+            f"<div style='text-align:right;'><div style='font-size:12px;color:#7e93a8;'>Likelihood</div><div style='font-size:18px;font-weight:700;color:#28a0ff;'>{html.escape(str(likelihood))}</div></div>"
+            "</div>"
+            "<hr style='border:0;border-top:1px solid #243446;margin:12px 0;'>"
+            "<div style='display:flex;gap:22px;flex-wrap:wrap;'>"
+            f"<div><div style='font-size:12px;color:#7e93a8;'>Incident</div><div style='font-weight:700;color:#eef4fb;'>{html.escape(str(incident.get('incident_id', '-')))}</div></div>"
+            f"<div><div style='font-size:12px;color:#7e93a8;'>Severity</div><div style='font-weight:700;color:{self._severity_color(severity).name()};'>{html.escape(str(severity).upper())}</div></div>"
+            f"<div><div style='font-size:12px;color:#7e93a8;'>Telemetry Samples</div><div style='font-weight:700;color:#eef4fb;'>{html.escape(str(result.get('telemetry_count', 0)))}</div></div>"
+            "</div>"
+            "<div style='display:flex;gap:20px;margin-top:14px;'>"
+            "<div style='flex:2;background:#16202c;border:1px solid #243446;border-radius:8px;padding:10px;'>"
+            "<div style='font-weight:700;color:#f4f7fb;margin-bottom:8px;'>Recommended Actions</div>"
+            f"<ul style='margin:0;padding-left:18px;color:#dfe8f2;'>{actions_html}</ul>"
+            "</div>"
+            "<div style='flex:1;background:#16202c;border:1px solid #243446;border-radius:8px;padding:10px;'>"
+            "<div style='font-weight:700;color:#f4f7fb;margin-bottom:8px;'>Attack Chain</div>"
+            f"<div style='color:#dfe8f2;'>{attack_chain_html or '<span style=\"color:#7e93a8;\">No chain built yet.</span>'}</div>"
+            "</div>"
+            "<div style='flex:1;background:#16202c;border:1px solid #243446;border-radius:8px;padding:10px;'>"
+            "<div style='font-weight:700;color:#f4f7fb;margin-bottom:8px;'>ATT&CK / Notes</div>"
+            f"<div style='margin-bottom:8px;color:#dfe8f2;'>{tactics_html or '<span style=\"color:#7e93a8;\">No ATT&CK mapping yet.</span>'}</div>"
+            f"<ul style='margin:0;padding-left:18px;color:#dfe8f2;'>{notes_html or '<li>No additional notes.</li>'}</ul>"
+            "</div>"
+            "</div>"
+            "</div>"
+        )
+
     def _set_health_badge(self, online: bool) -> None:
         color = "#2f9e67" if online else "#d64550"
         text = "API status: online" if online else "API status: offline"
         self.health.setText(text)
         self.health.setStyleSheet(f"background:{color};color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+
+    def _ensure_list(self, value) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+        if isinstance(value, tuple):
+            return [str(item) for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item).strip()]
+            return [line.strip() for line in stripped.splitlines() if line.strip()]
+        return []
 
     def _load_settings(self) -> None:
         raw_buttons = self.settings.value("custom_toolbar_buttons", "[]")
@@ -519,16 +669,14 @@ class ShadowLabDesktop(QMainWindow):
         self.duration.setValue(int(self.settings.value("duration", self.duration.value())))
         self.interval.setValue(float(self.settings.value("interval", self.interval.value())))
         self.vt_key.setText(self.settings.value("vt_key", ""))
+        self.malwarebazaar_key.setText(self.settings.value("malwarebazaar_key", ""))
+        self.yaraify_key.setText(self.settings.value("yaraify_key", ""))
         self.webhook_url.setText(self.settings.value("webhook_url", ""))
         self.hash_input.setText(self.settings.value("hash_input", ""))
         self.ip_input.setText(self.settings.value("ip_input", ""))
         self.persist_filter.setText(self.settings.value("persist_filter", ""))
         self.strings_min_length.setValue(int(self.settings.value("strings_min_length", self.strings_min_length.value())))
         self.strings_patterns.setText(self.settings.value("strings_patterns", self.strings_patterns.text()))
-        saved_pack = self.settings.value("yara_pack", self.yara_pack.currentText())
-        idx = self.yara_pack.findText(str(saved_pack))
-        if idx >= 0:
-            self.yara_pack.setCurrentIndex(idx)
         self.trace_duration.setValue(int(self.settings.value("trace_duration", self.trace_duration.value())))
         self.trace_interval.setValue(float(self.settings.value("trace_interval", self.trace_interval.value())))
         self.honeypot_filename.setText(self.settings.value("honeypot_filename", self.honeypot_filename.text()))
@@ -546,13 +694,14 @@ class ShadowLabDesktop(QMainWindow):
         self.settings.setValue("duration", self.duration.value())
         self.settings.setValue("interval", self.interval.value())
         self.settings.setValue("vt_key", self.vt_key.text())
+        self.settings.setValue("malwarebazaar_key", self.malwarebazaar_key.text())
+        self.settings.setValue("yaraify_key", self.yaraify_key.text())
         self.settings.setValue("webhook_url", self.webhook_url.text())
         self.settings.setValue("hash_input", self.hash_input.text())
         self.settings.setValue("ip_input", self.ip_input.text())
         self.settings.setValue("persist_filter", self.persist_filter.text())
         self.settings.setValue("strings_min_length", self.strings_min_length.value())
         self.settings.setValue("strings_patterns", self.strings_patterns.text())
-        self.settings.setValue("yara_pack", self.yara_pack.currentText())
         self.settings.setValue("trace_duration", self.trace_duration.value())
         self.settings.setValue("trace_interval", self.trace_interval.value())
         self.settings.setValue("honeypot_filename", self.honeypot_filename.text())
@@ -570,6 +719,7 @@ class ShadowLabDesktop(QMainWindow):
         visible = not self.advanced_card.isVisible()
         self.advanced_card.setVisible(visible)
         self.toggle_advanced_btn.setText("Hide Advanced Settings" if visible else "Show Advanced Settings")
+        self._update_controls_layout()
 
     def add_custom_toolbar_button(self) -> None:
         label, ok = QInputDialog.getText(self, "Add Button", "Button label:")
@@ -636,6 +786,10 @@ class ShadowLabDesktop(QMainWindow):
         try:
             items = self._get("/processes").json(); self.metric_proc.setText(f"Processes: {len(items)}")
         except Exception: self.metric_proc.setText("Processes: unavailable")
+        try:
+            self.refresh_entity_graph()
+        except Exception:
+            pass
 
     def refresh_processes(self) -> None:
         try: items = self._get("/processes").json()
@@ -689,12 +843,22 @@ class ShadowLabDesktop(QMainWindow):
 
     def scan_selected_process(self) -> None:
         ident = self._selected_identity()
-        if not ident or not self.vt_key.text().strip(): self.statusBar().showMessage("Select process and enter VT key"); return
+        if not ident:
+            self.statusBar().showMessage("Select a process first")
+            return
         pid, _ = ident
-        try: result = self._post(f"/processes/{pid}/scan", json={"api_key": self.vt_key.text().strip()}, timeout=60).json()
+        payload = {
+            "virustotal_api_key": self.vt_key.text().strip() or None,
+            "malwarebazaar_auth_key": self.malwarebazaar_key.text().strip() or None,
+            "yaraify_auth_key": self.yaraify_key.text().strip() or None,
+        }
+        if not any(payload.values()):
+            self.statusBar().showMessage("Enter at least one threat-intel API key")
+            return
+        try: result = self._post(f"/processes/{pid}/scan", json=payload, timeout=60).json()
         except Exception as exc: self._show_error(self.threat_out, "Threat scan failed", exc); return
         self._show_json(self.threat_out, result)
-        source = "VirusTotal + MalwareBazaar"
+        source = "VirusTotal + MalwareBazaar + YARAify"
         value = str(self.selected_process.get("sha256", "-")) if self.selected_process else f"PID {pid}"
         self._record_threat_history("process", value, source, result)
         self.tabs.setCurrentIndex(4)
@@ -760,12 +924,23 @@ class ShadowLabDesktop(QMainWindow):
         if not ident: return
         pid, _ = ident
         try:
-            result = self._get(f"/processes/{pid}/yara", params={"pack": self.yara_pack.currentText()}, timeout=40).json()
+            result = self._post(
+                f"/processes/{pid}/yara",
+                json={"yaraify_auth_key": self.yaraify_key.text().strip() or None},
+                timeout=40,
+            ).json()
         except Exception as exc:
             self._show_error(self.hunt_out, "YARA scan failed", exc)
             return
+        lookup = result.get("result", {}) if isinstance(result, dict) else {}
         matches = result.get("matches", [])
-        self.hunt_out.setPlainText(f"{'MATCHES FOUND' if matches else 'No YARA matches'}\n\nMatches:\n" + ("\n".join(matches) if matches else "None"))
+        provider = result.get("provider", "YARAify")
+        self.hunt_out.setPlainText(
+            f"{provider} Lookup\n\n"
+            f"Status: {lookup.get('status', 'unknown')}\n"
+            f"Rule Count: {lookup.get('yara_rule_count', 0)}\n"
+            f"Matches:\n" + ("\n".join(matches) if matches else "None")
+        )
         self.tabs.setCurrentIndex(2)
 
     def run_sandbox_trace(self) -> None:
@@ -825,7 +1000,8 @@ class ShadowLabDesktop(QMainWindow):
         pid, _ = ident
         payload = {
             "virustotal_api_key": self.vt_key.text().strip() or None,
-            "yara_pack": self.yara_pack.currentText(),
+            "malwarebazaar_auth_key": self.malwarebazaar_key.text().strip() or None,
+            "yaraify_auth_key": self.yaraify_key.text().strip() or None,
             "trace_duration": min(10, self.trace_duration.value()),
             "strings_min_length": self.strings_min_length.value(),
             "strings_patterns": [part.strip() for part in self.strings_patterns.text().split(",") if part.strip()],
@@ -843,7 +1019,11 @@ class ShadowLabDesktop(QMainWindow):
         try: result = self._post("/monitor/run", json=payload, timeout=payload["duration"] + 60).json()
         except Exception as exc: self._show_error(self.monitor_out, "Monitor failed", exc); return
         incident = result.get("incident", {})
-        self._show_json(self.monitor_out, result)
+        telemetry_rows = result.get("telemetry_rows", [])
+        self.latest_monitor_rows = telemetry_rows
+        self.latest_monitor_result = result
+        self._update_cpu_chart(telemetry_rows)
+        self.monitor_out.setHtml(self._render_monitor_brief(result, incident))
         self.metric_tel.setText(f"Telemetry Rows: {result.get('telemetry_count','-')}")
         self.metric_inc.setText(f"Last Incident: {incident.get('incident_id','-')}")
         severity = incident.get("severity", "unknown")
@@ -895,10 +1075,19 @@ class ShadowLabDesktop(QMainWindow):
 
     def lookup_hash(self) -> None:
         if not self.hash_input.text().strip(): return
-        try: result = self._get(f"/threat-intel/hash/{self.hash_input.text().strip()}").json()
+        payload = {
+            "file_hash": self.hash_input.text().strip(),
+            "virustotal_api_key": self.vt_key.text().strip() or None,
+            "malwarebazaar_auth_key": self.malwarebazaar_key.text().strip() or None,
+            "yaraify_auth_key": self.yaraify_key.text().strip() or None,
+        }
+        if not any([payload["virustotal_api_key"], payload["malwarebazaar_auth_key"], payload["yaraify_auth_key"]]):
+            self.statusBar().showMessage("Enter at least one hash lookup API key")
+            return
+        try: result = self._post("/threat-intel/hash/lookup", json=payload).json()
         except Exception as exc: self._show_error(self.threat_out, "Hash lookup failed", exc); return
         self._show_json(self.threat_out, result)
-        self._record_threat_history("hash", self.hash_input.text().strip(), "MalwareBazaar", result)
+        self._record_threat_history("hash", self.hash_input.text().strip(), "MalwareBazaar + YARAify + VirusTotal", result)
         self.tabs.setCurrentIndex(4)
 
     def lookup_ip(self) -> None:
@@ -982,12 +1171,62 @@ class ShadowLabDesktop(QMainWindow):
             return
         self.host_table.setRowCount(len(hosts))
         for r, item in enumerate(hosts):
-            for c, value in enumerate([item.get("host",""), item.get("platform",""), item.get("boot_time",""), item.get("api_status",""), item.get("role","")]):
+            for c, value in enumerate([item.get("host",""), item.get("platform",""), item.get("boot_time",""), item.get("api_status",""), item.get("role",""), item.get("ip_address",""), item.get("agent_version","")]):
                 self.host_table.setItem(r, c, QTableWidgetItem(str(value)))
+        if not hosts:
+            self.statusBar().showMessage("No fleet hosts registered yet.")
+
+    def refresh_entity_graph(self, pid: int | None = None) -> None:
+        endpoint = f"/graph/entity-map?pid={pid}" if pid is not None else "/graph/entity-map"
+        try:
+            graph = self._get(endpoint, timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.graph_detail, "Entity graph load failed", exc)
+            return
+        self.entity_graph = graph
+        summary = graph.get("summary", {})
+        ad = graph.get("ad_context", {})
+        self.graph_summary.setHtml(
+            f"<h2>ShadowLab Attack Surface Graph</h2>"
+            f"<p><b>Nodes:</b> {summary.get('node_count', 0)} | <b>Edges:</b> {summary.get('edge_count', 0)}<br>"
+            f"<b>Groups:</b> {json.dumps(summary.get('groups', {}))}<br>"
+            f"<b>Domain Joined:</b> {summary.get('domain_joined', False)} | <b>Domain:</b> {summary.get('domain', 'n/a')}<br>"
+            f"<b>User:</b> {ad.get('user', 'n/a')} | <b>Logon Server:</b> {ad.get('logon_server', 'n/a')}</p>"
+        )
+        nodes = graph.get("nodes", [])
+        edges = graph.get("edges", [])
+        self.graph_nodes_table.setRowCount(len(nodes))
+        for r, node in enumerate(nodes):
+            for c, value in enumerate([node.get("label", ""), node.get("group", ""), node.get("title", "")]):
+                self.graph_nodes_table.setItem(r, c, QTableWidgetItem(str(value)))
+        self.graph_edges_table.setRowCount(len(edges))
+        for r, edge in enumerate(edges):
+            for c, value in enumerate([edge.get("from", ""), edge.get("to", ""), edge.get("label", "")]):
+                self.graph_edges_table.setItem(r, c, QTableWidgetItem(str(value)))
+        self.graph_detail.setPlainText(json.dumps(graph, indent=2))
+
+    def refresh_selected_process_graph(self) -> None:
+        if not self.selected_process:
+            self.statusBar().showMessage("Select a process first to build a focused graph.")
+            return
+        self.refresh_entity_graph(int(self.selected_process.get("pid", -1)))
+
+    def open_entity_graph(self) -> None:
+        graph = getattr(self, "entity_graph", {})
+        html_path = graph.get("html_path")
+        if not html_path:
+            self.refresh_entity_graph()
+            graph = getattr(self, "entity_graph", {})
+            html_path = graph.get("html_path")
+        if html_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(html_path))
+        else:
+            self.statusBar().showMessage("No graph HTML generated yet.")
 
     def refresh_timeline(self) -> None:
         try:
             items = self._get("/timeline", timeout=20).json()
+            graph = self._get("/timeline/graph", timeout=20).json()
         except Exception as exc:
             self._show_error(self.timeline_detail, "Timeline load failed", exc)
             return
@@ -998,6 +1237,15 @@ class ShadowLabDesktop(QMainWindow):
             for c, value in enumerate(values):
                 self.timeline_table.setItem(r, c, QTableWidgetItem(str(value)))
             self._paint_row(self.timeline_table, r, self._severity_color(item.get("severity", "")))
+        summary = graph.get("summary", {})
+        self.timeline_summary.setHtml(
+            f"<h3>Timeline Graph Summary</h3>"
+            f"<p>Total events: <b>{summary.get('total_events', 0)}</b><br>"
+            f"Latest event: <b>{summary.get('latest_event', 'n/a')}</b><br>"
+            f"Severity mix: <b>{json.dumps(summary.get('by_severity', {}))}</b></p>"
+        )
+        if not items:
+            self.timeline_detail.setPlainText("No timeline events captured yet.")
 
     def show_selected_timeline(self) -> None:
         row = self.timeline_table.currentRow()
@@ -1068,11 +1316,14 @@ class ShadowLabDesktop(QMainWindow):
             cpu = float(item.get("cpu", 0) or 0)
             if cpu >= 30:
                 self._paint_row(self.tel_table, r, QColor("#d64550"))
-        self.metric_tel.setText(f"Telemetry Rows: {len(tel)}")
-        self.cpu_series.clear()
-        for idx, item in enumerate(tel[-60:]):
-            self.cpu_series.append(idx, float(item.get("cpu", 0) or 0))
-        self.cpu_axis_x.setRange(0, max(1, min(60, len(tel[-60:]))))
+        if self.latest_monitor_rows:
+            self.metric_tel.setText(f"Telemetry Rows: {len(self.latest_monitor_rows)}")
+            self._update_cpu_chart(self.latest_monitor_rows)
+        else:
+            self.metric_tel.setText(f"Telemetry Rows: {len(tel)}")
+            self._update_cpu_chart(tel)
+        if not tel and not self.latest_monitor_rows and not self.monitor_out.toPlainText().strip():
+            self.monitor_out.setHtml("<div style='color:#9fb2c6;padding:6px;'>Run a monitor session to populate telemetry trend data.</div>")
         try: incidents = self._get("/incidents").json()
         except Exception: incidents = []
         self.inc_table.setRowCount(len(incidents))
@@ -1081,6 +1332,22 @@ class ShadowLabDesktop(QMainWindow):
             for c, value in enumerate(values):
                 self.inc_table.setItem(r, c, QTableWidgetItem(str(value)))
             self._paint_row(self.inc_table, r, self._severity_color(item.get("severity", "")))
+        try: alerts = self._get("/history/alerts").json()
+        except Exception: alerts = []
+        self.alert_table.setRowCount(len(alerts))
+        for r, item in enumerate(alerts):
+            values = [item.get("created_at",""), item.get("destination_type",""), item.get("severity",""), item.get("status","")]
+            for c, value in enumerate(values):
+                self.alert_table.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.alert_table, r, self._severity_color(item.get("severity", "")))
+        try: remediations = self._get("/history/remediations").json()
+        except Exception: remediations = []
+        self.rem_table.setRowCount(len(remediations))
+        for r, item in enumerate(remediations):
+            values = [item.get("created_at",""), item.get("item_type",""), item.get("target",""), item.get("status","")]
+            for c, value in enumerate(values):
+                self.rem_table.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.rem_table, r, self._severity_color("medium" if item.get("status") == "applied" else "high"))
         self.refresh_timeline()
         self.refresh_quarantine()
         self.refresh_hosts()
@@ -1112,6 +1379,7 @@ class ShadowLabDesktop(QMainWindow):
         self.art_list.clear()
         for name in sorted(self.artifacts): self.art_list.addItem(name)
         self.art_detail.setPlainText(json.dumps(self.artifacts, indent=2)); self.metric_art.setText(f"Artifacts: {len(self.artifacts)}")
+        self.art_preview.setHtml("<h3>Artifact Preview</h3><p>Select an artifact to inspect local path, URL, and quick preview.</p>")
 
     def refresh_quarantine(self) -> None:
         try:
@@ -1287,7 +1555,15 @@ class ShadowLabDesktop(QMainWindow):
         items = self.art_list.selectedItems()
         if not items: return
         name = items[0].text()
-        self.art_detail.setPlainText(f"Artifact: {name}\nLocal Path: {self.artifacts.get(name,'')}\nDownload URL: {self._url('/artifacts/' + name)}")
+        path = self.artifacts.get(name, "")
+        self.art_detail.setPlainText(f"Artifact: {name}\nLocal Path: {path}\nDownload URL: {self._url('/artifacts/' + name)}")
+        suffix = Path(path).suffix.lower()
+        if suffix == ".html" and Path(path).exists():
+            self.art_preview.setHtml(Path(path).read_text(encoding="utf-8", errors="ignore")[:6000])
+        elif suffix == ".json" and Path(path).exists():
+            self.art_preview.setPlainText(Path(path).read_text(encoding="utf-8", errors="ignore")[:4000])
+        else:
+            self.art_preview.setHtml(f"<h3>{name}</h3><p>No inline preview for this file type yet.</p>")
 
     def open_selected_artifact(self) -> None:
         items = self.art_list.selectedItems()
@@ -1300,6 +1576,42 @@ class ShadowLabDesktop(QMainWindow):
         try: result = self._post("/scenario/run", json=payload).json()
         except Exception as exc: self._show_error(self.scenario_out, "Scenario failed", exc); return
         self._show_json(self.scenario_out, result)
+
+    def _update_cpu_chart(self, rows) -> None:
+        self.cpu_series.clear()
+        if rows:
+            recent = self._sanitize_telemetry_rows(rows[-60:])
+            for idx, item in enumerate(recent):
+                self.cpu_series.append(idx, float(item.get("cpu", 0) or 0))
+            self.cpu_axis_x.setRange(0, max(1, len(recent) - 1))
+            max_cpu = max(float(item.get("cpu", 0) or 0) for item in recent)
+            self.cpu_axis_y.setRange(0, max(25, min(100, max_cpu + 10)))
+            avg_cpu = sum(float(item.get("cpu", 0) or 0) for item in recent) / max(1, len(recent))
+            self.cpu_chart.setTitle(f"Telemetry CPU Trend - {len(recent)} samples | avg {avg_cpu:.1f}%")
+        else:
+            self.cpu_axis_x.setRange(0, 1)
+            self.cpu_axis_y.setRange(0, 100)
+            self.cpu_chart.setTitle("Telemetry CPU Trend - no telemetry collected yet")
+
+    def _sanitize_telemetry_rows(self, rows) -> list[dict]:
+        cleaned: list[dict] = []
+        cpu_values: list[float] = []
+        for item in rows:
+            value = float(item.get("cpu", 0) or 0)
+            cpu_values.append(max(0.0, min(100.0, value)))
+        for index, item in enumerate(rows):
+            value = cpu_values[index]
+            if 0 < index < len(cpu_values) - 1:
+                prev_value = cpu_values[index - 1]
+                next_value = cpu_values[index + 1]
+                if value <= 1.0 and prev_value >= 8.0 and next_value >= 8.0:
+                    value = (prev_value + next_value) / 2.0
+                elif abs(value - prev_value) >= 20 and abs(value - next_value) >= 20 and abs(prev_value - next_value) <= 8:
+                    value = (prev_value + next_value) / 2.0
+            normalized = dict(item)
+            normalized["cpu"] = round(value, 2)
+            cleaned.append(normalized)
+        return cleaned
 
 
 def main() -> int:

@@ -27,7 +27,8 @@ class TelemetrySampler:
         if psutil is None:
             raise RuntimeError("psutil not installed. pip install psutil")
         self.proc = psutil.Process()
-        # Warm up CPU percent meter
+        # Warm up both host and process CPU meters so the first samples are usable.
+        psutil.cpu_percent(interval=None)
         self.proc.cpu_percent(interval=None)
         self.last_net_io = psutil.net_io_counters()
         self.last_sample_time = time.time()
@@ -52,11 +53,11 @@ class TelemetrySampler:
 
     def sample(self) -> dict:
         try:
-            cpu = self.proc.cpu_percent(interval=None)
+            cpu = psutil.cpu_percent(interval=None)
         except Exception:
             cpu = 0.0
         try:
-            mem_percent = self.proc.memory_percent()
+            mem_percent = psutil.virtual_memory().percent
         except Exception:
             mem_percent = 0.0
         try:

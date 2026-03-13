@@ -2,19 +2,25 @@
   title: Elevated CPU Burst
   severity: medium
   summary: Sustained CPU usage suggests intense execution or compression/encryption behavior.
+  attack_tactics: [Execution, Impact]
+  mitre_techniques: [T1059, T1486]
+  dedup_key: execution_cpu
   when:
     metric: avg_cpu
-    gte: 35
-  score: 0.18
+    gte: 75
+  score: 0.12
   tags: [execution, impact]
 
 - id: suspicious_thread_profile
   title: Suspicious Thread Profile
   severity: medium
   summary: High thread counts can indicate injection, unpacking, or aggressive multitasking.
+  attack_tactics: [Defense Evasion, Privilege Escalation]
+  mitre_techniques: [T1055]
+  dedup_key: injection_threads
   when:
     metric: avg_threads
-    gte: 45
+    gte: 70
   score: 0.12
   tags: [defense-evasion, execution]
 
@@ -22,19 +28,25 @@
   title: Network Fan-out
   severity: medium
   summary: Multiple simultaneous TCP connections can indicate beaconing or rapid lateral activity.
+  attack_tactics: [Command and Control, Lateral Movement]
+  mitre_techniques: [T1071, T1021]
+  dedup_key: network_fanout
   when:
     metric: avg_tcp_conns
-    gte: 6
-  score: 0.10
+    gte: 18
+  score: 0.06
   tags: [command-and-control, lateral-movement]
 
 - id: defender_hits
   title: Defender Activity Detected
   severity: high
   summary: Windows Defender recorded a meaningful volume of events during execution.
+  attack_tactics: [Defense Evasion, Discovery]
+  mitre_techniques: [T1562]
+  dedup_key: defender_hits
   when:
-    metric: defender_total
-    gte: 3
+    metric: defender_signal
+    gte: 2
   score: 0.25
   tags: [detection, antivirus]
 
@@ -42,9 +54,15 @@
   title: Sysmon Network and DNS Chain
   severity: high
   summary: Combined Sysmon network and DNS activity points to active communications behavior.
+  attack_tactics: [Command and Control, Discovery]
+  mitre_techniques: [T1071.001, T1046]
+  dedup_key: sysmon_net_dns
   when:
-    metric: sysmon_total
-    gte: 5
+    all:
+      - metric: sysmon_signal
+        gte: 10
+      - metric: avg_tcp_conns
+        gte: 6
   score: 0.20
   tags: [command-and-control, discovery]
 
@@ -52,6 +70,9 @@
   title: Data Transfer Pattern
   severity: medium
   summary: High outbound throughput with active connections may indicate exfiltration or staging.
+  attack_tactics: [Exfiltration]
+  mitre_techniques: [T1041]
+  dedup_key: exfil_pattern
   when:
     all:
       - metric: avg_bytes_sent_rate

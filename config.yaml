@@ -24,3 +24,21 @@ sysmon_ids:
     12: "Registry add"
     13: "Registry set"
     22: "DNS query"
+
+telemetry_fabric:
+    enabled: true
+    export_on_monitor: true
+    service_name: "shadowlab"
+    service_namespace: "shadowlab"
+    service_version: "2.1.0"
+    environment: "lab"
+    otlp_http_endpoint: "http://127.0.0.1:4318"
+    timeout_seconds: 5
+    headers: {}
+    runtime:
+        enabled: true
+        binary_path: "C:\\Users\\ulfat\\Downloads\\shadowlab-detection-lab\\build\\telemetry-fabric\\shadowlab-telemetry-fabric.exe"
+        config_path: "config\\telemetry-fabric-runtime.yaml"
+        zpages_url: "http://127.0.0.1:55679/debug/servicez"
+    build:
+        manifest_path: "config\\telemetry-fabric-builder.yaml"

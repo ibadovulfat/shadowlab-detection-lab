@@ -17,13 +17,17 @@ from pydantic import BaseModel, Field
 
 import database as db
 import monitor_core
-from report_export import generate_pdf
+from report_export import generate_html, generate_pdf
+from services.alerting_service import AlertingService
 from services.detection_service import DetectionOrchestrator
+from services.fleet_service import FleetService
+from services.graph_service import GraphService
 from services.incident_service import IncidentArtifactService
 from services.process_intelligence_service import ProcessIntelligenceService
 from services.response_service import ResponseOrchestrator
-from services.telemetry_service import TelemetryMonitoringService
-from threat_intelligence import check_file_malwarebazaar, check_ip, scan_process
+from services.telemetry_service import CollectorTelemetryBridge, TelemetryMonitoringService
+from services.timeline_service import TimelineService
+from threat_intelligence import check_file_malwarebazaar, check_file_vt, check_file_yaraify, check_ip, scan_process
 import yaml
 
 
@@ -42,7 +46,7 @@ db.init_db()
 
 app = FastAPI(
     title="ShadowLab API",
-    version="2.0.0",
+    version="2.1.0",
     description="Streamlit-free backend for the ShadowLab defensive operations platform.",
 )
 app.add_middleware(
@@ -57,6 +61,11 @@ process_intel_service = ProcessIntelligenceService()
 response_service = ResponseOrchestrator()
 detection_service = DetectionOrchestrator()
 artifact_service = IncidentArtifactService(OUT_DIR)
+alert_service = AlertingService()
+fleet_service = FleetService(db)
+timeline_service = TimelineService()
+graph_service = GraphService(OUT_DIR)
+collector_bridge = CollectorTelemetryBridge(config, OUT_DIR)
 honeypot_instance = None
 canary_instance = None
 canary_alerts: list[str] = []
@@ -76,7 +85,16 @@ class ScenarioRequest(BaseModel):
 
 
 class ProcessScanRequest(BaseModel):
-    api_key: str
+    virustotal_api_key: str | None = None
+    malwarebazaar_auth_key: str | None = None
+    yaraify_auth_key: str | None = None
+
+
+class ThreatHashLookupRequest(BaseModel):
+    file_hash: str
+    malwarebazaar_auth_key: str | None = None
+    yaraify_auth_key: str | None = None
+    virustotal_api_key: str | None = None
 
 
 class SnifferRequest(BaseModel):
@@ -86,6 +104,10 @@ class SnifferRequest(BaseModel):
 class StringScanRequest(BaseModel):
     min_length: int = Field(default=4, ge=3, le=20)
     patterns: list[str] = Field(default_factory=lambda: ["http", "powershell", "cmd", "token", "password", "api"])
+
+
+class YaraLookupRequest(BaseModel):
+    yaraify_auth_key: str | None = None
 
 
 class SandboxTraceRequest(BaseModel):
@@ -129,10 +151,22 @@ class AlertWebhookRequest(BaseModel):
 
 class TriageRequest(BaseModel):
     virustotal_api_key: str | None = None
-    yara_pack: str = "hybrid"
+    malwarebazaar_auth_key: str | None = None
+    yaraify_auth_key: str | None = None
     trace_duration: int = Field(default=3, ge=1, le=20)
     strings_min_length: int = Field(default=4, ge=3, le=20)
     strings_patterns: list[str] = Field(default_factory=lambda: ["http", "powershell", "cmd", "password"])
+
+
+class AgentRegistrationRequest(BaseModel):
+    host_id: str | None = None
+    host: str
+    platform: str
+    role: str = "agent"
+    ip_address: str = ""
+    agent_version: str = "2.1.0"
+    api_status: str = "online"
+    boot_time: float | None = None
 
 
 @app.get("/health")
@@ -178,23 +212,55 @@ def run_monitor(payload: MonitorRequest) -> dict[str, Any]:
             status="open",
             notes="\n".join(incident.notes),
             recommended_actions=json.dumps(incident.recommended_actions),
+            attack_chain=json.dumps(incident.attack_chain),
+            mitre_mapping=json.dumps(incident.mitre_techniques),
+            correlation_story=incident.correlation_story,
         )
+        fleet_service.register_local_host(conn)
         conn.close()
 
     if alert_webhook_url and incident.severity.lower() in {"high", "critical"}:
-        _send_webhook_alert(
-            alert_webhook_url,
-            {
-                "product": "ShadowLab",
-                "incident_id": incident.incident_id,
-                "severity": incident.severity,
-                "title": incident.title,
-                "summary": incident.summary,
-            },
+        conn = db.create_connection()
+        if conn:
+            try:
+                alert_result = alert_service.dispatch(
+                    alert_webhook_url,
+                    {
+                        "product": "ShadowLab",
+                        "incident_id": incident.incident_id,
+                        "severity": incident.severity,
+                        "title": incident.title,
+                        "summary": incident.summary,
+                        "findings": [finding.to_dict() for finding in incident.findings],
+                    },
+                )
+                db.log_alert(
+                    conn,
+                    alert_webhook_url,
+                    _alert_destination_type(alert_webhook_url),
+                    incident.severity,
+                    incident.title,
+                    alert_result.status,
+                    alert_result.detail,
+                )
+            finally:
+                conn.close()
+
+    collector_export = {"enabled": False}
+    collector_config = config.get("telemetry_fabric") or {}
+    if collector_bridge.is_enabled() and bool(collector_config.get("export_on_monitor", True)):
+        collector_export = collector_bridge.export_monitor_session(
+            telemetry_rows,
+            defender_summary,
+            sysmon_summary,
+            final,
+            incident.to_dict(),
         )
+        _log_collector_exports(collector_export)
 
     return {
         "telemetry_count": len(telemetry_rows),
+        "telemetry_rows": telemetry_rows,
         "timeline_scores": timeline_scores,
         "event_summaries": {
             "defender": defender_summary,
@@ -202,6 +268,7 @@ def run_monitor(payload: MonitorRequest) -> dict[str, Any]:
         },
         "final_score": final,
         "incident": incident.to_dict(),
+        "collector_export": collector_export,
         "artifacts": _artifact_manifest(),
     }
 
@@ -289,22 +356,20 @@ def process_strings(pid: int, payload: StringScanRequest) -> dict[str, Any]:
     }
 
 
-@app.get("/processes/{pid}/yara")
-def process_yara(pid: int, pack: str = "hybrid") -> dict[str, Any]:
-    import plugins.yara_scanner as yara_scanner
-
+@app.post("/processes/{pid}/yara")
+def process_yara(pid: int, payload: YaraLookupRequest) -> dict[str, Any]:
     profile = process_intel_service.profile_process(pid)
-    exe_path = profile.get("exe")
-    rules = yara_scanner.compile_rules(pack=pack)
-    matches = yara_scanner.scan_file(exe_path, rules) if exe_path else []
+    file_hash = profile.get("sha256")
+    if not file_hash:
+        raise HTTPException(status_code=400, detail="Process hash unavailable for YARAify lookup")
+    result = check_file_yaraify(file_hash, payload.yaraify_auth_key)
     return {
         "pid": pid,
-        "exe": exe_path,
-        "pack": pack,
-        "yara_available": bool(yara_scanner.YARA_AVAILABLE),
-        "available_packs": yara_scanner.available_packs(),
-        "rules_loaded": bool(rules),
-        "matches": matches,
+        "exe": profile.get("exe"),
+        "hash": file_hash,
+        "provider": "YARAify",
+        "result": result,
+        "matches": result.get("matched_rules", []) if isinstance(result, dict) else [],
     }
 
 
@@ -331,7 +396,12 @@ def scan_single_process(pid: int, payload: ProcessScanRequest) -> dict[str, Any]
     target = next((row for row in process_rows if int(row.get("pid", -1)) == pid), None)
     if not target:
         raise HTTPException(status_code=404, detail="Process not found")
-    return scan_process(target, payload.api_key)
+    return scan_process(
+        target,
+        virustotal_api_key=payload.virustotal_api_key,
+        malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
+        yaraify_auth_key=payload.yaraify_auth_key,
+    )
 
 
 @app.get("/processes/{pid}/memory-analysis")
@@ -383,7 +453,49 @@ def remediate_persistence(payload: PersistenceRemediationRequest) -> dict[str, A
     result = persistence_scanner.remediate_persistence_item(payload.item_type, payload.path, payload.name)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("message", "Remediation failed"))
+    conn = db.create_connection()
+    if conn:
+        try:
+            remediation_id = db.log_remediation(
+                conn,
+                payload.item_type,
+                payload.path,
+                backup_path=result.get("backup_path", ""),
+                rollback_data=json.dumps(result.get("rollback_data", {})),
+                status="applied",
+            )
+        finally:
+            conn.close()
+        result["remediation_id"] = remediation_id
     return result
+
+
+@app.post("/persistence/rollback/{remediation_id}")
+def rollback_persistence(remediation_id: int) -> dict[str, Any]:
+    import plugins.persistence as persistence_scanner
+
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_remediations(conn)
+        row = frame[frame["id"] == remediation_id]
+        if row.empty:
+            raise HTTPException(status_code=404, detail="Remediation record not found")
+        item = row.iloc[0].to_dict()
+        rollback_data = json.loads(item.get("rollback_data") or "{}")
+        result = persistence_scanner.rollback_persistence_item(
+            item.get("item_type", ""),
+            item.get("target", ""),
+            backup_path=item.get("backup_path", ""),
+            rollback_data=rollback_data,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("message", "Rollback failed"))
+        db.update_remediation_status(conn, remediation_id, "rolled_back")
+        return {"status": "rolled_back", "remediation_id": remediation_id, "result": result}
+    finally:
+        conn.close()
 
 
 @app.get("/threat-intel/ip/{ip}")
@@ -397,6 +509,17 @@ def threat_hash_lookup(file_hash: str) -> dict[str, Any]:
     return {
         "hash": file_hash,
         "malwarebazaar": check_file_malwarebazaar(file_hash),
+        "yaraify": check_file_yaraify(file_hash),
+    }
+
+
+@app.post("/threat-intel/hash/lookup")
+def threat_hash_lookup_with_auth(payload: ThreatHashLookupRequest) -> dict[str, Any]:
+    return {
+        "hash": payload.file_hash,
+        "malwarebazaar": check_file_malwarebazaar(payload.file_hash, payload.malwarebazaar_auth_key),
+        "yaraify": check_file_yaraify(payload.file_hash, payload.yaraify_auth_key),
+        "virustotal": check_file_vt(payload.file_hash, payload.virustotal_api_key),
     }
 
 
@@ -431,6 +554,30 @@ def incidents() -> list[dict[str, Any]]:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
         frame = db.get_incidents(conn)
+    finally:
+        conn.close()
+    return frame.to_dict(orient="records")
+
+
+@app.get("/history/alerts")
+def alert_history() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_alerts(conn)
+    finally:
+        conn.close()
+    return frame.to_dict(orient="records")
+
+
+@app.get("/history/remediations")
+def remediation_history() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_remediations(conn)
     finally:
         conn.close()
     return frame.to_dict(orient="records")
@@ -504,37 +651,108 @@ def delete_quarantine(quarantine_id: int) -> dict[str, Any]:
 
 @app.get("/timeline")
 def timeline() -> list[dict[str, Any]]:
-    timeline_items: list[dict[str, Any]] = []
     conn = db.create_connection()
-    if conn:
-        try:
-            for row in db.get_response_logs(conn).to_dict(orient="records")[:50]:
-                timeline_items.append({"time": row.get("timestamp"), "type": "response", "severity": "high" if row.get("action") == "KILL" else "medium", "title": row.get("action"), "details": row})
-            for row in db.get_incidents(conn).to_dict(orient="records")[:30]:
-                timeline_items.append({"time": row.get("created_at"), "type": "incident", "severity": row.get("severity"), "title": row.get("title"), "details": row})
-            for row in db.get_historical_data(conn).to_dict(orient="records")[-40:]:
-                timeline_items.append({"time": row.get("ts"), "type": "telemetry", "severity": "low", "title": f"CPU {row.get('cpu')}%", "details": row})
-        finally:
-            conn.close()
-    timeline_items.sort(key=lambda item: str(item.get("time")), reverse=True)
-    return timeline_items
+    if not conn:
+        return []
+    try:
+        return timeline_service.build(
+            telemetry_rows=db.get_historical_data(conn).to_dict(orient="records")[-100:],
+            response_rows=db.get_response_logs(conn).to_dict(orient="records")[:100],
+            incident_rows=db.get_incidents(conn).to_dict(orient="records")[:100],
+            alert_rows=db.get_alerts(conn).to_dict(orient="records")[:100],
+            remediation_rows=db.get_remediations(conn).to_dict(orient="records")[:100],
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/timeline/graph")
+def timeline_graph() -> dict[str, Any]:
+    items = timeline()
+    return timeline_service.build_graph(items)
 
 
 @app.get("/hosts")
 def hosts() -> list[dict[str, Any]]:
-    boot_time = None
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        import psutil
-        boot_time = psutil.boot_time()
+        return fleet_service.list_hosts(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/graph/entity-map")
+def entity_map(pid: int | None = None) -> dict[str, Any]:
+    conn = db.create_connection()
+    incidents: list[dict[str, Any]] = []
+    hosts_data: list[dict[str, Any]] = []
+    if conn:
+        try:
+            incidents = db.get_incidents(conn).to_dict(orient="records")
+            hosts_data = fleet_service.list_hosts(conn)
+        finally:
+            conn.close()
+    processes = process_intel_service.snapshot_processes(include_deep_fields=False)
+    connections = monitor_core.get_network_connections()
+    try:
+        import plugins.persistence as persistence_scanner
+
+        persistence_items = persistence_scanner.get_persistence_items_fast()
     except Exception:
-        boot_time = None
-    return [{"host": socket.gethostname(), "platform": platform.platform(), "boot_time": boot_time, "api_status": "online", "role": "local"}]
+        persistence_items = []
+    return graph_service.build_entity_graph(
+        hosts=hosts_data,
+        processes=processes,
+        connections=connections,
+        incidents=incidents,
+        persistence_items=persistence_items,
+        pid=pid,
+    )
+
+
+@app.get("/graph/entity-map/html")
+def entity_map_html(pid: int | None = None):
+    graph = entity_map(pid=pid)
+    target = Path(graph["html_path"])
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Graph HTML not found")
+    return FileResponse(target)
+
+
+@app.post("/agents/register")
+def register_agent(payload: AgentRegistrationRequest) -> dict[str, Any]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        return fleet_service.register_agent(conn, payload.model_dump())
+    finally:
+        conn.close()
 
 
 @app.post("/alerts/test")
 def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
-    _send_webhook_alert(payload.webhook_url, {"product": "ShadowLab", "message": payload.message, "severity": "info"})
-    return {"status": "sent", "webhook_url": payload.webhook_url}
+    result = alert_service.dispatch(
+        payload.webhook_url,
+        {"product": "ShadowLab", "title": "ShadowLab test alert", "summary": payload.message, "severity": "info"},
+    )
+    conn = db.create_connection()
+    if conn:
+        try:
+            db.log_alert(
+                conn,
+                payload.webhook_url,
+                _alert_destination_type(payload.webhook_url),
+                "info",
+                "ShadowLab test alert",
+                result.status,
+                result.detail,
+            )
+        finally:
+            conn.close()
+    return result.to_dict()
 
 
 @app.post("/alerts/configure")
@@ -551,24 +769,31 @@ def auto_triage(pid: int, payload: TriageRequest) -> dict[str, Any]:
     import plugins.memory_forensics as memory_forensics
     import plugins.sandbox as sandbox
     import plugins.strings_analyser as strings_analyser
-    import plugins.yara_scanner as yara_scanner
 
     profile = process_intel_service.profile_process(pid)
     exe_path = profile.get("exe")
     strings = strings_analyser.extract_strings(exe_path, payload.strings_min_length)
     hits = strings_analyser.search_patterns(strings, payload.strings_patterns)
-    yara_rules = yara_scanner.compile_rules(payload.yara_pack)
-    yara_matches = yara_scanner.scan_file(exe_path, yara_rules) if exe_path else []
+    yara_lookup = check_file_yaraify(profile.get("sha256", ""), payload.yaraify_auth_key) if profile.get("sha256") else {
+        "status": "skipped",
+        "reason": "Process hash unavailable",
+    }
+    yara_matches = yara_lookup.get("matched_rules", []) if isinstance(yara_lookup, dict) else []
     trace = sandbox.ProcessTracer(pid).trace(duration=payload.trace_duration, interval=0.5)
     analyst = ai_analyst.AIAnalyst().analyze_process(profile)
     intel = None
-    if payload.virustotal_api_key:
-        intel = scan_process({"exe": exe_path, "pid": pid, "name": profile.get("name")}, payload.virustotal_api_key)
+    if payload.virustotal_api_key or payload.malwarebazaar_auth_key or payload.yaraify_auth_key:
+        intel = scan_process(
+            {"exe": exe_path, "pid": pid, "name": profile.get("name")},
+            virustotal_api_key=payload.virustotal_api_key,
+            malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
+            yaraify_auth_key=payload.yaraify_auth_key,
+        )
     return {
         "profile": profile,
         "internals_summary": {"handles": len(internals.get_process_handles(pid)), "modules": len(internals.get_process_libs(pid))},
         "strings": {"total": len(strings), "hits": hits[:25]},
-        "yara": {"pack": payload.yara_pack, "matches": yara_matches},
+        "yara": {"provider": "YARAify", "result": yara_lookup, "matches": yara_matches},
         "sandbox": trace,
         "memory": memory_forensics.run_analysis(pid, profile.get("name", "process")),
         "ai_analyst": analyst,
@@ -607,11 +832,66 @@ def list_artifacts() -> dict[str, str]:
     return _artifact_manifest()
 
 
+@app.get("/integrations/telemetry-fabric/status")
+def telemetry_fabric_status() -> dict[str, Any]:
+    return collector_bridge.collector_status()
+
+
+@app.post("/integrations/telemetry-fabric/start")
+def start_telemetry_fabric() -> dict[str, Any]:
+    result = collector_bridge.start_collector()
+    _log_single_collector_export("collector_start", result)
+    return result
+
+
+@app.post("/integrations/telemetry-fabric/stop")
+def stop_telemetry_fabric() -> dict[str, Any]:
+    result = collector_bridge.stop_collector()
+    _log_single_collector_export("collector_stop", result)
+    return result
+
+
+@app.post("/integrations/telemetry-fabric/export/incidents/{incident_id}")
+def resend_incident_to_telemetry_fabric(incident_id: str) -> dict[str, Any]:
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        incident = db.get_incident_by_id(conn, incident_id)
+    finally:
+        conn.close()
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    result = collector_bridge.export_incident_record(_normalize_incident_row(incident))
+    _log_single_collector_export("incident_log", result, incident_id=incident_id)
+    return result
+
+
+@app.get("/integrations/telemetry-fabric/exports")
+def list_telemetry_fabric_exports() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_integration_exports(conn)
+    finally:
+        conn.close()
+    return frame.fillna("").to_dict(orient="records")
+
+
 @app.get("/artifacts/{filename}")
 def download_artifact(filename: str):
     target = OUT_DIR / filename
     if not target.exists():
         raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(target)
+
+
+@app.get("/reports/html")
+def html_report():
+    target = OUT_DIR / "ShadowLab_Report.html"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="HTML report not found")
     return FileResponse(target)
 
 
@@ -782,6 +1062,7 @@ def _write_monitor_artifacts(
     (OUT_DIR / "score.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
     artifact_service.write_incident_bundle(incident, final, telemetry_rows)
     generate_pdf(OUT_DIR, author="Ulfat Ibadov", sections=report_sections)
+    generate_html(OUT_DIR, author="Ulfat Ibadov")
 
 
 def _artifact_manifest() -> dict[str, str]:
@@ -792,6 +1073,9 @@ def _artifact_manifest() -> dict[str, str]:
         "score.json",
         "incident_bundle.json",
         "ShadowLab_Report.pdf",
+        "ShadowLab_Report.html",
+        "ShadowLab_EntityGraph.html",
+        "ShadowLab_EntityGraph.json",
     ]
     return {
         name: str(OUT_DIR / name)
@@ -812,9 +1096,55 @@ def _load_scenario_runner():
 
 
 def _send_webhook_alert(webhook_url: str, payload: dict[str, Any]) -> None:
-    import requests
+    alert_service.dispatch(webhook_url, payload)
 
+
+def _alert_destination_type(webhook_url: str) -> str:
+    if "discord.com/api/webhooks" in webhook_url:
+        return "discord"
+    if "hooks.slack.com" in webhook_url:
+        return "slack"
+    if "api.telegram.org" in webhook_url:
+        return "telegram"
+    return "webhook"
+
+
+def _log_collector_exports(result: dict[str, Any]) -> None:
+    for export_type, export_result in (result.get("exports") or {}).items():
+        _log_single_collector_export(export_type, export_result)
+
+
+def _log_single_collector_export(export_type: str, export_result: dict[str, Any], incident_id: str = "") -> None:
+    conn = db.create_connection()
+    if conn is None:
+        return
     try:
-        requests.post(webhook_url, json=payload, timeout=10)
-    except Exception:
-        pass
+        target = export_result.get("endpoint") or export_result.get("target") or collector_bridge.collector_status().get("otlp_http_endpoint", "")
+        if incident_id:
+            target = f"{target} incident={incident_id}".strip()
+        db.log_integration_export(
+            conn,
+            "shadowlab-telemetry-fabric",
+            export_type,
+            str(target),
+            str(export_result.get("status", "unknown")),
+            str(export_result.get("detail", "")),
+        )
+    finally:
+        conn.close()
+
+
+def _normalize_incident_row(incident: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(incident)
+    for key in ("recommended_actions", "attack_chain", "mitre_mapping"):
+        value = normalized.get(key, "")
+        if isinstance(value, str):
+            try:
+                normalized[key] = json.loads(value) if value else []
+            except json.JSONDecodeError:
+                normalized[key] = [value] if value else []
+    notes = normalized.get("notes", "")
+    if isinstance(notes, str):
+        normalized["notes"] = [line for line in notes.splitlines() if line]
+    normalized["mitre_techniques"] = normalized.get("mitre_mapping", [])
+    return normalized

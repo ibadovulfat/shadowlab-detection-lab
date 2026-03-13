@@ -45,6 +45,8 @@ class DetectionFinding:
     summary: str
     evidence: dict[str, Any] = field(default_factory=dict)
     mitre_techniques: list[str] = field(default_factory=list)
+    attack_tactics: list[str] = field(default_factory=list)
+    dedup_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +64,9 @@ class IncidentRecord:
     notes: list[str] = field(default_factory=list)
     recommended_actions: list[str] = field(default_factory=list)
     telemetry_count: int = 0
+    attack_chain: list[str] = field(default_factory=list)
+    mitre_techniques: list[str] = field(default_factory=list)
+    correlation_story: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

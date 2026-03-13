@@ -2,6 +2,10 @@
 
 This folder contains the PySide6 desktop client for the local ShadowLab FastAPI backend.
 
+For the broader operator workflow and feature usage across backend, desktop, telemetry fabric, remediation, and artifacts, also see:
+
+- `docs/USAGE_GUIDE.md`
+
 Current features:
 
 - backend health check
@@ -25,6 +29,13 @@ Run locally:
 
 ```powershell
 python app.py
+python desktop\main.py
+```
+
+Telemetry-aware workflow:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/integrations/telemetry-fabric/start
 python desktop\main.py
 ```
 

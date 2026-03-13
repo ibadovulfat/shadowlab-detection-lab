@@ -33,7 +33,9 @@ class RuleEngine:
                         score=float(rule.get("score", 0.0)),
                         summary=str(rule.get("summary", "")),
                         evidence={"metrics": metrics},
-                        mitre_techniques=list(rule.get("tags", [])),
+                        mitre_techniques=list(rule.get("mitre_techniques", [])),
+                        attack_tactics=list(rule.get("attack_tactics", [])),
+                        dedup_key=str(rule.get("dedup_key", rule.get("id", "unknown_rule"))),
                     )
                 )
         return findings
