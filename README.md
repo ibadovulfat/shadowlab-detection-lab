@@ -96,6 +96,15 @@ python app.py
 
 API starts on `http://127.0.0.1:8000`.
 
+Recommended secure local launch:
+
+```bash
+export SHADOWLAB_API_KEY="change-me"
+export SHADOWLAB_REQUIRE_AUTH=true
+export SHADOWLAB_ALLOWED_ORIGINS="http://127.0.0.1,http://localhost"
+python app.py
+```
+
 Detailed operational usage:
 
 ```text
@@ -254,6 +263,12 @@ Runtime configuration:
 
 - `SHADOWLAB_HOST`
 - `SHADOWLAB_PORT`
+- `SHADOWLAB_API_KEY`
+- `SHADOWLAB_REQUIRE_AUTH`
+- `SHADOWLAB_ALLOWED_ORIGINS`
+- `SHADOWLAB_ENABLE_DANGEROUS_ACTIONS`
+- `SHADOWLAB_ENABLE_NETWORK_WARFARE`
+- `SHADOWLAB_ALLOW_FILE_DELETE`
 - `SHADOWLAB_OTLP_HTTP_ENDPOINT`
 - `SHADOWLAB_OTELCOL_BIN`
 - `SHADOWLAB_OTELCOL_CONFIG`

@@ -9,7 +9,9 @@ DB_FILE = "shadowlab.db"
 def create_connection():
     conn = None
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
     except sqlite3.Error as exc:
         print(exc)
     return conn

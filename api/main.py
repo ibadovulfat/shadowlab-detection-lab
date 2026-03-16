@@ -9,14 +9,23 @@ import socket
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import database as db
 import monitor_core
+from api.security import (
+    ensure_dangerous_actions_enabled,
+    ensure_delete_enabled,
+    ensure_network_warfare_enabled,
+    require_api_key,
+    safe_child_path,
+    security_settings,
+)
 from report_export import generate_html, generate_pdf
 from services.alerting_service import AlertingService
 from services.detection_service import DetectionOrchestrator
@@ -48,13 +57,14 @@ app = FastAPI(
     title="ShadowLab API",
     version="2.1.0",
     description="Streamlit-free backend for the ShadowLab defensive operations platform.",
+    dependencies=[Depends(require_api_key)],
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=security_settings.allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 process_intel_service = ProcessIntelligenceService()
@@ -174,9 +184,15 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/config")
+@app.get("/config", dependencies=[Depends(require_api_key)])
 def get_config() -> dict[str, Any]:
-    return config
+    redacted = json.loads(json.dumps(config))
+    if isinstance(redacted.get("virustotal_api_key"), str):
+        redacted["virustotal_api_key"] = "***redacted***" if redacted["virustotal_api_key"] else ""
+    telemetry_fabric = redacted.get("telemetry_fabric") or {}
+    if isinstance(telemetry_fabric.get("headers"), dict) and telemetry_fabric.get("headers"):
+        telemetry_fabric["headers"] = {key: "***redacted***" for key in telemetry_fabric["headers"].keys()}
+    return redacted
 
 
 @app.post("/monitor/run")
@@ -411,7 +427,7 @@ def memory_analysis(pid: int, process_name: str) -> dict[str, Any]:
     return memory_forensics.run_analysis(pid, process_name)
 
 
-@app.post("/processes/{pid}/actions/{action}")
+@app.post("/processes/{pid}/actions/{action}", dependencies=[Depends(ensure_dangerous_actions_enabled)])
 def process_action(pid: int, action: str, process_name: str) -> dict[str, Any]:
     action_name = action.lower()
     profile = process_intel_service.profile_process(pid)
@@ -446,7 +462,7 @@ def persistence_items() -> list[dict[str, Any]]:
     return persistence_scanner.get_persistence_items()
 
 
-@app.post("/persistence/remediate")
+@app.post("/persistence/remediate", dependencies=[Depends(ensure_dangerous_actions_enabled)])
 def remediate_persistence(payload: PersistenceRemediationRequest) -> dict[str, Any]:
     import plugins.persistence as persistence_scanner
 
@@ -470,7 +486,7 @@ def remediate_persistence(payload: PersistenceRemediationRequest) -> dict[str, A
     return result
 
 
-@app.post("/persistence/rollback/{remediation_id}")
+@app.post("/persistence/rollback/{remediation_id}", dependencies=[Depends(ensure_dangerous_actions_enabled)])
 def rollback_persistence(remediation_id: int) -> dict[str, Any]:
     import plugins.persistence as persistence_scanner
 
@@ -607,7 +623,7 @@ def quarantine_items() -> list[dict[str, Any]]:
     return frame.to_dict(orient="records")
 
 
-@app.post("/quarantine/{quarantine_id}/restore")
+@app.post("/quarantine/{quarantine_id}/restore", dependencies=[Depends(ensure_dangerous_actions_enabled)])
 def restore_quarantine(quarantine_id: int) -> dict[str, Any]:
     conn = db.create_connection()
     if not conn:
@@ -629,7 +645,7 @@ def restore_quarantine(quarantine_id: int) -> dict[str, Any]:
         conn.close()
 
 
-@app.delete("/quarantine/{quarantine_id}")
+@app.delete("/quarantine/{quarantine_id}", dependencies=[Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
 def delete_quarantine(quarantine_id: int) -> dict[str, Any]:
     conn = db.create_connection()
     if not conn:
@@ -732,10 +748,11 @@ def register_agent(payload: AgentRegistrationRequest) -> dict[str, Any]:
         conn.close()
 
 
-@app.post("/alerts/test")
+@app.post("/alerts/test", dependencies=[Depends(ensure_dangerous_actions_enabled)])
 def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
+    webhook_url = _validate_webhook_url(payload.webhook_url)
     result = alert_service.dispatch(
-        payload.webhook_url,
+        webhook_url,
         {"product": "ShadowLab", "title": "ShadowLab test alert", "summary": payload.message, "severity": "info"},
     )
     conn = db.create_connection()
@@ -743,8 +760,8 @@ def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
         try:
             db.log_alert(
                 conn,
-                payload.webhook_url,
-                _alert_destination_type(payload.webhook_url),
+                webhook_url,
+                _alert_destination_type(webhook_url),
                 "info",
                 "ShadowLab test alert",
                 result.status,
@@ -755,10 +772,10 @@ def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
     return result.to_dict()
 
 
-@app.post("/alerts/configure")
+@app.post("/alerts/configure", dependencies=[Depends(ensure_dangerous_actions_enabled)])
 def configure_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
     global alert_webhook_url
-    alert_webhook_url = payload.webhook_url
+    alert_webhook_url = _validate_webhook_url(payload.webhook_url)
     return {"status": "configured", "webhook_url": alert_webhook_url}
 
 
@@ -881,7 +898,7 @@ def list_telemetry_fabric_exports() -> list[dict[str, Any]]:
 
 @app.get("/artifacts/{filename}")
 def download_artifact(filename: str):
-    target = OUT_DIR / filename
+    target = safe_child_path(OUT_DIR, filename, allowed_suffixes={".csv", ".json", ".html", ".pdf"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(target)
@@ -982,16 +999,16 @@ def list_evidence() -> dict[str, Any]:
     return {"items": collector.list_evidence()}
 
 
-@app.delete("/evidence/{filename}")
+@app.delete("/evidence/{filename}", dependencies=[Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
 def delete_evidence(filename: str) -> dict[str, str]:
-    target = BASE_DIR / "evidence_locker" / filename
+    target = safe_child_path(BASE_DIR / "evidence_locker", filename, allowed_suffixes={".png", ".jpg", ".jpeg", ".webp"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="Evidence file not found")
     target.unlink()
     return {"status": "deleted", "path": str(target)}
 
 
-@app.post("/network/warfare/scan")
+@app.post("/network/warfare/scan", dependencies=[Depends(ensure_network_warfare_enabled)])
 def network_warfare_scan(payload: NetworkScanRequest) -> dict[str, Any]:
     import plugins.net_warfare as net_warfare
 
@@ -1000,7 +1017,7 @@ def network_warfare_scan(payload: NetworkScanRequest) -> dict[str, Any]:
     return {"devices": network_warfare_instance.scan_network(payload.ip_range), "ip_range": payload.ip_range}
 
 
-@app.post("/network/warfare/block")
+@app.post("/network/warfare/block", dependencies=[Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
 def network_warfare_block(payload: BlockerRequest) -> dict[str, Any]:
     import plugins.net_warfare as net_warfare
 
@@ -1010,7 +1027,7 @@ def network_warfare_block(payload: BlockerRequest) -> dict[str, Any]:
     return {"status": "started", "target_ip": payload.target_ip, "gateway_ip": payload.gateway_ip}
 
 
-@app.delete("/network/warfare/block")
+@app.delete("/network/warfare/block", dependencies=[Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
 def network_warfare_stop() -> dict[str, str]:
     if network_warfare_instance is not None:
         network_warfare_instance.stop_blocker()
@@ -1107,6 +1124,15 @@ def _alert_destination_type(webhook_url: str) -> str:
     if "api.telegram.org" in webhook_url:
         return "telegram"
     return "webhook"
+
+
+def _validate_webhook_url(webhook_url: str) -> str:
+    parsed = urlparse(webhook_url.strip())
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Webhook URL must be a valid http(s) URL")
+    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
+        raise HTTPException(status_code=400, detail="Plain HTTP webhooks are restricted to localhost")
+    return webhook_url.strip()
 
 
 def _log_collector_exports(result: dict[str, Any]) -> None:
