@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 from dataclasses import dataclass
@@ -12,7 +13,9 @@ from fastapi import Depends, Header, HTTPException, Request, status
 @dataclass(frozen=True)
 class SecuritySettings:
     api_key: str
+    api_key_sha256: str
     api_keys: dict[str, str]
+    api_keys_sha256: dict[str, str]
     auth_required: bool
     enable_dangerous_actions: bool
     enable_network_warfare: bool
@@ -60,15 +63,19 @@ def _parse_role_keys(raw: str | None) -> dict[str, str]:
 
 def load_security_settings() -> SecuritySettings:
     api_key = os.environ.get("SHADOWLAB_API_KEY", "")
+    api_key_sha256 = os.environ.get("SHADOWLAB_API_KEY_SHA256", "").strip().lower()
     api_keys = _parse_role_keys(os.environ.get("SHADOWLAB_API_KEYS"))
-    auth_required = _as_bool(os.environ.get("SHADOWLAB_REQUIRE_AUTH"), bool(api_key or api_keys))
+    api_keys_sha256 = _parse_role_keys(os.environ.get("SHADOWLAB_API_KEYS_SHA256"))
+    auth_required = _as_bool(os.environ.get("SHADOWLAB_REQUIRE_AUTH"), bool(api_key or api_key_sha256 or api_keys or api_keys_sha256))
     enable_dangerous_actions = _as_bool(os.environ.get("SHADOWLAB_ENABLE_DANGEROUS_ACTIONS"), False)
     enable_network_warfare = _as_bool(os.environ.get("SHADOWLAB_ENABLE_NETWORK_WARFARE"), False)
     allow_destructive_file_delete = _as_bool(os.environ.get("SHADOWLAB_ALLOW_FILE_DELETE"), False)
     allowed_origins = _normalize_origins(os.environ.get("SHADOWLAB_ALLOWED_ORIGINS"))
     return SecuritySettings(
         api_key=api_key,
+        api_key_sha256=api_key_sha256,
         api_keys=api_keys,
+        api_keys_sha256=api_keys_sha256,
         auth_required=auth_required,
         enable_dangerous_actions=enable_dangerous_actions,
         enable_network_warfare=enable_network_warfare,
@@ -152,14 +159,31 @@ def safe_child_path(base_dir: Path, filename: str, allowed_suffixes: Iterable[st
 
 
 def _resolve_context(provided: str) -> SecurityContext | None:
+    provided_sha256 = _sha256_hex(provided)
+
+    if security_settings.api_keys_sha256:
+        for role, token_sha256 in security_settings.api_keys_sha256.items():
+            if hmac.compare_digest(provided_sha256, token_sha256.lower()):
+                return SecurityContext(token=provided, role=role)
+        return None
+
     if security_settings.api_keys:
         for role, token in security_settings.api_keys.items():
             if hmac.compare_digest(provided, token):
                 return SecurityContext(token=provided, role=role)
         return None
+
+    if security_settings.api_key_sha256 and hmac.compare_digest(provided_sha256, security_settings.api_key_sha256.lower()):
+        return SecurityContext(token=provided, role=DEFAULT_ROLE)
+
     if security_settings.api_key and hmac.compare_digest(provided, security_settings.api_key):
         return SecurityContext(token=provided, role=DEFAULT_ROLE)
+
     return None
+
+
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
