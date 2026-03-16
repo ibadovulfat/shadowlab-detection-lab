@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 
 @dataclass(frozen=True)
 class SecuritySettings:
     api_key: str
+    api_keys: dict[str, str]
     auth_required: bool
     enable_dangerous_actions: bool
     enable_network_warfare: bool
@@ -19,7 +20,14 @@ class SecuritySettings:
     allowed_origins: list[str]
 
 
+@dataclass(frozen=True)
+class SecurityContext:
+    token: str
+    role: str
+
+
 TRUE_VALUES = {"1", "true", "yes", "on"}
+DEFAULT_ROLE = "admin"
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -34,15 +42,33 @@ def _normalize_origins(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _parse_role_keys(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    parsed: dict[str, str] = {}
+    for chunk in raw.split(","):
+        item = chunk.strip()
+        if not item or ":" not in item:
+            continue
+        role, token = item.split(":", 1)
+        role = role.strip().lower()
+        token = token.strip()
+        if role and token:
+            parsed[role] = token
+    return parsed
+
+
 def load_security_settings() -> SecuritySettings:
     api_key = os.environ.get("SHADOWLAB_API_KEY", "")
-    auth_required = _as_bool(os.environ.get("SHADOWLAB_REQUIRE_AUTH"), bool(api_key))
+    api_keys = _parse_role_keys(os.environ.get("SHADOWLAB_API_KEYS"))
+    auth_required = _as_bool(os.environ.get("SHADOWLAB_REQUIRE_AUTH"), bool(api_key or api_keys))
     enable_dangerous_actions = _as_bool(os.environ.get("SHADOWLAB_ENABLE_DANGEROUS_ACTIONS"), False)
     enable_network_warfare = _as_bool(os.environ.get("SHADOWLAB_ENABLE_NETWORK_WARFARE"), False)
     allow_destructive_file_delete = _as_bool(os.environ.get("SHADOWLAB_ALLOW_FILE_DELETE"), False)
     allowed_origins = _normalize_origins(os.environ.get("SHADOWLAB_ALLOWED_ORIGINS"))
     return SecuritySettings(
         api_key=api_key,
+        api_keys=api_keys,
         auth_required=auth_required,
         enable_dangerous_actions=enable_dangerous_actions,
         enable_network_warfare=enable_network_warfare,
@@ -58,16 +84,33 @@ def require_api_key(
     request: Request,
     x_api_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
-) -> None:
+) -> SecurityContext:
     if request.url.path in {"/health"}:
-        return
+        return SecurityContext(token="", role="public")
     if not security_settings.auth_required:
-        return
+        return SecurityContext(token="", role="admin")
+
     provided = x_api_key or _extract_bearer_token(authorization)
-    if not provided or not security_settings.api_key:
+    if not provided:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    if not hmac.compare_digest(provided, security_settings.api_key):
+
+    context = _resolve_context(provided)
+    if context is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+    request.state.security_context = context
+    return context
+
+
+def require_analyst_or_admin(context: SecurityContext = Depends(require_api_key)) -> SecurityContext:
+    if context.role not in {"analyst", "admin"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analyst or admin role required")
+    return context
+
+
+def require_admin(context: SecurityContext = Depends(require_api_key)) -> SecurityContext:
+    if context.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    return context
 
 
 def ensure_dangerous_actions_enabled() -> None:
@@ -106,6 +149,17 @@ def safe_child_path(base_dir: Path, filename: str, allowed_suffixes: Iterable[st
         if suffix not in {item.lower() for item in allowed_suffixes}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File type not allowed")
     return target
+
+
+def _resolve_context(provided: str) -> SecurityContext | None:
+    if security_settings.api_keys:
+        for role, token in security_settings.api_keys.items():
+            if hmac.compare_digest(provided, token):
+                return SecurityContext(token=provided, role=role)
+        return None
+    if security_settings.api_key and hmac.compare_digest(provided, security_settings.api_key):
+        return SecurityContext(token=provided, role=DEFAULT_ROLE)
+    return None
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

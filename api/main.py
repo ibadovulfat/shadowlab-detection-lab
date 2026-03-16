@@ -22,6 +22,8 @@ from api.security import (
     ensure_dangerous_actions_enabled,
     ensure_delete_enabled,
     ensure_network_warfare_enabled,
+    require_admin,
+    require_analyst_or_admin,
     require_api_key,
     safe_child_path,
     security_settings,
@@ -66,6 +68,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 
 process_intel_service = ProcessIntelligenceService()
 response_service = ResponseOrchestrator()
@@ -184,7 +201,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/config", dependencies=[Depends(require_api_key)])
+@app.get("/config", dependencies=[Depends(require_admin)])
 def get_config() -> dict[str, Any]:
     redacted = json.loads(json.dumps(config))
     if isinstance(redacted.get("virustotal_api_key"), str):
@@ -195,7 +212,7 @@ def get_config() -> dict[str, Any]:
     return redacted
 
 
-@app.post("/monitor/run")
+@app.post("/monitor/run", dependencies=[Depends(require_analyst_or_admin)])
 def run_monitor(payload: MonitorRequest) -> dict[str, Any]:
     telemetry_service = TelemetryMonitoringService(config)
     telemetry_rows: list[dict[str, Any]] = []
@@ -353,7 +370,7 @@ def process_internals(pid: int) -> dict[str, Any]:
     }
 
 
-@app.post("/processes/{pid}/strings")
+@app.post("/processes/{pid}/strings", dependencies=[Depends(require_analyst_or_admin)])
 def process_strings(pid: int, payload: StringScanRequest) -> dict[str, Any]:
     import plugins.strings_analyser as strings_analyser
 
@@ -455,7 +472,7 @@ def process_action(pid: int, action: str, process_name: str) -> dict[str, Any]:
     return result
 
 
-@app.get("/persistence")
+@app.get("/persistence", dependencies=[Depends(require_analyst_or_admin)])
 def persistence_items() -> list[dict[str, Any]]:
     import plugins.persistence as persistence_scanner
 
@@ -599,7 +616,7 @@ def remediation_history() -> list[dict[str, Any]]:
     return frame.to_dict(orient="records")
 
 
-@app.patch("/incidents/{incident_id}")
+@app.patch("/incidents/{incident_id}", dependencies=[Depends(require_analyst_or_admin)])
 def update_incident(incident_id: str, payload: IncidentUpdateRequest) -> dict[str, str]:
     conn = db.create_connection()
     if not conn:
@@ -645,7 +662,7 @@ def restore_quarantine(quarantine_id: int) -> dict[str, Any]:
         conn.close()
 
 
-@app.delete("/quarantine/{quarantine_id}", dependencies=[Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
+@app.delete("/quarantine/{quarantine_id}", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
 def delete_quarantine(quarantine_id: int) -> dict[str, Any]:
     conn = db.create_connection()
     if not conn:
@@ -737,7 +754,7 @@ def entity_map_html(pid: int | None = None):
     return FileResponse(target)
 
 
-@app.post("/agents/register")
+@app.post("/agents/register", dependencies=[Depends(require_admin)])
 def register_agent(payload: AgentRegistrationRequest) -> dict[str, Any]:
     conn = db.create_connection()
     if not conn:
@@ -818,7 +835,7 @@ def auto_triage(pid: int, payload: TriageRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/scenario/run")
+@app.post("/scenario/run", dependencies=[Depends(require_admin)])
 def run_scenario(payload: ScenarioRequest) -> dict[str, Any]:
     runner = _load_scenario_runner()
     if runner is None:
@@ -849,7 +866,7 @@ def list_artifacts() -> dict[str, str]:
     return _artifact_manifest()
 
 
-@app.get("/integrations/telemetry-fabric/status")
+@app.get("/integrations/telemetry-fabric/status", dependencies=[Depends(require_admin)])
 def telemetry_fabric_status() -> dict[str, Any]:
     return collector_bridge.collector_status()
 
@@ -912,7 +929,7 @@ def html_report():
     return FileResponse(target)
 
 
-@app.post("/deception/honeypot/deploy")
+@app.post("/deception/honeypot/deploy", dependencies=[Depends(require_admin)])
 def deploy_honeypot(payload: HoneypotRequest) -> dict[str, Any]:
     import plugins.honeypot as honeypot
 
@@ -1017,7 +1034,7 @@ def network_warfare_scan(payload: NetworkScanRequest) -> dict[str, Any]:
     return {"devices": network_warfare_instance.scan_network(payload.ip_range), "ip_range": payload.ip_range}
 
 
-@app.post("/network/warfare/block", dependencies=[Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
+@app.post("/network/warfare/block", dependencies=[Depends(require_admin), Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
 def network_warfare_block(payload: BlockerRequest) -> dict[str, Any]:
     import plugins.net_warfare as net_warfare
 
@@ -1027,7 +1044,7 @@ def network_warfare_block(payload: BlockerRequest) -> dict[str, Any]:
     return {"status": "started", "target_ip": payload.target_ip, "gateway_ip": payload.gateway_ip}
 
 
-@app.delete("/network/warfare/block", dependencies=[Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
+@app.delete("/network/warfare/block", dependencies=[Depends(require_admin), Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
 def network_warfare_stop() -> dict[str, str]:
     if network_warfare_instance is not None:
         network_warfare_instance.stop_blocker()

@@ -99,7 +99,7 @@ API starts on `http://127.0.0.1:8000`.
 Recommended secure local launch:
 
 ```bash
-export SHADOWLAB_API_KEY="change-me"
+export SHADOWLAB_API_KEYS="viewer:viewer-key,analyst:analyst-key,admin:admin-key"
 export SHADOWLAB_REQUIRE_AUTH=true
 export SHADOWLAB_ALLOWED_ORIGINS="http://127.0.0.1,http://localhost"
 python app.py
@@ -264,6 +264,7 @@ Runtime configuration:
 - `SHADOWLAB_HOST`
 - `SHADOWLAB_PORT`
 - `SHADOWLAB_API_KEY`
+- `SHADOWLAB_API_KEYS` (format: `viewer:key,analyst:key,admin:key`)
 - `SHADOWLAB_REQUIRE_AUTH`
 - `SHADOWLAB_ALLOWED_ORIGINS`
 - `SHADOWLAB_ENABLE_DANGEROUS_ACTIONS`
