@@ -45,7 +45,7 @@ ShadowLab is an API-first cybersecurity research platform focused on:
 
 A full walkthrough of ShadowLab is available on YouTube:
 
-[Watch the demo](https://www.youtube.com/watch?v=zsQ7G21JKRQ)
+[Watch the demo](https://www.youtube.com/watch?v=GgwX29bzshU)
 
 Detailed operator and feature usage guide:
 
