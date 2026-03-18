@@ -1087,7 +1087,10 @@ class ShadowLabDesktop(QMainWindow):
         photo_sub = QLabel("Ulfat Ibadov")
         photo_sub.setStyleSheet("color:#96a5b8;font-size:12px;")
         profile_image = QLabel()
-        image_path = Path(__file__).resolve().parent.parent / "static" / "ulfat-profile.jpg"
+        static_dir = Path(__file__).resolve().parent.parent / "static"
+        image_path = static_dir / "ulfat-profile.png"
+        if not image_path.exists():
+            image_path = static_dir / "ulfat-profile.jpg"
         pixmap = QPixmap(str(image_path))
         if not pixmap.isNull():
             profile_image.setPixmap(pixmap.scaled(320, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
