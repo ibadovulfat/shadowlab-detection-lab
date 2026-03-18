@@ -17,13 +17,28 @@ ShadowLab is an API-first cybersecurity research platform focused on:
 
 ## Screenshots
 
+### 1. Overview & Telemetry CPU Trend
 ![ShadowLab Screenshot 1](images/image1.png)
+
+### 2. About ShadowLab & Creator Profile
 ![ShadowLab Screenshot 2](images/image2.png)
+
+### 3. Multi Dashboard Wall
 ![ShadowLab Screenshot 3](images/image3.png)
+
+### 4. History & Incident Log
 ![ShadowLab Screenshot 4](images/image4.png)
+
+### 5. Process Intelligence & Analysis
 ![ShadowLab Screenshot 5](images/image5.png)
+
+### 6. Advanced Hunt Workspace
 ![ShadowLab Screenshot 6](images/image6.png)
+
+### 7. Threat Intel Workspace
 ![ShadowLab Screenshot 7](images/image7.png)
+
+### 8. Deception & Evidence Workspace
 ![ShadowLab Screenshot 8](images/image8.png)
 
 ## Demo Video
