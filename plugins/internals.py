@@ -19,18 +19,19 @@ def get_process_handles(pid):
                     "Mode": f.mode,
                     "FD": f.fd
                 })
-        except: pass
+        except Exception: pass
         
         # Connections
         try:
             for c in p.connections():
+                raddr = f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else "N/A"
                 handles.append({
                     "Type": "Socket",
-                    "Path": f"{c.laddr} -> {c.raddr} ({c.status})",
-                    "Mode": c.type, # TCP/UDP
+                    "Path": f"{c.laddr.ip}:{c.laddr.port} -> {raddr} ({c.status})",
+                    "Mode": str(c.type), # TCP/UDP
                     "FD": c.fd
                 })
-        except: pass
+        except Exception: pass
             
         return handles
     except psutil.NoSuchProcess:
@@ -56,7 +57,7 @@ def get_process_libs(pid):
                             "Size": m.rss, # Resident Set Size
                             "Perms": m.perms
                         })
-        except: pass
+        except Exception: pass
         return libs
-    except:
+    except Exception:
         return []

@@ -67,7 +67,7 @@ class ProcessTracer:
                     
                 time.sleep(interval)
                 
-            except psutil.NoSuchProcess:
+            except Exception:
                 break
                 
         return {"events": self.events}

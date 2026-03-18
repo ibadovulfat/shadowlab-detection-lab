@@ -1,8 +1,14 @@
 
-from scapy.all import ARP, Ether, srp, send
+from scapy.all import ARP, Ether, srp, send, conf
 import time
 import socket
 import threading
+
+# Attempt to use Npcap if available on Windows
+try:
+    conf.use_pcap = True
+except Exception:
+    pass
 
 class NetworkWarfare:
     def __init__(self):
@@ -50,6 +56,10 @@ class NetworkWarfare:
         """
         Starts ARP Spoofing to block internet access for target.
         """
+        if target_ip == gateway_ip:
+            raise ValueError("Target IP and gateway IP must differ")
+        if target_ip in ("127.0.0.1", "0.0.0.0", "::1"):
+            raise ValueError("Cannot target localhost")
         self.target_ip = target_ip
         self.gateway_ip = gateway_ip
         self.stop_attack = False
@@ -94,7 +104,7 @@ class NetworkWarfare:
             ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=ip), timeout=2, verbose=0)
             if ans:
                 return ans[0][1].hwsrc
-        except:
+        except Exception:
             return None
         return None
 

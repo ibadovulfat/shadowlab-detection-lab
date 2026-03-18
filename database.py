@@ -634,9 +634,16 @@ def create_case_record(
 
 
 def update_case_record(conn, case_id: int, **fields) -> None:
+    _ALLOWED_CASE_COLUMNS = {
+        "incident_id", "title", "priority", "stage", "owner",
+        "sla_deadline", "asset_criticality", "tags_json",
+        "approvers_json", "narrative", "status",
+    }
     updates = []
     values = []
     for key, value in fields.items():
+        if key not in _ALLOWED_CASE_COLUMNS:
+            raise ValueError(f"Invalid column: {key}")
         updates.append(f"{key} = ?")
         values.append(value)
     updates.append("updated_at = (strftime('%s', 'now'))")

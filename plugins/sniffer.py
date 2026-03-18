@@ -6,8 +6,13 @@ import pandas as pd
 
 SCAPY_AVAILABLE = False
 try:
-    from scapy.all import sniff, IP, TCP, UDP, DNS, DNSQR
+    from scapy.all import sniff, IP, TCP, UDP, DNS, DNSQR, conf
     SCAPY_AVAILABLE = True
+    # Attempt to use Npcap if available, but allow fallback
+    try:
+        conf.use_pcap = True
+    except Exception:
+        pass
 except ImportError:
     pass
 
@@ -47,7 +52,7 @@ class PacketSniffer:
                     try:
                         info["dns_query"] = packet[DNSQR].qname.decode('utf-8')
                         info["proto"] = "DNS"
-                    except:
+                    except Exception:
                         pass
                 
                 with self.lock:
@@ -56,9 +61,19 @@ class PacketSniffer:
         # Scapy sniff blocks, so run in a way that respects timeout or count
         # ideally we run sniff(timeout=duration)
         try:
+            # First attempt normal sniff (Layer 2)
             sniff(prn=packet_callback, timeout=duration, store=0)
         except Exception as e:
-            return str(e)
+            if "winpcap is not installed" in str(e).lower() or "layer 2" in str(e).lower():
+                # Fallback to Layer 3 sockets
+                try:
+                    from scapy.all import L3RawSocket
+                    conf.L3socket = L3RawSocket
+                    sniff(prn=packet_callback, timeout=duration, store=0)
+                except Exception as e2:
+                    return f"Layer 2 sniffer failed ({e}), and Layer 3 fallback also failed ({e2})"
+            else:
+                return str(e)
             
         return None
 

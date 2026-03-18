@@ -560,8 +560,10 @@ def list_processes() -> list[dict[str, Any]]:
 def get_process(pid: int) -> dict[str, Any]:
     try:
         return process_intel_service.profile_process(pid)
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/processes/{pid}/tree")
@@ -1104,35 +1106,40 @@ def auto_triage(pid: int, payload: TriageRequest) -> dict[str, Any]:
     import plugins.sandbox as sandbox
     import plugins.strings_analyser as strings_analyser
 
-    profile = process_intel_service.profile_process(pid)
-    exe_path = profile.get("exe")
-    strings = strings_analyser.extract_strings(exe_path, payload.strings_min_length)
-    hits = strings_analyser.search_patterns(strings, payload.strings_patterns)
-    yara_lookup = check_file_yaraify(profile.get("sha256", ""), payload.yaraify_auth_key) if profile.get("sha256") else {
-        "status": "skipped",
-        "reason": "Process hash unavailable",
-    }
-    yara_matches = yara_lookup.get("matched_rules", []) if isinstance(yara_lookup, dict) else []
-    trace = sandbox.ProcessTracer(pid).trace(duration=payload.trace_duration, interval=0.5)
-    analyst = ai_analyst.AIAnalyst().analyze_process(profile)
-    intel = None
-    if payload.virustotal_api_key or payload.malwarebazaar_auth_key or payload.yaraify_auth_key:
-        intel = scan_process(
-            {"exe": exe_path, "pid": pid, "name": profile.get("name")},
-            virustotal_api_key=payload.virustotal_api_key,
-            malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
-            yaraify_auth_key=payload.yaraify_auth_key,
-        )
-    return {
-        "profile": profile,
-        "internals_summary": {"handles": len(internals.get_process_handles(pid)), "modules": len(internals.get_process_libs(pid))},
-        "strings": {"total": len(strings), "hits": hits[:25]},
-        "yara": {"provider": "YARAify", "result": yara_lookup, "matches": yara_matches},
-        "sandbox": trace,
-        "memory": memory_forensics.run_analysis(pid, profile.get("name", "process")),
-        "ai_analyst": analyst,
-        "threat_intel": intel,
-    }
+    try:
+        profile = process_intel_service.profile_process(pid)
+        exe_path = profile.get("exe")
+        strings = strings_analyser.extract_strings(exe_path, payload.strings_min_length)
+        hits = strings_analyser.search_patterns(strings, payload.strings_patterns)
+        yara_lookup = check_file_yaraify(profile.get("sha256", ""), payload.yaraify_auth_key) if profile.get("sha256") else {
+            "status": "skipped",
+            "reason": "Process hash unavailable",
+        }
+        yara_matches = yara_lookup.get("matched_rules", []) if isinstance(yara_lookup, dict) else []
+        trace = sandbox.ProcessTracer(pid).trace(duration=payload.trace_duration, interval=0.5)
+        analyst = ai_analyst.AIAnalyst().analyze_process(profile)
+        intel = None
+        if payload.virustotal_api_key or payload.malwarebazaar_auth_key or payload.yaraify_auth_key:
+            intel = scan_process(
+                {"exe": exe_path, "pid": pid, "name": profile.get("name")},
+                virustotal_api_key=payload.virustotal_api_key,
+                malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
+                yaraify_auth_key=payload.yaraify_auth_key,
+            )
+        return {
+            "profile": profile,
+            "internals_summary": {"handles": len(internals.get_process_handles(pid)), "modules": len(internals.get_process_libs(pid))},
+            "strings": {"total": len(strings), "hits": hits[:25]},
+            "yara": {"provider": "YARAify", "result": yara_lookup, "matches": yara_matches},
+            "sandbox": trace,
+            "memory": memory_forensics.run_analysis(pid, profile.get("name", "process")),
+            "ai_analyst": analyst,
+            "threat_intel": intel,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Triage failed for PID {pid}: {exc}") from exc
 
 
 @app.post("/scenario/run", dependencies=[Depends(require_admin)])

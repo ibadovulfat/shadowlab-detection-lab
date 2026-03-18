@@ -32,7 +32,8 @@ class AIAnalyst:
         elif "python" in name:
             risk_level = "INFO"
             narrative += "- **Observation**: Python interpreter running script.\n"
-            narrative += f"- **Command**: `{' '.join(cmd[:5])}...`\n"
+            display_cmd = cmd if isinstance(cmd, str) else " ".join(cmd[:5])
+            narrative += f"- **Command**: `{display_cmd}`\n"
         else:
             narrative += "- **Conclusion**: The process behavior seems consistent with standard application usage.\n"
             narrative += "- **Advice**: Continue monitoring active connections.\n"

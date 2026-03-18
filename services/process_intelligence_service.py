@@ -53,30 +53,39 @@ class ProcessIntelligenceService:
         return snapshot
 
     def profile_process(self, pid: int) -> dict[str, Any]:
-        process = psutil.Process(pid)
-        with process.oneshot():
-            exe_path = self._safe_call(process.exe)
-            connections = []
-            try:
-                connections = [
-                    f"{c.laddr.ip}:{c.laddr.port}->{c.raddr.ip}:{c.raddr.port}" if c.raddr else f"{c.laddr.ip}:{c.laddr.port}"
-                    for c in process.net_connections(kind="inet")
-                ]
-            except Exception:
+        try:
+            process = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=f"Process {pid} not found")
+
+        try:
+            with process.oneshot():
+                exe_path = self._safe_call(process.exe)
                 connections = []
-            return {
-                "pid": pid,
-                "name": self._safe_call(process.name, ""),
-                "cmdline": " ".join(self._safe_call(process.cmdline, [])),
-                "exe": exe_path,
-                "cwd": self._safe_call(process.cwd, "") if hasattr(process, "cwd") else "",
-                "username": self._safe_call(process.username, ""),
-                "status": self._safe_call(process.status, ""),
-                "create_time": self._safe_call(process.create_time, 0.0),
-                "sha256": self._safe_sha256(exe_path),
-                "signature_status": self._signature_status(exe_path),
-                "network_connections": connections[:25],
-            }
+                try:
+                    connections = [
+                        f"{c.laddr.ip}:{c.laddr.port}->{c.raddr.ip}:{c.raddr.port}" if c.raddr else f"{c.laddr.ip}:{c.laddr.port}"
+                        for c in process.net_connections(kind="inet")
+                    ]
+                except Exception:
+                    connections = []
+                return {
+                    "pid": pid,
+                    "name": self._safe_call(process.name, ""),
+                    "cmdline": " ".join(self._safe_call(process.cmdline, [])),
+                    "exe": exe_path,
+                    "cwd": self._safe_call(process.cwd, "") if hasattr(process, "cwd") else "",
+                    "username": self._safe_call(process.username, ""),
+                    "status": self._safe_call(process.status, ""),
+                    "create_time": self._safe_call(process.create_time, 0.0),
+                    "sha256": self._safe_sha256(exe_path),
+                    "signature_status": self._signature_status(exe_path),
+                    "network_connections": connections[:25],
+                }
+        except psutil.NoSuchProcess:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=f"Process {pid} terminated during profiling")
 
     def _safe_sha256(self, path: str | None) -> str | None:
         if not path or not os.path.exists(path):

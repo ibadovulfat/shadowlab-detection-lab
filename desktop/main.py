@@ -1544,7 +1544,7 @@ class ShadowLabDesktop(QMainWindow):
             self._set_health_badge(False); self.auth_active = False; self._apply_auth_context(self._viewer_mode_payload()); self.statusBar().showMessage(f"Backend unavailable: {exc}")
 
     def refresh_overview(self) -> None:
-        self.refresh_history(); self.refresh_artifacts()
+        self.refresh_history(); self.refresh_artifacts(); self.refresh_network()
         try:
             items = self._get("/processes").json(); self.metric_proc.setText(f"Processes: {len(items)}")
         except Exception: self.metric_proc.setText("Processes: unavailable")
