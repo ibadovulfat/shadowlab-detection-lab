@@ -177,19 +177,6 @@ Deployment automation:
 - `scripts/start_shadowlab_api.sh` for Linux startup
 - `deploy/systemd/shadowlab-api.service` as a systemd unit template
 
-## Landing Site
-
-A standalone product showcase site is included in:
-
-```text
-site/
-```
-
-Open it directly:
-
-```text
-site/index.html
-```
 
 ## Docker
 
