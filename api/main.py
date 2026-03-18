@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import ipaddress
 import json
 import os
 import platform
+import re
 import socket
 import threading
 import time
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -15,9 +18,10 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import database as db
+import api.security as security_module
 import monitor_core
 from api.security import (
     SecurityContext,
@@ -42,8 +46,13 @@ from services.enterprise_service import EnterpriseService
 from services.fleet_service import FleetService
 from services.graph_service import GraphService
 from services.incident_service import IncidentArtifactService
+from services.integrity_service import IntegrityService
+from services.migration_service import MigrationService
+from services.observability_service import ObservabilityService
+from services.outbound_security import normalize_outbound_url
 from services.process_intelligence_service import ProcessIntelligenceService
 from services.response_service import ResponseOrchestrator
+from services.secret_store import secret_store
 from services.telemetry_service import CollectorTelemetryBridge, TelemetryMonitoringService
 from services.timeline_service import TimelineService
 from threat_intelligence import check_file_malwarebazaar, check_file_vt, check_file_yaraify, check_ip, scan_process
@@ -98,6 +107,7 @@ async def add_security_headers(request, call_next):
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.method.upper() in {"POST", "PATCH", "DELETE"} and request.url.path not in {"/health"}:
+        _consume_pending_approval(request, response.status_code)
         _audit_mutating_request(request, response.status_code)
     return response
 
@@ -112,15 +122,89 @@ timeline_service = TimelineService()
 graph_service = GraphService(OUT_DIR)
 collector_bridge = CollectorTelemetryBridge(config, OUT_DIR)
 enterprise_service = EnterpriseService(BASE_DIR, process_intel_service, fleet_service)
+integrity_service = IntegrityService(BASE_DIR, OUT_DIR)
+observability_service = ObservabilityService(OUT_DIR)
+migration_service = MigrationService(BASE_DIR)
 honeypot_instance = None
 canary_instance = None
 canary_alerts: list[str] = []
 network_warfare_instance = None
-alert_webhook_url = os.environ.get("SHADOWLAB_ALERT_WEBHOOK", "")
+_raw_alert_webhook = os.environ.get("SHADOWLAB_ALERT_WEBHOOK", "")
+try:
+    alert_webhook_url = secret_store.decrypt_text(_raw_alert_webhook) if _raw_alert_webhook.startswith("enc:v1:") else _raw_alert_webhook
+except Exception:
+    alert_webhook_url = ""
+if not alert_webhook_url:
+    conn = db.create_connection()
+    if conn:
+        try:
+            stored_alert_webhook = db.get_app_setting(conn, "alert_webhook_url_enc")
+            if stored_alert_webhook:
+                alert_webhook_url = secret_store.decrypt_text(stored_alert_webhook)
+        except Exception:
+            alert_webhook_url = ""
+        finally:
+            conn.close()
 connector_worker_enabled = os.environ.get("SHADOWLAB_CONNECTOR_QUEUE_WORKER", "true").strip().lower() in {"1", "true", "yes", "on"}
 connector_worker_interval_seconds = max(5, int(os.environ.get("SHADOWLAB_CONNECTOR_QUEUE_INTERVAL_SECONDS", "20")))
 _connector_worker_thread: threading.Thread | None = None
 _connector_worker_stop = threading.Event()
+
+SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
+INCIDENT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{0,128}$")
+CONNECTOR_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+class CasePriority(StrEnum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+    critical = "critical"
+
+
+class CaseStage(StrEnum):
+    triage = "triage"
+    investigation = "investigation"
+    containment = "containment"
+    eradication = "eradication"
+    recovery = "recovery"
+    closed = "closed"
+
+
+class IncidentStatus(StrEnum):
+    open = "open"
+    in_progress = "in_progress"
+    contained = "contained"
+    resolved = "resolved"
+    closed = "closed"
+
+
+class ApprovalStatus(StrEnum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    cancelled = "cancelled"
+
+
+class ConnectorKind(StrEnum):
+    siem = "siem"
+    soar = "soar"
+
+
+class EventSeverity(StrEnum):
+    info = "info"
+    low = "low"
+    medium = "medium"
+    high = "high"
+    critical = "critical"
+
+
+class PersistenceItemType(StrEnum):
+    registry_run_key = "Registry Run Key"
+    scheduled_task = "Scheduled Task"
+    windows_service = "Windows Service"
+    startup_folder = "Startup Folder"
 
 
 class MonitorRequest(BaseModel):
@@ -145,6 +229,11 @@ class ThreatHashLookupRequest(BaseModel):
     malwarebazaar_auth_key: str | None = None
     yaraify_auth_key: str | None = None
     virustotal_api_key: str | None = None
+
+    @field_validator("file_hash")
+    @classmethod
+    def _validate_hash(cls, value: str) -> str:
+        return _validated_sha256(value)
 
 
 class SnifferRequest(BaseModel):
@@ -176,20 +265,30 @@ class EvidenceRequest(BaseModel):
 class NetworkScanRequest(BaseModel):
     ip_range: str = Field(default="192.168.1.0/24")
 
+    @field_validator("ip_range")
+    @classmethod
+    def _validate_ip_range(cls, value: str) -> str:
+        return _validated_network_range(value)
+
 
 class BlockerRequest(BaseModel):
     target_ip: str
     gateway_ip: str
 
+    @field_validator("target_ip", "gateway_ip")
+    @classmethod
+    def _validate_ip(cls, value: str) -> str:
+        return _validated_ip_address(value)
+
 
 class IncidentUpdateRequest(BaseModel):
-    status: str | None = None
+    status: IncidentStatus | None = None
     notes: str | None = None
     owner: str | None = None
 
 
 class PersistenceRemediationRequest(BaseModel):
-    item_type: str
+    item_type: PersistenceItemType
     path: str
     name: str = ""
 
@@ -197,6 +296,12 @@ class PersistenceRemediationRequest(BaseModel):
 class AlertWebhookRequest(BaseModel):
     webhook_url: str
     message: str = "ShadowLab test alert"
+
+    @field_validator("webhook_url")
+    @classmethod
+    def _validate_webhook(cls, value: str) -> str:
+        _validate_webhook_url(value)
+        return value.strip()
 
 
 class TriageRequest(BaseModel):
@@ -218,18 +323,30 @@ class AgentRegistrationRequest(BaseModel):
     api_status: str = "online"
     boot_time: float | None = None
 
+    @field_validator("ip_address")
+    @classmethod
+    def _validate_optional_ip(cls, value: str) -> str:
+        if not value:
+            return ""
+        return _validated_ip_address(value)
+
 
 class CaseCreateRequest(BaseModel):
     title: str
     incident_id: str = ""
     owner: str = ""
-    priority: str = "medium"
-    stage: str = "triage"
+    priority: CasePriority = CasePriority.medium
+    stage: CaseStage = CaseStage.triage
     sla_hours: int = Field(default=24, ge=1, le=720)
     asset_criticality: float = Field(default=0, ge=0, le=100)
     tags: list[str] = Field(default_factory=list)
     approvers: list[str] = Field(default_factory=list)
     narrative: str = ""
+
+    @field_validator("incident_id")
+    @classmethod
+    def _validate_incident_id(cls, value: str) -> str:
+        return _validated_incident_id(value)
 
 
 class ChainOfCustodyRequest(BaseModel):
@@ -246,9 +363,17 @@ class ApprovalRequestModel(BaseModel):
     approver: str = ""
     reason: str = ""
 
+    @field_validator("action")
+    @classmethod
+    def _validate_approval_action(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not value or len(value) > 80 or not re.fullmatch(r"[a-z0-9:_-]+", value):
+            raise ValueError("action must be 1-80 chars and contain only lowercase letters, digits, colon, underscore, dash")
+        return value
+
 
 class ApprovalResolveRequest(BaseModel):
-    status: str
+    status: ApprovalStatus
     approver: str = ""
 
 
@@ -259,6 +384,22 @@ class DetectionLifecycleRequest(BaseModel):
     suppressions: dict[str, Any] = Field(default_factory=dict)
     notes: str = ""
 
+    @field_validator("rule_id")
+    @classmethod
+    def _validate_rule_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 128:
+            raise ValueError("rule_id must be between 1 and 128 characters")
+        return value
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        value = value.strip()
+        if not SEMVER_RE.fullmatch(value):
+            raise ValueError("version must use semantic version format like 1.2.3")
+        return value
+
 
 class FalsePositiveRequest(BaseModel):
     rule_id: str
@@ -266,12 +407,41 @@ class FalsePositiveRequest(BaseModel):
     actor: str = ""
     reason: str
 
+    @field_validator("rule_id")
+    @classmethod
+    def _validate_fp_rule_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 128:
+            raise ValueError("rule_id must be between 1 and 128 characters")
+        return value
+
+    @field_validator("incident_id")
+    @classmethod
+    def _validate_fp_incident_id(cls, value: str) -> str:
+        return _validated_incident_id(value)
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 5 or len(value) > 500:
+            raise ValueError("reason must be between 5 and 500 characters")
+        return value
+
 
 class ConnectorConfigRequest(BaseModel):
     name: str
-    kind: str
+    kind: ConnectorKind
     enabled: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_connector_name(cls, value: str) -> str:
+        lowered = value.strip().lower()
+        if not CONNECTOR_NAME_RE.fullmatch(lowered):
+            raise ValueError("Connector name must be 2-32 chars and contain only lowercase letters, digits, dot, dash, underscore")
+        return lowered
 
 
 class ReplayRequest(BaseModel):
@@ -281,16 +451,47 @@ class ReplayRequest(BaseModel):
 class NetworkAssessmentRequest(BaseModel):
     ip_range: str = ""
 
+    @field_validator("ip_range")
+    @classmethod
+    def _validate_optional_network(cls, value: str) -> str:
+        if not value.strip():
+            return ""
+        return _validated_network_range(value)
+
 
 class ConnectorDispatchRequest(BaseModel):
     event_type: str
-    severity: str = "info"
+    severity: EventSeverity = EventSeverity.info
     source: str = "shadowlab"
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("event_type", "source")
+    @classmethod
+    def _validate_non_empty_label(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 80:
+            raise ValueError("Value must be between 1 and 80 characters")
+        return value
 
 
 class ConnectorQueueProcessRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=500)
+
+
+class RetentionCleanupRequest(BaseModel):
+    telemetry_days: int = Field(default=30, ge=1, le=3650)
+    alerts_days: int = Field(default=90, ge=1, le=3650)
+    auth_days: int = Field(default=90, ge=1, le=3650)
+    action_audit_days: int = Field(default=90, ge=1, le=3650)
+    external_days: int = Field(default=30, ge=1, le=3650)
+    queue_days: int = Field(default=30, ge=1, le=3650)
+
+
+class SecretRotationRequest(BaseModel):
+    rotate_integrity_signing_key: bool = True
+    reencrypt_webhook_secret: bool = True
+    reencrypt_connector_secrets: bool = True
+    clear_alert_webhook: bool = False
 
 
 @app.get("/health")
@@ -300,6 +501,8 @@ def health() -> dict[str, str]:
 
 @app.on_event("startup")
 def _startup_connector_worker() -> None:
+    migration_service.ensure_applied()
+    _validate_startup_security_posture()
     global _connector_worker_thread
     if not connector_worker_enabled or (_connector_worker_thread and _connector_worker_thread.is_alive()):
         return
@@ -397,7 +600,8 @@ def configure_enterprise_connector(payload: ConnectorConfigRequest) -> dict[str,
 
 
 @app.post("/enterprise/connectors/dispatch", dependencies=[Depends(require_admin)])
-def dispatch_enterprise_connector_event(payload: ConnectorDispatchRequest) -> dict[str, Any]:
+def dispatch_enterprise_connector_event(request: Request, payload: ConnectorDispatchRequest) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="connector_dispatch", detail="Too many connector dispatch attempts. Wait briefly and retry.")
     return enterprise_service.dispatch_connector_event(
         event_type=payload.event_type,
         payload=payload.payload,
@@ -416,6 +620,141 @@ def enterprise_connector_queue(status: str = "", limit: int = 100) -> list[dict[
     return enterprise_service.connector_queue_status(status=status, limit=limit)
 
 
+@app.get("/enterprise/abuse/summary", dependencies=[Depends(require_admin)])
+def enterprise_abuse_summary() -> dict[str, Any]:
+    return enterprise_service.abuse_summary()
+
+
+@app.post("/enterprise/maintenance/retention", dependencies=[Depends(require_admin)])
+def enterprise_retention_cleanup(payload: RetentionCleanupRequest) -> dict[str, Any]:
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        purged = db.purge_old_records(
+            conn,
+            {
+                "telemetry": payload.telemetry_days,
+                "alert_log": payload.alerts_days,
+                "auth_log": payload.auth_days,
+                "action_audit_log": payload.action_audit_days,
+                "external_request_log": payload.external_days,
+                "connector_delivery_queue": payload.queue_days,
+            },
+        )
+        observability_service.log_event("retention_cleanup_completed", purged=purged)
+        return {"status": "completed", "purged": purged}
+    finally:
+        conn.close()
+
+
+@app.get("/enterprise/database/readiness", dependencies=[Depends(require_admin)])
+def enterprise_database_readiness() -> dict[str, Any]:
+    migrations = migration_service.ensure_applied()
+    bootstrap_path = migration_service.export_postgres_bootstrap_sql()
+    profile = db.database_runtime_profile()
+    return {
+        "database": profile,
+        "migrations": migrations,
+        "postgres_bootstrap_sql": bootstrap_path,
+        "production_notes": [
+            "SQLite stays the default embedded mode for local lab use.",
+            "PostgreSQL can now run as the shared backend when SHADOWLAB_DATABASE_URL is configured with a supported driver.",
+            "Bootstrap SQL is still exported so multi-node deployments can provision the shared database deterministically.",
+        ],
+    }
+
+
+@app.get("/enterprise/report/security-ops", dependencies=[Depends(require_admin)])
+def enterprise_security_ops_report() -> dict[str, Any]:
+    return {
+        "integrity": integrity_service.verify_manifest(),
+        "abuse": enterprise_service.abuse_summary(),
+        "observability": observability_service.summary(),
+        "database": enterprise_database_readiness(),
+        "artifacts": _artifact_manifest(),
+    }
+
+
+@app.post("/enterprise/report/security-ops/export", dependencies=[Depends(require_admin)])
+def enterprise_security_ops_report_export() -> dict[str, Any]:
+    report = enterprise_security_ops_report()
+    report_json = OUT_DIR / "SecurityOps_Report.json"
+    report_html = OUT_DIR / "SecurityOps_Report.html"
+    report_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    html_body = (
+        "<html><body style='font-family:Segoe UI,Arial,sans-serif;background:#10151d;color:#eef4fb;padding:24px;'>"
+        "<h1>ShadowLab Security Ops Report</h1>"
+        f"<pre style='white-space:pre-wrap;background:#16202c;border:1px solid #243446;padding:16px;border-radius:10px;'>{html.escape(json.dumps(report, indent=2))}</pre>"
+        "</body></html>"
+    )
+    report_html.write_text(html_body, encoding="utf-8")
+    observability_service.log_event("security_ops_report_exported", json_path=str(report_json), html_path=str(report_html))
+    integrity_service.refresh_manifest()
+    return {"status": "exported", "json_path": str(report_json), "html_path": str(report_html)}
+
+
+@app.post("/enterprise/secrets/rotate", dependencies=[Depends(require_admin)])
+def enterprise_rotate_secrets(payload: SecretRotationRequest) -> dict[str, Any]:
+    global alert_webhook_url
+    rotated: list[str] = []
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        if payload.reencrypt_connector_secrets:
+            connectors = db.get_connectors(conn).fillna("").to_dict(orient="records")
+            for item in connectors:
+                name = str(item.get("name", "")).strip().lower()
+                raw_config = item.get("config_json", "{}")
+                parsed = json.loads(raw_config or "{}") if isinstance(raw_config, str) else (raw_config or {})
+                revealed = secret_store.reveal_config(parsed)
+                protected = secret_store.protect_config(revealed)
+                db.upsert_connector(conn, name, str(item.get("kind", "")), bool(item.get("enabled")), json.dumps(protected))
+            rotated.append("connector_secrets")
+            db.log_secret_rotation(conn, "connector_secrets", "rotate", detail="Connector secrets were re-encrypted")
+        if payload.clear_alert_webhook:
+            alert_webhook_url = ""
+            db.set_app_setting(conn, "alert_webhook_url_enc", "")
+            rotated.append("alert_webhook_cleared")
+            db.log_secret_rotation(conn, "alert_webhook", "clear", detail="Stored alert webhook secret cleared")
+        elif payload.reencrypt_webhook_secret and alert_webhook_url:
+            encrypted = secret_store.encrypt_text(alert_webhook_url)
+            db.set_app_setting(conn, "alert_webhook_url_enc", encrypted)
+            rotated.append("alert_webhook")
+            db.log_secret_rotation(conn, "alert_webhook", "rotate", detail="Alert webhook secret was re-encrypted")
+    finally:
+        conn.close()
+    if payload.rotate_integrity_signing_key:
+        integrity_service.rotate_signing_key()
+        conn = db.create_connection()
+        if conn:
+            try:
+                db.log_secret_rotation(conn, "integrity_signing_key", "rotate", detail="Integrity signing key rotated and manifest refreshed")
+            finally:
+                conn.close()
+        rotated.append("integrity_signing_key")
+    observability_service.log_event("secrets_rotated", rotated=rotated)
+    return {"status": "completed", "rotated": rotated}
+
+
+@app.get("/enterprise/secrets/status", dependencies=[Depends(require_admin)])
+def enterprise_secret_status() -> dict[str, Any]:
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        history = db.get_secret_rotations(conn, limit=100).fillna("").to_dict(orient="records")
+        stored_webhook = bool(db.get_app_setting(conn, "alert_webhook_url_enc"))
+    finally:
+        conn.close()
+    return {
+        "stored_alert_webhook": stored_webhook,
+        "rotation_history": history,
+        "integrity_history": integrity_service.history(limit=20),
+    }
+
+
 @app.get("/enterprise/adversary/profiles", dependencies=[Depends(require_analyst_or_admin)])
 def adversary_profiles() -> dict[str, Any]:
     return enterprise_service.adversary_emulation()
@@ -423,7 +762,8 @@ def adversary_profiles() -> dict[str, Any]:
 
 @app.post("/enterprise/purple/replay", dependencies=[Depends(require_analyst_or_admin)])
 def purple_replay(payload: ReplayRequest) -> dict[str, Any]:
-    return enterprise_service.replay_incident(payload.artifact_path)
+    target = _validate_replay_artifact_path(payload.artifact_path)
+    return enterprise_service.replay_incident(str(target))
 
 
 @app.get("/enterprise/canary/bypass", dependencies=[Depends(require_analyst_or_admin)])
@@ -458,7 +798,8 @@ def get_config() -> dict[str, Any]:
 
 
 @app.post("/monitor/run", dependencies=[Depends(require_analyst_or_admin)])
-def run_monitor(payload: MonitorRequest) -> dict[str, Any]:
+def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="monitor_run", detail="Too many monitor runs. Wait briefly and retry.")
     telemetry_service = TelemetryMonitoringService(config)
     telemetry_rows: list[dict[str, Any]] = []
     timeline_scores: list[float] = []
@@ -696,17 +1037,25 @@ def process_action(request: Request, pid: int, action: str, process_name: str) -
     _require_enterprise_approval(request, action_name=f"process:{action.lower()}")
     action_name = action.lower()
     profile = process_intel_service.profile_process(pid)
-    enforce_process_action_policy(request, process_name)
+    actual_process_name = str(profile.get("name") or "").strip()
+    requested_process_name = process_name.strip()
+    if actual_process_name and requested_process_name and actual_process_name.lower() != requested_process_name.lower():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Process name mismatch for PID {pid}: requested `{requested_process_name}` but host reports `{actual_process_name}`",
+        )
+    effective_process_name = actual_process_name or requested_process_name
+    enforce_process_action_policy(request, effective_process_name)
     if action_name == "suspend":
-        result = response_service.suspend(pid, process_name)
+        result = response_service.suspend(pid, effective_process_name)
     elif action_name == "resume":
-        result = response_service.resume(pid, process_name)
+        result = response_service.resume(pid, effective_process_name)
     elif action_name == "kill":
-        result = response_service.kill(pid, process_name)
+        result = response_service.kill(pid, effective_process_name)
     elif action_name == "kill-tree":
-        result = response_service.kill_tree(pid, process_name)
+        result = response_service.kill_tree(pid, effective_process_name)
     elif action_name == "quarantine":
-        result = response_service.quarantine_file(pid, process_name, profile.get("exe"))
+        result = response_service.quarantine_file(pid, effective_process_name, profile.get("exe"))
     else:
         raise HTTPException(status_code=400, detail="Unsupported action")
     if not result["ok"]:
@@ -715,9 +1064,10 @@ def process_action(request: Request, pid: int, action: str, process_name: str) -
         conn = db.create_connection()
         if conn:
             try:
-                db.log_quarantine(conn, pid, process_name, profile.get("exe"), result.get("path", ""), "active")
+                db.log_quarantine(conn, pid, effective_process_name, profile.get("exe"), result.get("path", ""), "active")
             finally:
                 conn.close()
+        integrity_service.refresh_manifest()
     return result
 
 
@@ -733,6 +1083,7 @@ def remediate_persistence(request: Request, payload: PersistenceRemediationReque
     _require_enterprise_approval(request, action_name="persistence:remediate")
     import plugins.persistence as persistence_scanner
 
+    _validate_persistence_target(payload.item_type, payload.path, payload.name)
     result = persistence_scanner.remediate_persistence_item(payload.item_type, payload.path, payload.name)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("message", "Remediation failed"))
@@ -783,13 +1134,17 @@ def rollback_persistence(request: Request, remediation_id: int) -> dict[str, Any
 
 
 @app.get("/threat-intel/ip/{ip}")
-def threat_intel_lookup(ip: str) -> dict[str, Any]:
+def threat_intel_lookup(request: Request, ip: str) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="threat_intel", detail="Too many threat-intelligence lookups. Wait briefly and retry.")
+    ip = _validated_ip_address(ip)
     result = check_ip(ip)
     return {"ip": ip, "result": result}
 
 
 @app.get("/threat-intel/hash/{file_hash}")
-def threat_hash_lookup(file_hash: str) -> dict[str, Any]:
+def threat_hash_lookup(request: Request, file_hash: str) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="threat_intel", detail="Too many threat-intelligence lookups. Wait briefly and retry.")
+    file_hash = _validated_sha256(file_hash)
     return {
         "hash": file_hash,
         "malwarebazaar": check_file_malwarebazaar(file_hash),
@@ -798,7 +1153,8 @@ def threat_hash_lookup(file_hash: str) -> dict[str, Any]:
 
 
 @app.post("/threat-intel/hash/lookup")
-def threat_hash_lookup_with_auth(payload: ThreatHashLookupRequest) -> dict[str, Any]:
+def threat_hash_lookup_with_auth(request: Request, payload: ThreatHashLookupRequest) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="threat_intel", detail="Too many threat-intelligence lookups. Wait briefly and retry.")
     return {
         "hash": payload.file_hash,
         "malwarebazaar": check_file_malwarebazaar(payload.file_hash, payload.malwarebazaar_auth_key),
@@ -952,12 +1308,15 @@ def restore_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
         if row.empty:
             raise HTTPException(status_code=404, detail="Quarantine record not found")
         item = row.iloc[0].to_dict()
-        source = Path(item["quarantine_path"])
-        target = Path(item["original_path"])
-        if source.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source.replace(target)
+        source, target = _validate_quarantine_restore_paths(item["quarantine_path"], item["original_path"])
+        if not source.exists():
+            raise HTTPException(status_code=404, detail="Quarantine artifact not found")
+        if target.exists():
+            raise HTTPException(status_code=409, detail="Original path already exists; refusing to overwrite during restore")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
         db.update_quarantine(conn, quarantine_id, "restored")
+        integrity_service.refresh_manifest()
         return {"status": "restored", "path": str(target)}
     finally:
         conn.close()
@@ -975,10 +1334,11 @@ def delete_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
         if row.empty:
             raise HTTPException(status_code=404, detail="Quarantine record not found")
         item = row.iloc[0].to_dict()
-        target = Path(item["quarantine_path"])
+        target = _validate_quarantine_file_path(item["quarantine_path"])
         if target.exists():
             target.unlink()
         db.update_quarantine(conn, quarantine_id, "deleted")
+        integrity_service.refresh_manifest()
         return {"status": "deleted", "path": str(target)}
     finally:
         conn.close()
@@ -1095,11 +1455,19 @@ def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
 def configure_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
     global alert_webhook_url
     alert_webhook_url = _validate_webhook_url(payload.webhook_url)
-    return {"status": "configured", "webhook_url": alert_webhook_url}
+    encrypted = secret_store.encrypt_text(alert_webhook_url)
+    conn = db.create_connection()
+    if conn:
+        try:
+            db.set_app_setting(conn, "alert_webhook_url_enc", encrypted)
+        finally:
+            conn.close()
+    return {"status": "configured", "webhook_url": alert_webhook_url, "encrypted_webhook": encrypted}
 
 
 @app.post("/triage/{pid}", dependencies=[Depends(require_analyst_or_admin)])
-def auto_triage(pid: int, payload: TriageRequest) -> dict[str, Any]:
+def auto_triage(request: Request, pid: int, payload: TriageRequest) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="triage", detail="Too many triage requests. Wait briefly and retry.")
     import plugins.ai_analyst as ai_analyst
     import plugins.internals as internals
     import plugins.memory_forensics as memory_forensics
@@ -1171,6 +1539,35 @@ def network_sniff(payload: SnifferRequest) -> dict[str, Any]:
 @app.get("/artifacts")
 def list_artifacts() -> dict[str, str]:
     return _artifact_manifest()
+
+
+@app.get("/integrity", dependencies=[Depends(require_analyst_or_admin)])
+def verify_integrity() -> dict[str, Any]:
+    observability_service.log_event("integrity_verify_requested")
+    return integrity_service.verify_manifest()
+
+
+@app.get("/integrity/history", dependencies=[Depends(require_admin)])
+def integrity_history() -> list[dict[str, Any]]:
+    return integrity_service.history()
+
+
+@app.post("/integrity/refresh", dependencies=[Depends(require_admin)])
+def refresh_integrity_manifest(request: Request) -> dict[str, Any]:
+    _apply_rate_limit(request, bucket="integrity_refresh", detail="Too many integrity refresh requests. Wait briefly and retry.")
+    manifest = integrity_service.refresh_manifest()
+    observability_service.log_event("integrity_manifest_refreshed", file_count=len(manifest.get("files", {})))
+    return {
+        "status": "refreshed",
+        "manifest_path": manifest.get("manifest_path", ""),
+        "file_count": len(manifest.get("files", {})),
+        "generated_at": manifest.get("generated_at", 0),
+    }
+
+
+@app.get("/observability/summary", dependencies=[Depends(require_admin)])
+def observability_summary() -> dict[str, Any]:
+    return observability_service.summary()
 
 
 @app.get("/integrations/telemetry-fabric/status", dependencies=[Depends(require_admin)])
@@ -1312,6 +1709,7 @@ def capture_evidence(payload: EvidenceRequest) -> dict[str, Any]:
     path = collector.capture_screenshot(payload.alert_name)
     if str(path).startswith("Error"):
         raise HTTPException(status_code=500, detail=str(path))
+    integrity_service.refresh_manifest()
     return {"status": "captured", "path": path}
 
 
@@ -1329,6 +1727,7 @@ def delete_evidence(filename: str) -> dict[str, str]:
     if not target.exists():
         raise HTTPException(status_code=404, detail="Evidence file not found")
     target.unlink()
+    integrity_service.refresh_manifest()
     return {"status": "deleted", "path": str(target)}
 
 
@@ -1405,6 +1804,7 @@ def _write_monitor_artifacts(
     artifact_service.write_incident_bundle(incident, final, telemetry_rows)
     generate_pdf(OUT_DIR, author="Ulfat Ibadov", sections=report_sections)
     generate_html(OUT_DIR, author="Ulfat Ibadov")
+    integrity_service.refresh_manifest()
 
 
 def _artifact_manifest() -> dict[str, str]:
@@ -1418,6 +1818,11 @@ def _artifact_manifest() -> dict[str, str]:
         "ShadowLab_Report.html",
         "ShadowLab_EntityGraph.html",
         "ShadowLab_EntityGraph.json",
+        "integrity_manifest.json",
+        "SecurityOps_Report.json",
+        "SecurityOps_Report.html",
+        "observability.jsonl",
+        "postgres_bootstrap.sql",
     ]
     return {
         name: str(OUT_DIR / name)
@@ -1452,12 +1857,155 @@ def _alert_destination_type(webhook_url: str) -> str:
 
 
 def _validate_webhook_url(webhook_url: str) -> str:
-    parsed = urlparse(webhook_url.strip())
-    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Webhook URL must be a valid http(s) URL")
-    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
-        raise HTTPException(status_code=400, detail="Plain HTTP webhooks are restricted to localhost")
-    return webhook_url.strip()
+    normalized = normalize_outbound_url(webhook_url)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Webhook URL must be a safe http(s) destination")
+    return normalized
+
+
+def _validated_sha256(value: str) -> str:
+    candidate = (value or "").strip().lower()
+    if not SHA256_RE.fullmatch(candidate):
+        raise ValueError("SHA-256 values must be 64 hexadecimal characters")
+    return candidate
+
+
+def _validated_ip_address(value: str) -> str:
+    candidate = (value or "").strip()
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError as exc:
+        raise ValueError("Invalid IP address") from exc
+
+
+def _validated_network_range(value: str) -> str:
+    candidate = (value or "").strip()
+    try:
+        return str(ipaddress.ip_network(candidate, strict=False))
+    except ValueError as exc:
+        raise ValueError("Invalid IP range or CIDR") from exc
+
+
+def _validated_incident_id(value: str) -> str:
+    candidate = (value or "").strip()
+    if candidate and not INCIDENT_ID_RE.fullmatch(candidate):
+        raise ValueError("incident_id contains unsupported characters")
+    return candidate
+
+
+def _validate_startup_security_posture() -> None:
+    profile = get_active_policy_name()
+    issues: list[str] = []
+    if profile in {"corp", "prod"} and not security_settings.auth_required:
+        issues.append("authentication must be enabled")
+    if profile in {"corp", "prod"} and any(origin.strip() == "*" for origin in security_settings.allowed_origins):
+        issues.append("wildcard CORS origins are not allowed")
+    if profile == "prod" and security_settings.enable_dangerous_actions:
+        issues.append("dangerous actions must be disabled")
+    if profile in {"corp", "prod"} and security_settings.enable_network_warfare:
+        issues.append("network warfare must be disabled")
+    if profile == "prod" and security_settings.allow_destructive_file_delete:
+        issues.append("destructive file deletion must be disabled")
+    if profile in {"corp", "prod"} and security_settings.api_keys:
+        issues.append("raw SHADOWLAB_API_KEYS are not allowed; use SHA-256 hashed keys")
+    if profile in {"corp", "prod"} and security_settings.api_key:
+        issues.append("raw SHADOWLAB_API_KEY is not allowed; use SHADOWLAB_API_KEY_SHA256")
+    if issues:
+        raise RuntimeError(f"Insecure startup posture for profile `{profile}`: " + "; ".join(issues))
+    observability_service.log_event("startup_security_posture_validated", profile=profile)
+
+
+def _apply_rate_limit(request: Request | None, *, bucket: str, detail: str) -> None:
+    target_request = request
+    if target_request is None:
+        class _Client:
+            host = "internal"
+
+        class _State:
+            pass
+
+        class _Url:
+            path = f"/{bucket}"
+
+        class _StubRequest:
+            client = _Client()
+            state = _State()
+            url = _Url()
+
+        target_request = _StubRequest()  # type: ignore[assignment]
+    security_module._enforce_request_rate_limit(
+        target_request,  # type: ignore[arg-type]
+        bucket=bucket,
+        limit=6 if bucket in {"monitor_run", "triage"} else 12,
+        window_seconds=60,
+        detail=detail,
+    )
+
+
+def _redact_audit_detail(detail: str) -> str:
+    if not detail:
+        return ""
+    redacted = detail
+    for token in ["api_key", "token", "signature", "shared_key", "secret", "webhook_url"]:
+        redacted = re.sub(rf"(?i)({token}=)[^&]+", rf"\1***redacted***", redacted)
+    return redacted[:500]
+
+
+def _validate_replay_artifact_path(artifact_path: str) -> Path:
+    candidate = Path(artifact_path or "").expanduser()
+    if not str(candidate).strip():
+        raise HTTPException(status_code=400, detail="artifact_path is required")
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid artifact path: {exc}") from exc
+    allowed_root = OUT_DIR.resolve()
+    if allowed_root not in resolved.parents:
+        raise HTTPException(status_code=400, detail="Replay artifacts must stay within shadowlab_out")
+    if resolved.suffix.lower() != ".json":
+        raise HTTPException(status_code=400, detail="Replay artifacts must be JSON files")
+    return resolved
+
+
+def _validate_persistence_target(item_type: str, path: str, name: str) -> None:
+    import plugins.persistence as persistence_scanner
+
+    candidates = persistence_scanner.get_persistence_items_fast()
+    normalized_type = (item_type or "").strip().lower()
+    normalized_path = (path or "").strip().lower()
+    normalized_name = (name or "").strip().lower()
+    for item in candidates:
+        item_type_value = str(item.get("type", "")).strip().lower()
+        item_path_value = str(item.get("path", "")).strip().lower()
+        item_name_value = str(item.get("name", "")).strip().lower()
+        if item_type_value != normalized_type or item_path_value != normalized_path:
+            continue
+        if normalized_name and item_name_value != normalized_name:
+            continue
+        return
+    raise HTTPException(status_code=400, detail="Persistence target no longer matches current inventory")
+
+
+def _validate_quarantine_file_path(path_value: str) -> Path:
+    target = Path(path_value or "").expanduser()
+    if not str(target).strip():
+        raise HTTPException(status_code=400, detail="Quarantine path missing")
+    resolved = target.resolve(strict=False)
+    quarantine_root = (BASE_DIR / "shadowlab_quarantine").resolve()
+    if quarantine_root not in resolved.parents:
+        raise HTTPException(status_code=400, detail="Invalid quarantine path")
+    return resolved
+
+
+def _validate_quarantine_restore_paths(quarantine_path: str, original_path: str) -> tuple[Path, Path]:
+    source = _validate_quarantine_file_path(quarantine_path)
+    target = Path(original_path or "").expanduser()
+    if not str(target).strip():
+        raise HTTPException(status_code=400, detail="Original path missing")
+    resolved_target = target.resolve(strict=False)
+    if resolved_target == source:
+        raise HTTPException(status_code=400, detail="Invalid restore target")
+    return source, resolved_target
 
 
 def _log_collector_exports(result: dict[str, Any]) -> None:
@@ -1535,6 +2083,19 @@ def _require_enterprise_approval(request: Request | None, action_name: str) -> N
             status_code=403,
             detail=f"Approval `{approval_id}` status is `{status_value or 'unknown'}`; approved status required",
         )
+    expected_action = str(item.get("action", "")).strip().lower()
+    if expected_action != action_name.strip().lower():
+        raise HTTPException(
+            status_code=403,
+            detail=f"Approval `{approval_id}` is scoped to `{expected_action or 'unknown'}` and cannot be used for `{action_name}`",
+        )
+    expires_at = float(item.get("expires_at", 0) or 0)
+    if expires_at and time.time() > expires_at:
+        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has expired")
+    used_at = float(item.get("used_at", 0) or 0)
+    if used_at:
+        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has already been consumed")
+    request.state.pending_approval_id = int(approval_id)
 
 
 def _connector_queue_worker_loop() -> None:
@@ -1555,10 +2116,27 @@ def _audit_mutating_request(request: Request, status_code: int) -> None:
             context = getattr(request.state, "security_context", None)
             role = getattr(context, "role", "")
             client_ip = request.client.host if request.client else ""
-            detail = request.url.query[:200] if request.url.query else ""
+            detail = _redact_audit_detail(request.url.query[:500] if request.url.query else "")
             db.log_action_audit(conn, request.method.upper(), request.url.path, int(status_code), role, client_ip, detail)
         finally:
             conn.close()
+    except Exception:
+        return
+
+
+def _consume_pending_approval(request: Request, status_code: int) -> None:
+    approval_id = getattr(request.state, "pending_approval_id", None)
+    if not approval_id or status_code >= 400:
+        return
+    try:
+        conn = db.create_connection()
+        if conn is None:
+            return
+        try:
+            db.mark_approval_used(conn, int(approval_id), time.time())
+        finally:
+            conn.close()
+        observability_service.log_event("approval_consumed", approval_id=int(approval_id), status_code=int(status_code))
     except Exception:
         return
 

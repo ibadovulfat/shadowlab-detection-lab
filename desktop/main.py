@@ -285,6 +285,7 @@ class ShadowLabDesktop(QMainWindow):
         self.tabs.addTab(self._history_tab(), "History")
         self.tabs.addTab(self._artifacts_tab(), "Artifacts")
         self.tabs.addTab(self._enterprise_tab(), "Enterprise")
+        self.tabs.addTab(self._security_ops_tab(), "Security Ops")
         self.tabs.addTab(self._scenario_tab(), "Scenarios")
         self.tabs.addTab(self._about_tab(), "About / FAQ")
         self.tabs.setUsesScrollButtons(True)
@@ -354,10 +355,12 @@ class ShadowLabDesktop(QMainWindow):
     def _panel_card(self, title: str, content: QWidget, expand_fn) -> QWidget:
         card = QFrame()
         card.setProperty("card", True)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(10, 8, 10, 10)
         card_layout.setSpacing(6)
         header = QWidget()
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         header_row = QHBoxLayout(header)
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(6)
@@ -369,8 +372,13 @@ class ShadowLabDesktop(QMainWindow):
         header_row.addWidget(label)
         header_row.addStretch(1)
         header_row.addWidget(expand_btn)
+        expanding_content = isinstance(content, (QTextEdit, QTextBrowser, QTableWidget, QListWidget, QTreeWidget))
+        if expanding_content:
+            content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        else:
+            content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         card_layout.addWidget(header)
-        card_layout.addWidget(content)
+        card_layout.addWidget(content, 1 if expanding_content else 0)
         return card
 
     def _open_panel_window(self, title: str, body: QWidget) -> None:
@@ -836,20 +844,38 @@ class ShadowLabDesktop(QMainWindow):
         top = QWidget(); r = QHBoxLayout(top)
         r.setContentsMargins(0, 0, 0, 0)
         r.setSpacing(8)
+        top.setMinimumHeight(42)
+        top.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         refresh_btn = QPushButton("Refresh Entity Graph"); refresh_btn.clicked.connect(self.refresh_entity_graph)
         focus_btn = QPushButton("Build From Selected Process"); focus_btn.clicked.connect(self.refresh_selected_process_graph)
         open_btn = QPushButton("Open Interactive Graph"); open_btn.clicked.connect(self.open_entity_graph)
         r.addWidget(refresh_btn); r.addWidget(focus_btn); r.addWidget(open_btn); r.addStretch(1)
         l.addWidget(self._panel_card("Graph Controls", top, lambda: self._open_panel_window("Graph Controls", QLabel("Use graph controls in main workspace."))))
         self.graph_summary = QTextBrowser(); self.graph_summary.setMinimumHeight(140)
+        graph_top = QWidget()
+        graph_top_layout = QHBoxLayout(graph_top)
+        graph_top_layout.setContentsMargins(0, 0, 0, 0)
+        graph_top_layout.setSpacing(8)
+        self.graph_findings = QTextBrowser(); self.graph_findings.setMinimumHeight(180)
+        self.graph_focus_table = QTableWidget(0, 4); self.graph_focus_table.setHorizontalHeaderLabels(["Process","PID","Risk","Signature"]); self._style_table(self.graph_focus_table)
+        self.graph_focus_table.setMinimumHeight(180)
+        self.graph_group_table = QTableWidget(0, 2); self.graph_group_table.setHorizontalHeaderLabels(["Group","Count"]); self._style_table(self.graph_group_table)
+        self.graph_group_table.setMinimumHeight(180)
+        graph_top_layout.addWidget(self._panel_card("Priority Findings", self.graph_findings, lambda: self._open_panel_window("Priority Findings", self._clone_text_view(self.graph_findings))), 3)
+        graph_top_layout.addWidget(self._panel_card("Hot Processes", self.graph_focus_table, lambda: self._open_panel_window("Hot Processes", self._clone_table(self.graph_focus_table))), 3)
+        graph_top_layout.addWidget(self._panel_card("Graph Coverage", self.graph_group_table, lambda: self._open_panel_window("Graph Coverage", self._clone_table(self.graph_group_table))), 2)
         split = QSplitter(Qt.Horizontal)
-        self.graph_nodes_table = QTableWidget(0, 3); self.graph_nodes_table.setHorizontalHeaderLabels(["Label","Group","Title"]); self._style_table(self.graph_nodes_table)
-        self.graph_edges_table = QTableWidget(0, 3); self.graph_edges_table.setHorizontalHeaderLabels(["From","To","Label"]); self._style_table(self.graph_edges_table)
+        self.graph_nodes_table = QTableWidget(0, 5); self.graph_nodes_table.setHorizontalHeaderLabels(["Label","Group","Cluster","Risk","Title"]); self._style_table(self.graph_nodes_table)
+        self.graph_edges_table = QTableWidget(0, 4); self.graph_edges_table.setHorizontalHeaderLabels(["From","To","Label","Width"]); self._style_table(self.graph_edges_table)
+        self.graph_nodes_table.setMinimumHeight(240)
+        self.graph_edges_table.setMinimumHeight(240)
         split.addWidget(self._panel_card("Entity Nodes", self.graph_nodes_table, lambda: self._open_panel_window("Entity Nodes", self._clone_table(self.graph_nodes_table))))
         split.addWidget(self._panel_card("Entity Edges", self.graph_edges_table, lambda: self._open_panel_window("Entity Edges", self._clone_table(self.graph_edges_table))))
         split.setStretchFactor(0, 2); split.setStretchFactor(1, 2)
-        self.graph_detail = QTextEdit(); self.graph_detail.setReadOnly(True)
+        split.setChildrenCollapsible(False)
+        self.graph_detail = QTextEdit(); self.graph_detail.setReadOnly(True); self.graph_detail.setMinimumHeight(180)
         l.addWidget(self._panel_card("Graph Summary", self.graph_summary, lambda: self._open_panel_window("Graph Summary", self._clone_text_view(self.graph_summary))))
+        l.addWidget(graph_top)
         l.addWidget(split, 1)
         l.addWidget(self._panel_card("Graph Detail", self.graph_detail, lambda: self._open_panel_window("Graph Detail", self._clone_text_view(self.graph_detail))))
         return w
@@ -988,6 +1014,36 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_narrative = QTextBrowser(); self.enterprise_narrative.setProperty("role", "brief"); self.enterprise_narrative.setMinimumHeight(180)
         self.enterprise_detail = QTextEdit(); self.enterprise_detail.setReadOnly(True)
         rl.addWidget(self.enterprise_narrative); rl.addWidget(self.enterprise_detail)
+        split.addWidget(left); split.addWidget(right); split.setStretchFactor(0, 2); split.setStretchFactor(1, 3)
+        l.addWidget(split, 1)
+        return w
+
+    def _security_ops_tab(self) -> QWidget:
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
+        self._tab_header(l, "Security Ops & Platform Readiness", "Signed integrity, observability, migrations, database readiness and secret lifecycle operations without disturbing existing workspaces.")
+        controls = QWidget(); row = QHBoxLayout(controls); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
+        refresh_btn = QPushButton("Refresh Security Ops"); refresh_btn.clicked.connect(self.refresh_security_ops_workspace); self._bind_capability(refresh_btn, "can_manage_integrations")
+        export_btn = QPushButton("Export Ops Report"); export_btn.clicked.connect(self.export_security_ops_report); self._bind_capability(export_btn, "can_manage_integrations")
+        refresh_integrity_btn = QPushButton("Refresh Integrity"); refresh_integrity_btn.clicked.connect(self.refresh_integrity_manifest); self._bind_capability(refresh_integrity_btn, "can_manage_integrations")
+        rotate_btn = QPushButton("Rotate Secrets"); rotate_btn.clicked.connect(self.rotate_security_secrets); self._bind_capability(rotate_btn, "can_manage_integrations")
+        clear_webhook_btn = QPushButton("Clear Webhook"); clear_webhook_btn.clicked.connect(self.clear_alert_webhook_secret); self._bind_capability(clear_webhook_btn, "can_manage_integrations")
+        for btn in [refresh_btn, export_btn, refresh_integrity_btn, rotate_btn, clear_webhook_btn]:
+            row.addWidget(btn)
+        row.addStretch(1)
+        l.addWidget(self._panel_card("Security Ops Controls", controls, lambda: self._open_panel_window("Security Ops Controls", QLabel("Use Security Ops controls in main workspace."))))
+
+        self.security_ops_summary = QTextBrowser(); self.security_ops_summary.setProperty("role", "brief"); self.security_ops_summary.setMinimumHeight(150)
+        l.addWidget(self._panel_card("Security Ops Summary", self.security_ops_summary, lambda: self._open_panel_window("Security Ops Summary", self._clone_text_view(self.security_ops_summary))))
+
+        split = QSplitter(Qt.Horizontal)
+        left = QWidget(); ll = QVBoxLayout(left)
+        self.security_integrity_table = QTableWidget(0, 2); self.security_integrity_table.setHorizontalHeaderLabels(["Bucket", "Count"]); self._style_table(self.security_integrity_table)
+        self.security_platform_table = QTableWidget(0, 2); self.security_platform_table.setHorizontalHeaderLabels(["Domain", "Status"]); self._style_table(self.security_platform_table)
+        ll.addWidget(self._panel_card("Integrity Drift", self.security_integrity_table, lambda: self._open_panel_window("Integrity Drift", self._clone_table(self.security_integrity_table))))
+        ll.addWidget(self._panel_card("Platform Readiness", self.security_platform_table, lambda: self._open_panel_window("Platform Readiness", self._clone_table(self.security_platform_table))))
+        right = QWidget(); rl = QVBoxLayout(right)
+        self.security_ops_detail = QTextEdit(); self.security_ops_detail.setReadOnly(True)
+        rl.addWidget(self._panel_card("Security Ops Detail", self.security_ops_detail, lambda: self._open_panel_window("Security Ops Detail", self._clone_text_view(self.security_ops_detail))))
         split.addWidget(left); split.addWidget(right); split.setStretchFactor(0, 2); split.setStretchFactor(1, 3)
         l.addWidget(split, 1)
         return w
@@ -1962,23 +2018,51 @@ class ShadowLabDesktop(QMainWindow):
         self.entity_graph = graph
         summary = graph.get("summary", {})
         ad = graph.get("ad_context", {})
+        overall_risk = int(float(summary.get("overall_risk", 0) or 0))
+        exposure = summary.get("remote_exposure", {}) if isinstance(summary.get("remote_exposure"), dict) else {}
         self.graph_summary.setHtml(
             f"<h2>ShadowLab Attack Surface Graph</h2>"
             f"<p><b>Nodes:</b> {summary.get('node_count', 0)} | <b>Edges:</b> {summary.get('edge_count', 0)}<br>"
-            f"<b>Groups:</b> {json.dumps(summary.get('groups', {}))}<br>"
+            f"<b>Overall Risk:</b> <span style='color:{self._severity_color('high' if overall_risk >= 75 else 'medium' if overall_risk >= 45 else 'low').name()};font-weight:700;'>{overall_risk}</span><br>"
+            f"<b>Exposure:</b> {json.dumps(exposure)}<br>"
             f"<b>Domain Joined:</b> {summary.get('domain_joined', False)} | <b>Domain:</b> {summary.get('domain', 'n/a')}<br>"
             f"<b>User:</b> {ad.get('user', 'n/a')} | <b>Logon Server:</b> {ad.get('logon_server', 'n/a')}</p>"
         )
+        findings = graph.get("priority_findings", []) or summary.get("priority_findings", [])
+        findings_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in findings[:8])
+        self.graph_findings.setHtml("<h3>Operator Findings</h3>" f"<ul>{findings_html or '<li>No high-priority graph findings yet.</li>'}</ul>")
+        groups = summary.get("groups", {}) if isinstance(summary.get("groups"), dict) else {}
+        self.graph_group_table.setRowCount(len(groups))
+        for r, (group, count) in enumerate(sorted(groups.items(), key=lambda item: item[1], reverse=True)):
+            self.graph_group_table.setItem(r, 0, QTableWidgetItem(str(group)))
+            self.graph_group_table.setItem(r, 1, QTableWidgetItem(str(count)))
+        top_processes = summary.get("top_processes", []) if isinstance(summary.get("top_processes"), list) else []
+        self.graph_focus_table.setRowCount(len(top_processes))
+        for r, item in enumerate(top_processes):
+            for c, value in enumerate([item.get("name", ""), item.get("pid", ""), item.get("risk_score", 0), item.get("signature_status", "")]):
+                self.graph_focus_table.setItem(r, c, QTableWidgetItem(str(value)))
+            risk_value = float(item.get("risk_score", 0) or 0)
+            if risk_value >= 75:
+                self._paint_row(self.graph_focus_table, r, QColor("#d64550"))
+            elif risk_value >= 45:
+                self._paint_row(self.graph_focus_table, r, QColor("#e0a640"))
         nodes = graph.get("nodes", [])
         edges = graph.get("edges", [])
         self.graph_nodes_table.setRowCount(len(nodes))
         for r, node in enumerate(nodes):
-            for c, value in enumerate([node.get("label", ""), node.get("group", ""), node.get("title", "")]):
+            for c, value in enumerate([node.get("label", ""), node.get("group", ""), node.get("cluster", ""), node.get("risk_score", 0), node.get("title", "")]):
                 self.graph_nodes_table.setItem(r, c, QTableWidgetItem(str(value)))
+            node_risk = float(node.get("risk_score", 0) or 0)
+            if node_risk >= 75:
+                self._paint_row(self.graph_nodes_table, r, QColor("#d64550"))
+            elif node_risk >= 45:
+                self._paint_row(self.graph_nodes_table, r, QColor("#e0a640"))
         self.graph_edges_table.setRowCount(len(edges))
         for r, edge in enumerate(edges):
-            for c, value in enumerate([edge.get("from", ""), edge.get("to", ""), edge.get("label", "")]):
+            for c, value in enumerate([edge.get("from", ""), edge.get("to", ""), edge.get("label", ""), edge.get("width", 1)]):
                 self.graph_edges_table.setItem(r, c, QTableWidgetItem(str(value)))
+            if str(edge.get("label", "")) in {"connects_to", "contributes_to", "auto_starts"}:
+                self._paint_row(self.graph_edges_table, r, QColor("#f08c00"))
         self.graph_detail.setPlainText(json.dumps(graph, indent=2))
 
     def refresh_selected_process_graph(self) -> None:
@@ -2495,6 +2579,85 @@ class ShadowLabDesktop(QMainWindow):
             self._show_error(self.enterprise_detail, "Telemetry gap analysis failed", exc)
             return
         self._show_json(self.enterprise_detail, result)
+
+    def refresh_security_ops_workspace(self) -> None:
+        try:
+            report = self._get("/enterprise/report/security-ops", timeout=45).json()
+            observability = self._get("/observability/summary", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Security Ops refresh failed", exc)
+            return
+        integrity = report.get("integrity", {})
+        abuse = report.get("abuse", {})
+        database = report.get("database", {})
+        counts = integrity.get("counts", {}) if isinstance(integrity.get("counts"), dict) else {}
+        self.security_ops_summary.setHtml(
+            "<h3>Security Ops Posture</h3>"
+            f"<p><b>Integrity status:</b> {html.escape(str(integrity.get('status', 'unknown')))}"
+            f"<br><b>Signature valid:</b> {html.escape(str(integrity.get('signature_valid', False)))}"
+            f"<br><b>Dead letters:</b> {html.escape(str(abuse.get('dead_letters', 0)))}"
+            f"<br><b>Observability events:</b> {html.escape(str(observability.get('event_count', 0)))}</p>"
+        )
+        integrity_rows = [
+            ("verified", counts.get("verified", 0)),
+            ("modified", counts.get("modified", 0)),
+            ("missing", counts.get("missing", 0)),
+            ("untracked", counts.get("untracked", 0)),
+        ]
+        self.security_integrity_table.setRowCount(len(integrity_rows))
+        for r, item in enumerate(integrity_rows):
+            self.security_integrity_table.setItem(r, 0, QTableWidgetItem(str(item[0])))
+            self.security_integrity_table.setItem(r, 1, QTableWidgetItem(str(item[1])))
+        platform_rows = [
+            ("database backend", ((database.get("database") or {}).get("backend", "unknown") if isinstance(database, dict) else "unknown")),
+            ("database mode", ((database.get("database") or {}).get("mode", "unknown") if isinstance(database, dict) else "unknown")),
+            ("migrations", len((database.get("migrations") or {}).get("applied", [])) if isinstance(database, dict) else 0),
+            ("abuse anomalies", len(abuse.get("anomalies", [])) if isinstance(abuse, dict) else 0),
+        ]
+        self.security_platform_table.setRowCount(len(platform_rows))
+        for r, item in enumerate(platform_rows):
+            self.security_platform_table.setItem(r, 0, QTableWidgetItem(str(item[0])))
+            self.security_platform_table.setItem(r, 1, QTableWidgetItem(str(item[1])))
+        self._show_json(self.security_ops_detail, {"report": report, "observability": observability})
+
+    def refresh_integrity_manifest(self) -> None:
+        try:
+            result = self._post("/integrity/refresh", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Integrity refresh failed", exc)
+            return
+        self._show_json(self.security_ops_detail, result)
+        self.refresh_security_ops_workspace()
+
+    def rotate_security_secrets(self) -> None:
+        try:
+            result = self._post("/enterprise/secrets/rotate", json={"rotate_integrity_signing_key": True, "reencrypt_webhook_secret": True, "reencrypt_connector_secrets": True, "clear_alert_webhook": False}, timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Secret rotation failed", exc)
+            return
+        self._show_json(self.security_ops_detail, result)
+        self.refresh_security_ops_workspace()
+
+    def clear_alert_webhook_secret(self) -> None:
+        try:
+            result = self._post("/enterprise/secrets/rotate", json={"rotate_integrity_signing_key": False, "reencrypt_webhook_secret": False, "reencrypt_connector_secrets": False, "clear_alert_webhook": True}, timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Webhook clearing failed", exc)
+            return
+        self.webhook_url.clear()
+        self._show_json(self.security_ops_detail, result)
+        self.refresh_security_ops_workspace()
+
+    def export_security_ops_report(self) -> None:
+        try:
+            result = self._post("/enterprise/report/security-ops/export", timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Security Ops export failed", exc)
+            return
+        self._show_json(self.security_ops_detail, result)
+        html_path = str(result.get("html_path", "") or "")
+        if html_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(html_path))
 
     def _update_cpu_chart(self, rows) -> None:
         self.cpu_series.clear()

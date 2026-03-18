@@ -41,6 +41,7 @@ class CollectorTelemetryBridge:
         self.config = config or {}
         self.out_dir = out_dir or Path("shadowlab_out")
         self._collector_process: subprocess.Popen[str] | None = None
+        self._collector_log_handle = None
         self._lock = threading.Lock()
 
     def is_enabled(self) -> bool:
@@ -119,6 +120,7 @@ class CollectorTelemetryBridge:
         process_running = False
         pid = None
         with self._lock:
+            self._cleanup_collector_handle_locked()
             if self._collector_process is not None and self._collector_process.poll() is None:
                 process_running = True
                 pid = self._collector_process.pid
@@ -148,11 +150,13 @@ class CollectorTelemetryBridge:
             return {"status": "failed", "detail": f"Collector config not found: {config_path}"}
 
         with self._lock:
+            self._cleanup_collector_handle_locked()
             if self._collector_process is not None and self._collector_process.poll() is None:
                 return {"status": "already_running", "pid": self._collector_process.pid}
             log_path = self.out_dir / "telemetry-fabric.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = log_path.open("a", encoding="utf-8")
+            self._collector_log_handle = log_handle
             self._collector_process = subprocess.Popen(
                 [str(binary), "--config", str(config_path)],
                 stdout=log_handle,
@@ -166,6 +170,7 @@ class CollectorTelemetryBridge:
         with self._lock:
             if self._collector_process is None or self._collector_process.poll() is not None:
                 self._collector_process = None
+                self._cleanup_collector_handle_locked(force=True)
                 return {"status": "not_running"}
             self._collector_process.terminate()
             try:
@@ -175,7 +180,20 @@ class CollectorTelemetryBridge:
                 self._collector_process.wait(timeout=5)
             pid = self._collector_process.pid
             self._collector_process = None
+            self._cleanup_collector_handle_locked(force=True)
         return {"status": "stopped", "pid": pid}
+
+    def _cleanup_collector_handle_locked(self, *, force: bool = False) -> None:
+        process_finished = self._collector_process is None or self._collector_process.poll() is not None
+        if not force and not process_finished:
+            return
+        if self._collector_log_handle is not None:
+            try:
+                self._collector_log_handle.flush()
+                self._collector_log_handle.close()
+            except Exception:
+                pass
+            self._collector_log_handle = None
 
     def _collector_config_root(self) -> dict[str, Any]:
         return (

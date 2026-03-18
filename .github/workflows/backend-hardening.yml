@@ -1,0 +1,63 @@
+name: Backend Hardening
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify backend suite
+        run: python scripts/ci_verify.py
+
+  postgres-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: shadowlab
+          POSTGRES_USER: shadowlab
+          POSTGRES_PASSWORD: shadowlab
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowlab -d shadowlab"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Smoke test PostgreSQL runtime
+        env:
+          SHADOWLAB_DATABASE_URL: postgresql://shadowlab:shadowlab@127.0.0.1:5432/shadowlab
+        run: python scripts/smoke_test_postgres_runtime.py

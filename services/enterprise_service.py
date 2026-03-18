@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -9,11 +10,14 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
 import database as db
 from services.connector_delivery_service import ConnectorDeliveryService
+from services.outbound_security import normalize_outbound_url
+from services.secret_store import secret_store
 
 
 class EnterpriseService:
@@ -172,8 +176,17 @@ class EnterpriseService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            approval_id = db.create_approval_request(conn, case_id, action, requested_by=requested_by, approver=approver, reason=reason)
-            return {"approval_id": approval_id, "case_id": case_id, "status": "pending", "action": action}
+            expires_at = time.time() + (8 * 3600)
+            approval_id = db.create_approval_request(
+                conn,
+                case_id,
+                action,
+                requested_by=requested_by,
+                approver=approver,
+                reason=reason,
+                expires_at=expires_at,
+            )
+            return {"approval_id": approval_id, "case_id": case_id, "status": "pending", "action": action, "expires_at": expires_at}
         finally:
             conn.close()
 
@@ -262,9 +275,14 @@ class EnterpriseService:
         if conn is None:
             return defaults
         try:
+            existing = {
+                str(item.get("name", "")).strip().lower()
+                for item in db.get_connectors(conn).fillna("").to_dict(orient="records")
+            }
             for item in defaults:
-                db.upsert_connector(conn, item["name"], item["kind"], item["enabled"], item["config_json"])
-            return db.get_connectors(conn).fillna("").to_dict(orient="records")
+                if item["name"] not in existing:
+                    db.upsert_connector(conn, item["name"], item["kind"], item["enabled"], item["config_json"])
+            return [self._serialize_connector(item) for item in db.get_connectors(conn).fillna("").to_dict(orient="records")]
         finally:
             conn.close()
 
@@ -273,8 +291,9 @@ class EnterpriseService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            db.upsert_connector(conn, name, kind, enabled, json.dumps(config or {}))
-            return {"name": name, "kind": kind, "enabled": enabled}
+            protected_config = secret_store.protect_config(config or {})
+            db.upsert_connector(conn, name, kind, enabled, json.dumps(protected_config))
+            return {"name": name, "kind": kind, "enabled": enabled, "config": secret_store.redact_config(config or {})}
         finally:
             conn.close()
 
@@ -382,8 +401,8 @@ class EnterpriseService:
                     )
                     processed.append({"id": queue_id, "connector": connector_name, "status": "delivered"})
                     continue
-                next_retry = time.time() + min(300, 30 * (attempts + 1))
-                status = "retry" if attempts < 5 else "failed"
+                next_retry = time.time() + min(300, 30 * (attempts + 1)) + random.randint(0, 10)
+                status = "retry" if attempts < 5 else "dead_letter"
                 db.update_connector_delivery(
                     conn,
                     queue_id,
@@ -415,7 +434,7 @@ class EnterpriseService:
         return {"profiles": profiles, "guidance": "Map safe emulation runs to detections and compare ATT&CK coverage."}
 
     def replay_incident(self, artifact_path: str) -> dict[str, Any]:
-        target = Path(artifact_path)
+        target = self._safe_replay_artifact(artifact_path)
         if not target.exists():
             return {"status": "missing", "path": artifact_path}
         try:
@@ -496,6 +515,38 @@ class EnterpriseService:
             "auth_anomalies": auth_anomalies[:5],
         }
 
+    def abuse_summary(self) -> dict[str, Any]:
+        conn = db.create_connection()
+        if conn is None:
+            return {"status": "database_unavailable"}
+        try:
+            auth_rows = db.get_auth_logs(conn).fillna("").to_dict(orient="records")
+            action_rows = db.get_action_audits(conn).fillna("").to_dict(orient="records")
+            external_rows = db.get_external_requests(conn).fillna("").to_dict(orient="records")
+            queue_rows = db.get_connector_delivery_queue(conn, status="", limit=500).fillna("").to_dict(orient="records")
+        finally:
+            conn.close()
+        anomalies = []
+        try:
+            from api.main import _build_auth_anomalies
+
+            anomalies = _build_auth_anomalies(auth_rows, action_rows)
+        except Exception:
+            anomalies = []
+        return {
+            "auth_failures": sum(1 for row in auth_rows if str(row.get("event_type", "")) == "auth_failure"),
+            "authorization_denials": sum(1 for row in auth_rows if str(row.get("event_type", "")) in {"authz_denied", "policy_denied"}),
+            "signature_failures": sum(1 for row in auth_rows if str(row.get("event_type", "")) in {"signature_failure", "signature_replay"}),
+            "dangerous_mutations": sum(
+                1 for row in action_rows
+                if str(row.get("method", "")).upper() in {"POST", "PATCH", "DELETE"}
+                and any(token in str(row.get("path", "")) for token in ["/actions/", "/network/warfare/", "/quarantine/", "/deception/"])
+            ),
+            "external_failures": sum(1 for row in external_rows if str(row.get("status", "")).lower() not in {"ok", "sent", "delivered", "success"}),
+            "dead_letters": sum(1 for row in queue_rows if str(row.get("status", "")).lower() == "dead_letter"),
+            "anomalies": anomalies[:10],
+        }
+
     def incident_timeline_story(self, incident: dict[str, Any]) -> dict[str, Any]:
         attack_chain = incident.get("attack_chain", []) if isinstance(incident, dict) else []
         severity = incident.get("severity", "unknown") if isinstance(incident, dict) else "unknown"
@@ -540,7 +591,11 @@ class EnterpriseService:
         url = f"{scheme}://{host}:{port}"
         result = {"url": url, "reachable": False, "headers": {}, "cookies": [], "findings": [], "auth_review": {}}
         try:
-            response = requests.get(url, timeout=5, verify=False)
+            safe_url = normalize_outbound_url(url)
+            if not safe_url:
+                result["findings"].append({"severity": "info", "title": "Service skipped", "detail": "Outbound SSRF guard blocked inspection target."})
+                return result
+            response = requests.get(safe_url, timeout=5)
             result["reachable"] = True
             result["headers"] = dict(response.headers)
             result["cookies"] = [cookie.name for cookie in response.cookies]
@@ -665,3 +720,34 @@ class EnterpriseService:
         except Exception:
             pass
         return {"anomalies": anomalies}
+
+    def _safe_replay_artifact(self, artifact_path: str) -> Path:
+        candidate = Path(artifact_path or "").expanduser()
+        if not str(candidate).strip():
+            raise ValueError("artifact_path is required")
+        resolved = candidate.resolve(strict=False)
+        allowed_root = (self.base_dir / "shadowlab_out").resolve()
+        if allowed_root not in resolved.parents:
+            raise ValueError("Replay artifacts must stay within shadowlab_out")
+        if resolved.suffix.lower() != ".json":
+            raise ValueError("Replay artifacts must be JSON files")
+        parsed = urlparse(resolved.as_uri())
+        if parsed.scheme != "file":
+            raise ValueError("Replay artifacts must be local files")
+        return resolved
+
+    def _serialize_connector(self, connector: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(connector)
+        raw_config = normalized.get("config_json", "{}")
+        if isinstance(raw_config, str):
+            try:
+                parsed = json.loads(raw_config or "{}")
+            except json.JSONDecodeError:
+                parsed = {}
+        elif isinstance(raw_config, dict):
+            parsed = raw_config
+        else:
+            parsed = {}
+        normalized["config"] = secret_store.redact_config(secret_store.reveal_config(parsed))
+        normalized["config_json"] = json.dumps(normalized["config"])
+        return normalized

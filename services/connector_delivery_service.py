@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import requests
+from services.outbound_security import normalize_outbound_url
+from services.secret_store import secret_store
 
 
 class ConnectorDeliveryService:
@@ -16,7 +18,7 @@ class ConnectorDeliveryService:
 
     def deliver(self, connector: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
         name = str(connector.get("name", "")).strip().lower()
-        config = self._parse_config(connector.get("config_json", "{}"))
+        config = secret_store.reveal_config(self._parse_config(connector.get("config_json", "{}")))
         if name == "splunk":
             return self._deliver_splunk(config, event)
         if name == "sentinel":
@@ -30,7 +32,7 @@ class ConnectorDeliveryService:
         return {"ok": False, "status": "unsupported", "detail": f"Unsupported connector: {name}"}
 
     def _deliver_splunk(self, config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
-        hec_url = str(config.get("hec_url", "")).strip()
+        hec_url = self._normalize_destination_url(config.get("hec_url", ""))
         token = str(config.get("token", "")).strip()
         if not hec_url or not token:
             return {"ok": False, "status": "invalid_config", "detail": "splunk.hec_url and splunk.token are required"}
@@ -68,7 +70,7 @@ class ConnectorDeliveryService:
         return self._post_json(url, headers, [event], verify=bool(config.get("verify_tls", True)))
 
     def _deliver_elastic(self, config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
-        endpoint = str(config.get("endpoint", "")).strip().rstrip("/")
+        endpoint = self._normalize_destination_url(config.get("endpoint", "")).rstrip("/")
         index = str(config.get("index", "shadowlab-events")).strip()
         api_key = str(config.get("api_key", "")).strip()
         if not endpoint:
@@ -80,7 +82,7 @@ class ConnectorDeliveryService:
         return self._post_json(url, headers, event, verify=bool(config.get("verify_tls", True)))
 
     def _deliver_thehive(self, config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
-        url = str(config.get("url", "")).strip().rstrip("/")
+        url = self._normalize_destination_url(config.get("url", "")).rstrip("/")
         api_key = str(config.get("api_key", "")).strip()
         if not url or not api_key:
             return {"ok": False, "status": "invalid_config", "detail": "thehive.url and thehive.api_key are required"}
@@ -97,7 +99,7 @@ class ConnectorDeliveryService:
         return self._post_json(f"{url}/api/v1/alert", headers, alert_payload, verify=bool(config.get("verify_tls", True)))
 
     def _deliver_shuffle(self, config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
-        webhook_url = str(config.get("webhook_url", "")).strip()
+        webhook_url = self._normalize_destination_url(config.get("webhook_url", ""))
         token = str(config.get("token", "")).strip()
         if not webhook_url:
             return {"ok": False, "status": "invalid_config", "detail": "shuffle.webhook_url is required"}
@@ -139,3 +141,6 @@ class ConnectorDeliveryService:
             hmac.new(decoded_key, string_to_hash.encode("utf-8"), digestmod=hashlib.sha256).digest()
         ).decode("utf-8")
         return f"SharedKey {workspace_id}:{encoded_hash}"
+
+    def _normalize_destination_url(self, raw_url: Any) -> str:
+        return normalize_outbound_url(raw_url)

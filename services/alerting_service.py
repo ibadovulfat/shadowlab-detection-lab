@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import requests
+from services.outbound_security import normalize_outbound_url
 
 
 @dataclass(slots=True)
@@ -22,7 +23,7 @@ class AlertingService:
         self.timeout = timeout
 
     def dispatch(self, destination: str, payload: dict[str, Any]) -> AlertResult:
-        destination = (destination or "").strip()
+        destination = self._normalize_destination(destination)
         if not destination:
             return AlertResult(destination="", status="skipped", detail="No alert destination configured.")
 
@@ -82,3 +83,6 @@ class AlertingService:
         if findings:
             lines.append(f"Findings: {len(findings)}")
         return {"title": title, "text": "\n".join(lines)}
+
+    def _normalize_destination(self, destination: str) -> str:
+        return normalize_outbound_url(destination)

@@ -1,0 +1,14 @@
+[Unit]
+Description=ShadowLab API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/shadowlab
+EnvironmentFile=/opt/shadowlab/.env
+ExecStart=/opt/shadowlab/venv/bin/python /opt/shadowlab/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform
 import shutil
 import socket
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -40,14 +42,17 @@ class GraphService:
         else:
             processes = self._focus_processes(processes, connections)
             proc_ids = {int(proc.get("pid", -1) or -1) for proc in processes}
-            connections = [conn for conn in connections if int(conn.get("pid", -1) or -1) in proc_ids][:120]
-            persistence_items = persistence_items[:40]
-            incidents = incidents[:20]
+            connections = self._focus_connections([conn for conn in connections if int(conn.get("pid", -1) or -1) in proc_ids])
+            persistence_items = self._focus_persistence_items(persistence_items)
+            incidents = self._focus_incidents(incidents)
 
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
         seen_nodes: set[str] = set()
         seen_edges: set[tuple[str, str, str]] = set()
+        process_risks: list[dict[str, Any]] = []
+        remote_exposure: Counter[str] = Counter()
+        finding_signals: list[str] = []
 
         ad_context = self._collect_ad_context()
         domain_node = None
@@ -105,19 +110,37 @@ class GraphService:
                 self._add_edge(edges, seen_edges, host_node["id"], domain_node["id"], "joined_to", "#5c7cfa")
 
         process_lookup: dict[int, dict[str, Any]] = {}
-        for proc in processes[:80]:
+        for proc in processes[:28]:
             proc_pid = int(proc.get("pid", -1) or -1)
             if proc_pid < 0:
                 continue
             proc_name = str(proc.get("name") or f"pid-{proc_pid}")
+            risk = self._process_risk(proc, connections)
+            process_risks.append(
+                {
+                    "pid": proc_pid,
+                    "name": proc_name,
+                    "risk_score": risk,
+                    "signature_status": str(proc.get("signature_status", "n/a")),
+                }
+            )
             proc_node = self._add_node(
                 nodes,
                 seen_nodes,
                 f"proc:{proc_pid}",
-                f"{proc_name}\nPID {proc_pid}",
+                self._short_label(f"{proc_name}\nPID {proc_pid}", 26),
                 "process",
-                title=f"Executable: {proc.get('exe', 'n/a')}\nCmd: {proc.get('cmdline', '')[:180]}",
-                color="#ffd43b" if "powershell" in proc_name.lower() else "#74c0fc",
+                title=(
+                    f"Executable: {proc.get('exe', 'n/a')}\n"
+                    f"Cmd: {proc.get('cmdline', '')[:180]}\n"
+                    f"CPU: {proc.get('cpu_percent', 0)} | MEM: {proc.get('memory_percent', 0)}\n"
+                    f"Signature: {proc.get('signature_status', 'n/a')}\n"
+                    f"Graph Risk: {risk}"
+                ),
+                color=self._process_color(proc_name, risk),
+                size=self._node_size_for_risk(risk),
+                risk_score=risk,
+                cluster=self._cluster_for_process(proc_name),
             )
             process_lookup[proc_pid] = proc_node
             parent_pid = int(proc.get("ppid", -1) or -1)
@@ -127,20 +150,23 @@ class GraphService:
                 first_host = next(iter(host_lookup.values()))
                 self._add_edge(edges, seen_edges, first_host["id"], proc_node["id"], "runs", "#339af0")
 
-        for conn in connections[:120]:
+        for conn in connections[:24]:
             local_addr = str(conn.get("local_addr") or "")
             remote_addr = str(conn.get("remote_addr") or "")
             if not remote_addr:
                 continue
             remote_ip = remote_addr.split(":")[0]
+            exposure_type = self._remote_exposure_type(remote_ip)
+            remote_exposure[exposure_type] += 1
             remote_node = self._add_node(
                 nodes,
                 seen_nodes,
                 f"remote:{remote_ip}",
-                remote_ip,
+                self._short_label(remote_ip, 18),
                 "remote_ip",
-                title=f"Remote Endpoint\n{remote_addr}",
-                color="#fa5252",
+                title=f"Remote Endpoint\n{remote_addr}\nExposure: {exposure_type}",
+                color="#fa5252" if exposure_type == "public" else "#f08c00" if exposure_type == "private" else "#868e96",
+                cluster=f"remote:{exposure_type}",
             )
             pid_value = int(conn.get("pid", -1) or -1)
             if pid_value in process_lookup:
@@ -150,34 +176,57 @@ class GraphService:
             if local_addr and host_lookup:
                 self._add_edge(edges, seen_edges, next(iter(host_lookup.values()))["id"], remote_node["id"], f"socket {local_addr}", "#868e96")
 
-        for item in persistence_items[:120]:
-            pers_id = f"persistence:{item.get('type')}:{item.get('path')}:{item.get('name')}"
-            pers_node = self._add_node(
+        persistence_groups = self._group_persistence_items(persistence_items)
+        for pers_type, items in persistence_groups.items():
+            group_node = self._add_node(
                 nodes,
                 seen_nodes,
-                pers_id,
-                str(item.get("name") or item.get("type") or "persistence"),
-                "persistence",
-                title=f"{item.get('type', '')}\n{item.get('path', '')}\n{item.get('content_preview', '')[:180]}",
-                color="#ff922b",
+                f"persistence-group:{pers_type}",
+                f"{self._display_persistence_type(pers_type)}\n{len(items)} items",
+                "persistence_group",
+                title=self._persistence_group_title(pers_type, items),
+                color="#f08c00",
+                size=34,
+                cluster=f"persistence:{pers_type}",
             )
             if host_lookup:
-                self._add_edge(edges, seen_edges, next(iter(host_lookup.values()))["id"], pers_node["id"], "persists_via", "#ff922b")
+                self._add_edge(edges, seen_edges, next(iter(host_lookup.values()))["id"], group_node["id"], "persistence_cluster", "#ff922b")
+            for item in items[:2]:
+                pers_id = f"persistence:{item.get('type')}:{item.get('path')}:{item.get('name')}"
+                persistence_name = str(item.get("name") or item.get("type") or "persistence")
+                pers_node = self._add_node(
+                    nodes,
+                    seen_nodes,
+                    pers_id,
+                    self._short_label(persistence_name, 26),
+                    "persistence",
+                    title=f"{item.get('type', '')}\n{item.get('path', '')}\n{item.get('content_preview', '')[:180]}",
+                    color="#ffb454",
+                    cluster=f"persistence:{str(item.get('type') or 'generic').lower()}",
+                )
+                self._add_edge(edges, seen_edges, group_node["id"], pers_node["id"], "contains", "#ffb454")
+                for proc_pid, proc_node in process_lookup.items():
+                    proc_name = str(proc_node.get("label", "")).lower()
+                    if persistence_name.lower() in proc_name or str(item.get("path", "")).lower() in str(proc_node.get("title", "")).lower():
+                        self._add_edge(edges, seen_edges, pers_node["id"], proc_node["id"], "auto_starts", "#ff922b")
 
-        for incident in incidents[:80]:
+        for incident in incidents[:10]:
             incident_id = str(incident.get("incident_id") or "incident")
             sev = str(incident.get("severity", "low")).lower()
             incident_node = self._add_node(
                 nodes,
                 seen_nodes,
                 f"incident:{incident_id}",
-                incident_id,
+                self._short_label(incident_id, 18),
                 "incident",
                 title=str(incident.get("title") or "Behavioral incident"),
                 color="#c92a2a" if sev in {"high", "critical"} else "#fab005",
             )
             if host_lookup:
                 self._add_edge(edges, seen_edges, next(iter(host_lookup.values()))["id"], incident_node["id"], "generated", "#c92a2a")
+            for proc_pid, proc_node in process_lookup.items():
+                if self._incident_matches_process(incident, proc_node):
+                    self._add_edge(edges, seen_edges, proc_node["id"], incident_node["id"], "contributes_to", "#c92a2a")
             for tactic in self._safe_json_list(incident.get("attack_chain"))[:10]:
                 tactic_node = self._add_node(
                     nodes,
@@ -201,17 +250,20 @@ class GraphService:
                 )
                 self._add_edge(edges, seen_edges, incident_node["id"], tech_node["id"], "evidenced_by", "#be4bdb")
 
+        summary = self._summary(nodes, edges, ad_context, process_risks, remote_exposure)
+        finding_signals.extend(summary.get("priority_findings", []))
         html_path = self._render_graph(nodes, edges, pid=pid)
         json_path = self.out_dir / ("ShadowLab_EntityGraph.json" if pid is None else f"ShadowLab_EntityGraph_PID_{pid}.json")
-        json_path.write_text(json.dumps({"nodes": nodes, "edges": edges, "summary": self._summary(nodes, edges, ad_context)}, indent=2), encoding="utf-8")
+        json_path.write_text(json.dumps({"nodes": nodes, "edges": edges, "summary": summary}, indent=2), encoding="utf-8")
 
         return {
-            "summary": self._summary(nodes, edges, ad_context),
+            "summary": summary,
             "nodes": nodes,
             "edges": edges,
             "html_path": str(html_path),
             "json_path": str(json_path),
             "ad_context": ad_context,
+            "priority_findings": finding_signals[:8],
         }
 
     def _render_graph(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], pid: int | None = None) -> Path:
@@ -224,17 +276,29 @@ class GraphService:
                 title=node.get("title", ""),
                 color=node.get("color", "#74c0fc"),
                 shape=self._shape_for_group(node.get("group", "")),
+                size=node.get("size", 22),
             )
         for edge in edges:
-            net.add_edge(edge["from"], edge["to"], label=edge.get("label", ""), color=edge.get("color", "#868e96"))
+            net.add_edge(
+                edge["from"],
+                edge["to"],
+                label=edge.get("label", ""),
+                color=edge.get("color", "#868e96"),
+                width=edge.get("width", 1),
+            )
         net.set_options(
             """
             {
-              "nodes": { "font": { "face": "Segoe UI", "size": 16 }, "borderWidth": 1, "shadow": true },
-              "edges": { "arrows": { "to": { "enabled": true, "scaleFactor": 0.6 } }, "smooth": { "type": "continuous" }, "font": { "size": 10 } },
+              "nodes": { "font": { "face": "Segoe UI", "size": 16 }, "borderWidth": 1, "shadow": true, "scaling": { "min": 16, "max": 42 } },
+              "edges": { "arrows": { "to": { "enabled": true, "scaleFactor": 0.6 } }, "smooth": { "type": "dynamic" }, "font": { "size": 10, "strokeWidth": 0 }, "selectionWidth": 2 },
               "layout": { "improvedLayout": true },
-              "interaction": { "hover": true, "navigationButtons": true, "keyboard": true },
-              "physics": { "enabled": true, "stabilization": { "enabled": true, "iterations": 120, "fit": true } }
+              "interaction": { "hover": true, "navigationButtons": true, "keyboard": true, "multiselect": true },
+              "physics": {
+                "enabled": true,
+                "solver": "forceAtlas2Based",
+                "forceAtlas2Based": { "gravitationalConstant": -85, "springLength": 220, "springConstant": 0.03, "avoidOverlap": 1 },
+                "stabilization": { "enabled": true, "iterations": 160, "fit": true }
+              }
             }
             """
         )
@@ -244,6 +308,9 @@ class GraphService:
             "</body>",
             """
 <script>
+var legend = document.createElement('div');
+legend.innerHTML = '<div style="position:fixed;left:18px;top:18px;z-index:9999;background:rgba(12,18,28,0.92);color:#eef4fb;padding:12px 14px;border:1px solid #2b425b;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;line-height:1.5;"><b>Enterprise Graph</b><br><span style="color:#74c0fc">Blue</span>: Process / Host<br><span style="color:#fa5252">Red</span>: Public remote exposure<br><span style="color:#f08c00">Orange</span>: Persistence clusters<br><span style="color:#fab005">Gold</span>: Incident nodes</div>';
+document.body.appendChild(legend);
 window.addEventListener('load', function () {
   setTimeout(function () {
     document.querySelectorAll('.vis-network .vis-loading-bar, .vis-network .vis-loader, #loadingBar').forEach(function (el) {
@@ -297,17 +364,48 @@ window.addEventListener('load', function () {
         except Exception:
             return ""
 
-    def _summary(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], ad_context: dict[str, Any]) -> dict[str, Any]:
+    def _summary(
+        self,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        ad_context: dict[str, Any],
+        process_risks: list[dict[str, Any]],
+        remote_exposure: Counter[str],
+    ) -> dict[str, Any]:
         by_group: dict[str, int] = {}
         for node in nodes:
             group = str(node.get("group", "unknown"))
             by_group[group] = by_group.get(group, 0) + 1
+        sorted_process_risks = sorted(process_risks, key=lambda item: float(item.get("risk_score", 0)), reverse=True)
+        top_processes = sorted_process_risks[:5]
+        peak_risk = float(top_processes[0].get("risk_score", 0)) if top_processes else 0.0
+        average_risk = sum(float(item.get("risk_score", 0)) for item in top_processes) / max(len(top_processes), 1)
+        exposure_bonus = min(15.0, float(remote_exposure.get("public", 0) * 4))
+        persistence_bonus = 8.0 if by_group.get("persistence", 0) else 0.0
+        incident_bonus = 10.0 if by_group.get("incident", 0) else 0.0
+        overall_risk = min(100, int(max(peak_risk, average_risk) + exposure_bonus + persistence_bonus + incident_bonus))
+        priority_findings: list[str] = []
+        if remote_exposure.get("public", 0):
+            priority_findings.append(f"Public remote exposure observed across {remote_exposure.get('public', 0)} graph edges.")
+        if by_group.get("persistence", 0):
+            priority_findings.append(f"{by_group.get('persistence', 0)} persistence anchors are present in the attack surface.")
+        if any(float(item.get("risk_score", 0)) >= 75 for item in top_processes):
+            highest = top_processes[0]
+            priority_findings.append(
+                f"Top process hotspot: {highest.get('name')} (PID {highest.get('pid')}) scored {int(float(highest.get('risk_score', 0)))}."
+            )
+        if by_group.get("incident", 0):
+            priority_findings.append(f"{by_group.get('incident', 0)} incidents are linked into the graph context.")
         return {
             "node_count": len(nodes),
             "edge_count": len(edges),
             "groups": by_group,
             "domain_joined": bool(ad_context.get("domain")),
             "domain": ad_context.get("domain", ""),
+            "overall_risk": overall_risk,
+            "top_processes": top_processes,
+            "remote_exposure": dict(remote_exposure),
+            "priority_findings": priority_findings[:6],
         }
 
     def _add_node(
@@ -320,9 +418,23 @@ window.addEventListener('load', function () {
         *,
         title: str = "",
         color: str = "#74c0fc",
+        size: int = 22,
+        risk_score: float = 0,
+        cluster: str = "",
     ) -> dict[str, Any]:
         if node_id not in seen:
-            nodes.append({"id": node_id, "label": label, "group": group, "title": title, "color": color})
+            nodes.append(
+                {
+                    "id": node_id,
+                    "label": label,
+                    "group": group,
+                    "title": title,
+                    "color": color,
+                    "size": size,
+                    "risk_score": risk_score,
+                    "cluster": cluster,
+                }
+            )
             seen.add(node_id)
         return next(node for node in nodes if node["id"] == node_id)
 
@@ -339,7 +451,8 @@ window.addEventListener('load', function () {
         if key in seen:
             return
         seen.add(key)
-        edges.append({"from": source, "to": target, "label": label, "color": color})
+        width = 2 if label in {"connects_to", "contributes_to", "auto_starts"} else 1
+        edges.append({"from": source, "to": target, "label": label, "color": color, "width": width})
 
     def _shape_for_group(self, group: str) -> str:
         return {
@@ -351,6 +464,7 @@ window.addEventListener('load', function () {
             "remote_ip": "diamond",
             "incident": "star",
             "persistence": "database",
+            "persistence_group": "box",
             "attack_tactic": "triangle",
             "mitre_technique": "triangleDown",
         }.get(group, "dot")
@@ -385,5 +499,131 @@ window.addEventListener('load', function () {
                 score += 20
             ranked.append((score, proc))
         ranked.sort(key=lambda item: item[0], reverse=True)
-        focused = [proc for _, proc in ranked[:60]]
+        focused = [proc for _, proc in ranked[:24]]
         return focused
+
+    def _focus_connections(self, connections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for conn in connections:
+            remote_addr = str(conn.get("remote_addr") or "")
+            if not remote_addr:
+                continue
+            remote_ip = remote_addr.split(":")[0]
+            exposure = self._remote_exposure_type(remote_ip)
+            score = 30.0 if exposure == "public" else 15.0 if exposure == "private" else 5.0
+            if str(conn.get("status", "")).upper() == "ESTABLISHED":
+                score += 10.0
+            ranked.append((score, conn))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [item for _, item in ranked[:24]]
+
+    def _focus_persistence_items(self, persistence_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for item in persistence_items:
+            item_type = str(item.get("type") or "").lower()
+            name = str(item.get("name") or "").lower()
+            path = str(item.get("path") or "").lower()
+            score = 10.0
+            if "run" in item_type or "startup" in item_type:
+                score += 18.0
+            if "scheduled task" in item_type:
+                score += 12.0
+            if any(token in f"{name} {path}" for token in ["powershell", "cmd", "wscript", "cscript", "rundll32", "mshta", "regsvr32"]):
+                score += 25.0
+            ranked.append((score, item))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [item for _, item in ranked[:18]]
+
+    def _focus_incidents(self, incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+        ranked = sorted(
+            incidents,
+            key=lambda item: (
+                severity_rank.get(str(item.get("severity", "low")).lower(), 1),
+                float(item.get("created_at", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return ranked[:10]
+
+    def _group_persistence_items(self, persistence_items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in persistence_items:
+            key = str(item.get("type") or "generic").strip().lower() or "generic"
+            grouped.setdefault(key, []).append(item)
+        return grouped
+
+    def _display_persistence_type(self, value: str) -> str:
+        return value.replace("_", " ").replace("-", " ").title()
+
+    def _persistence_group_title(self, pers_type: str, items: list[dict[str, Any]]) -> str:
+        sample = "\n".join(str(item.get("name") or item.get("path") or "item") for item in items[:4])
+        return f"{self._display_persistence_type(pers_type)}\nCount: {len(items)}\nTop Items:\n{sample}"
+
+    def _short_label(self, value: str, limit: int) -> str:
+        cleaned = " ".join(str(value).split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: max(0, limit - 3)]}..."
+
+    def _process_risk(self, proc: dict[str, Any], connections: list[dict[str, Any]]) -> float:
+        pid = int(proc.get("pid", -1) or -1)
+        name = str(proc.get("name", "")).lower()
+        cpu = float(proc.get("cpu_percent", 0) or 0)
+        memory = float(proc.get("memory_percent", 0) or 0)
+        signature = str(proc.get("signature_status", "")).lower()
+        remote_count = sum(1 for conn in connections if int(conn.get("pid", -1) or -1) == pid and conn.get("remote_addr"))
+        risk = min(40.0, cpu + (memory * 2.0))
+        if remote_count:
+            risk += min(25.0, float(remote_count * 6))
+        if any(token in name for token in ["powershell", "cmd", "wscript", "cscript", "rundll32", "mshta", "regsvr32", "wmic"]):
+            risk += 24
+        if signature in {"unsigned", "unknown", "invalid"}:
+            risk += 12
+        return min(100.0, round(risk, 1))
+
+    def _process_color(self, name: str, risk: float) -> str:
+        lowered = name.lower()
+        if risk >= 80:
+            return "#d9485f"
+        if any(token in lowered for token in ["powershell", "cmd", "wscript", "cscript", "rundll32", "mshta", "wmic"]):
+            return "#ffd43b"
+        if risk >= 55:
+            return "#ff922b"
+        return "#74c0fc"
+
+    def _node_size_for_risk(self, risk: float) -> int:
+        return max(20, min(38, int(18 + (risk / 5.0))))
+
+    def _cluster_for_process(self, name: str) -> str:
+        lowered = name.lower()
+        if any(token in lowered for token in ["powershell", "cmd", "wscript", "cscript", "rundll32", "mshta", "wmic"]):
+            return "execution"
+        if any(token in lowered for token in ["chrome", "firefox", "edge", "browser"]):
+            return "browser"
+        if any(token in lowered for token in ["svchost", "services", "wininit", "lsass"]):
+            return "system"
+        return "general"
+
+    def _remote_exposure_type(self, value: str) -> str:
+        try:
+            ip = ipaddress.ip_address(value)
+            if ip.is_loopback:
+                return "loopback"
+            if ip.is_private:
+                return "private"
+            return "public"
+        except ValueError:
+            return "unknown"
+
+    def _incident_matches_process(self, incident: dict[str, Any], proc_node: dict[str, Any]) -> bool:
+        incident_blob = " ".join(
+            [
+                str(incident.get("title", "")),
+                str(incident.get("summary", "")),
+                str(incident.get("correlation_story", "")),
+                str(incident.get("recommended_actions", "")),
+            ]
+        ).lower()
+        proc_label = str(proc_node.get("label", "")).lower()
+        return any(part and part in incident_blob for part in [proc_label.split("\n")[0], "powershell", "cmd.exe", "rundll32", "wscript"])
