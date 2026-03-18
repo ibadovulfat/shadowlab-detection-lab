@@ -6,12 +6,13 @@ import json
 import os
 import platform
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -19,9 +20,15 @@ from pydantic import BaseModel, Field
 import database as db
 import monitor_core
 from api.security import (
+    SecurityContext,
+    build_auth_context_payload,
+    ensure_deception_enabled,
+    enforce_process_action_policy,
     ensure_dangerous_actions_enabled,
     ensure_delete_enabled,
     ensure_network_warfare_enabled,
+    get_active_policy_name,
+    policy_requires_approval,
     require_admin,
     require_analyst_or_admin,
     require_api_key,
@@ -31,6 +38,7 @@ from api.security import (
 from report_export import generate_html, generate_pdf
 from services.alerting_service import AlertingService
 from services.detection_service import DetectionOrchestrator
+from services.enterprise_service import EnterpriseService
 from services.fleet_service import FleetService
 from services.graph_service import GraphService
 from services.incident_service import IncidentArtifactService
@@ -66,7 +74,15 @@ app.add_middleware(
     allow_origins=security_settings.allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-ShadowLab-Approval-Id",
+        "X-ShadowLab-Timestamp",
+        "X-ShadowLab-Nonce",
+        "X-ShadowLab-Signature",
+    ],
 )
 
 
@@ -81,6 +97,8 @@ async def add_security_headers(request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if request.method.upper() in {"POST", "PATCH", "DELETE"} and request.url.path not in {"/health"}:
+        _audit_mutating_request(request, response.status_code)
     return response
 
 
@@ -93,11 +111,16 @@ fleet_service = FleetService(db)
 timeline_service = TimelineService()
 graph_service = GraphService(OUT_DIR)
 collector_bridge = CollectorTelemetryBridge(config, OUT_DIR)
+enterprise_service = EnterpriseService(BASE_DIR, process_intel_service, fleet_service)
 honeypot_instance = None
 canary_instance = None
 canary_alerts: list[str] = []
 network_warfare_instance = None
 alert_webhook_url = os.environ.get("SHADOWLAB_ALERT_WEBHOOK", "")
+connector_worker_enabled = os.environ.get("SHADOWLAB_CONNECTOR_QUEUE_WORKER", "true").strip().lower() in {"1", "true", "yes", "on"}
+connector_worker_interval_seconds = max(5, int(os.environ.get("SHADOWLAB_CONNECTOR_QUEUE_INTERVAL_SECONDS", "20")))
+_connector_worker_thread: threading.Thread | None = None
+_connector_worker_stop = threading.Event()
 
 
 class MonitorRequest(BaseModel):
@@ -196,9 +219,231 @@ class AgentRegistrationRequest(BaseModel):
     boot_time: float | None = None
 
 
+class CaseCreateRequest(BaseModel):
+    title: str
+    incident_id: str = ""
+    owner: str = ""
+    priority: str = "medium"
+    stage: str = "triage"
+    sla_hours: int = Field(default=24, ge=1, le=720)
+    asset_criticality: float = Field(default=0, ge=0, le=100)
+    tags: list[str] = Field(default_factory=list)
+    approvers: list[str] = Field(default_factory=list)
+    narrative: str = ""
+
+
+class ChainOfCustodyRequest(BaseModel):
+    event_type: str
+    actor: str = ""
+    artifact_path: str = ""
+    notes: str = ""
+
+
+class ApprovalRequestModel(BaseModel):
+    case_id: int
+    action: str
+    requested_by: str = ""
+    approver: str = ""
+    reason: str = ""
+
+
+class ApprovalResolveRequest(BaseModel):
+    status: str
+    approver: str = ""
+
+
+class DetectionLifecycleRequest(BaseModel):
+    rule_id: str
+    version: str = "1.0.0"
+    tuning: dict[str, Any] = Field(default_factory=dict)
+    suppressions: dict[str, Any] = Field(default_factory=dict)
+    notes: str = ""
+
+
+class FalsePositiveRequest(BaseModel):
+    rule_id: str
+    incident_id: str = ""
+    actor: str = ""
+    reason: str
+
+
+class ConnectorConfigRequest(BaseModel):
+    name: str
+    kind: str
+    enabled: bool = False
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReplayRequest(BaseModel):
+    artifact_path: str
+
+
+class NetworkAssessmentRequest(BaseModel):
+    ip_range: str = ""
+
+
+class ConnectorDispatchRequest(BaseModel):
+    event_type: str
+    severity: str = "info"
+    source: str = "shadowlab"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectorQueueProcessRequest(BaseModel):
+    limit: int = Field(default=50, ge=1, le=500)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+def _startup_connector_worker() -> None:
+    global _connector_worker_thread
+    if not connector_worker_enabled or (_connector_worker_thread and _connector_worker_thread.is_alive()):
+        return
+    _connector_worker_stop.clear()
+    _connector_worker_thread = threading.Thread(target=_connector_queue_worker_loop, name="connector-queue-worker", daemon=True)
+    _connector_worker_thread.start()
+
+
+@app.on_event("shutdown")
+def _shutdown_connector_worker() -> None:
+    _connector_worker_stop.set()
+
+
+@app.get("/auth/context")
+def auth_context(
+    request: Request,
+    context: SecurityContext = Depends(require_api_key),
+) -> dict[str, Any]:
+    return build_auth_context_payload(context, request)
+
+
+@app.get("/enterprise/policy", dependencies=[Depends(require_admin)])
+def enterprise_policy() -> dict[str, Any]:
+    return enterprise_service.get_policy_profiles()
+
+
+@app.get("/enterprise/assets", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_assets() -> dict[str, Any]:
+    return enterprise_service.assess_asset_criticality()
+
+
+@app.get("/enterprise/triage", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_triage() -> dict[str, Any]:
+    return enterprise_service.triage_dashboard()
+
+
+@app.post("/enterprise/cases", dependencies=[Depends(require_analyst_or_admin)])
+def create_enterprise_case(payload: CaseCreateRequest) -> dict[str, Any]:
+    return enterprise_service.create_case(**payload.model_dump())
+
+
+@app.get("/enterprise/cases", dependencies=[Depends(require_analyst_or_admin)])
+def list_enterprise_cases() -> list[dict[str, Any]]:
+    return enterprise_service.list_cases()
+
+
+@app.post("/enterprise/cases/{case_id}/chain", dependencies=[Depends(require_analyst_or_admin)])
+def add_case_chain_event(case_id: int, payload: ChainOfCustodyRequest) -> dict[str, Any]:
+    return enterprise_service.add_chain_of_custody_event(case_id, payload.event_type, payload.actor, payload.artifact_path, payload.notes)
+
+
+@app.get("/enterprise/cases/{case_id}/chain", dependencies=[Depends(require_analyst_or_admin)])
+def case_chain(case_id: int) -> list[dict[str, Any]]:
+    return enterprise_service.get_chain_of_custody(case_id)
+
+
+@app.post("/enterprise/approvals", dependencies=[Depends(require_analyst_or_admin)])
+def request_enterprise_approval(payload: ApprovalRequestModel) -> dict[str, Any]:
+    return enterprise_service.request_approval(**payload.model_dump())
+
+
+@app.patch("/enterprise/approvals/{approval_id}", dependencies=[Depends(require_admin)])
+def resolve_enterprise_approval(approval_id: int, payload: ApprovalResolveRequest) -> dict[str, Any]:
+    return enterprise_service.resolve_approval(approval_id, payload.status, payload.approver)
+
+
+@app.get("/enterprise/approvals", dependencies=[Depends(require_analyst_or_admin)])
+def list_enterprise_approvals() -> list[dict[str, Any]]:
+    return enterprise_service.list_approvals()
+
+
+@app.get("/enterprise/detections/lifecycle", dependencies=[Depends(require_analyst_or_admin)])
+def detection_lifecycle() -> dict[str, Any]:
+    return enterprise_service.detection_lifecycle()
+
+
+@app.post("/enterprise/detections/lifecycle", dependencies=[Depends(require_analyst_or_admin)])
+def tune_detection_lifecycle(payload: DetectionLifecycleRequest) -> dict[str, Any]:
+    return enterprise_service.tune_detection_rule(payload.rule_id, payload.version, payload.tuning, payload.suppressions, payload.notes)
+
+
+@app.post("/enterprise/detections/false-positive", dependencies=[Depends(require_analyst_or_admin)])
+def submit_false_positive(payload: FalsePositiveRequest) -> dict[str, Any]:
+    return enterprise_service.log_false_positive(payload.rule_id, payload.incident_id, payload.actor, payload.reason)
+
+
+@app.get("/enterprise/connectors", dependencies=[Depends(require_admin)])
+def list_enterprise_connectors() -> list[dict[str, Any]]:
+    return enterprise_service.list_connectors()
+
+
+@app.post("/enterprise/connectors", dependencies=[Depends(require_admin)])
+def configure_enterprise_connector(payload: ConnectorConfigRequest) -> dict[str, Any]:
+    return enterprise_service.configure_connector(payload.name, payload.kind, payload.enabled, payload.config)
+
+
+@app.post("/enterprise/connectors/dispatch", dependencies=[Depends(require_admin)])
+def dispatch_enterprise_connector_event(payload: ConnectorDispatchRequest) -> dict[str, Any]:
+    return enterprise_service.dispatch_connector_event(
+        event_type=payload.event_type,
+        payload=payload.payload,
+        source=payload.source,
+        severity=payload.severity,
+    )
+
+
+@app.post("/enterprise/connectors/queue/process", dependencies=[Depends(require_admin)])
+def process_enterprise_connector_queue(payload: ConnectorQueueProcessRequest) -> dict[str, Any]:
+    return enterprise_service.process_connector_queue(payload.limit)
+
+
+@app.get("/enterprise/connectors/queue", dependencies=[Depends(require_admin)])
+def enterprise_connector_queue(status: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    return enterprise_service.connector_queue_status(status=status, limit=limit)
+
+
+@app.get("/enterprise/adversary/profiles", dependencies=[Depends(require_analyst_or_admin)])
+def adversary_profiles() -> dict[str, Any]:
+    return enterprise_service.adversary_emulation()
+
+
+@app.post("/enterprise/purple/replay", dependencies=[Depends(require_analyst_or_admin)])
+def purple_replay(payload: ReplayRequest) -> dict[str, Any]:
+    return enterprise_service.replay_incident(payload.artifact_path)
+
+
+@app.get("/enterprise/canary/bypass", dependencies=[Depends(require_analyst_or_admin)])
+def canary_bypass_assessment() -> dict[str, Any]:
+    return enterprise_service.assess_canary_bypass()
+
+
+@app.get("/enterprise/telemetry/gaps", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_telemetry_gaps() -> dict[str, Any]:
+    return enterprise_service.telemetry_gap_analysis()
+
+
+@app.get("/enterprise/web/inspection", dependencies=[Depends(require_analyst_or_admin)])
+def web_inspection() -> dict[str, Any]:
+    return enterprise_service.inspect_web_surface()
+
+
+@app.post("/enterprise/network/assessment", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_network_assessment(payload: NetworkAssessmentRequest) -> dict[str, Any]:
+    return enterprise_service.network_pentest_overview(payload.ip_range)
 
 
 @app.get("/config", dependencies=[Depends(require_admin)])
@@ -359,7 +604,7 @@ def process_tree(pid: int) -> dict[str, Any]:
     return {"root": build_node(pid), "lineage": lineage}
 
 
-@app.get("/processes/{pid}/internals")
+@app.get("/processes/{pid}/internals", dependencies=[Depends(require_analyst_or_admin)])
 def process_internals(pid: int) -> dict[str, Any]:
     import plugins.internals as internals
 
@@ -389,7 +634,7 @@ def process_strings(pid: int, payload: StringScanRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/processes/{pid}/yara")
+@app.post("/processes/{pid}/yara", dependencies=[Depends(require_analyst_or_admin)])
 def process_yara(pid: int, payload: YaraLookupRequest) -> dict[str, Any]:
     profile = process_intel_service.profile_process(pid)
     file_hash = profile.get("sha256")
@@ -406,7 +651,7 @@ def process_yara(pid: int, payload: YaraLookupRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/processes/{pid}/sandbox-trace")
+@app.post("/processes/{pid}/sandbox-trace", dependencies=[Depends(require_analyst_or_admin)])
 def process_sandbox_trace(pid: int, payload: SandboxTraceRequest) -> dict[str, Any]:
     import plugins.sandbox as sandbox
 
@@ -414,7 +659,7 @@ def process_sandbox_trace(pid: int, payload: SandboxTraceRequest) -> dict[str, A
     return tracer.trace(duration=payload.duration, interval=payload.interval)
 
 
-@app.get("/processes/{pid}/ai-analysis")
+@app.get("/processes/{pid}/ai-analysis", dependencies=[Depends(require_analyst_or_admin)])
 def process_ai_analysis(pid: int) -> dict[str, Any]:
     import plugins.ai_analyst as ai_analyst
 
@@ -423,7 +668,7 @@ def process_ai_analysis(pid: int) -> dict[str, Any]:
     return analyst.analyze_process(profile)
 
 
-@app.post("/processes/{pid}/scan")
+@app.post("/processes/{pid}/scan", dependencies=[Depends(require_analyst_or_admin)])
 def scan_single_process(pid: int, payload: ProcessScanRequest) -> dict[str, Any]:
     process_rows = process_intel_service.snapshot_processes()
     target = next((row for row in process_rows if int(row.get("pid", -1)) == pid), None)
@@ -437,17 +682,19 @@ def scan_single_process(pid: int, payload: ProcessScanRequest) -> dict[str, Any]
     )
 
 
-@app.get("/processes/{pid}/memory-analysis")
+@app.get("/processes/{pid}/memory-analysis", dependencies=[Depends(require_analyst_or_admin)])
 def memory_analysis(pid: int, process_name: str) -> dict[str, Any]:
     import plugins.memory_forensics as memory_forensics
 
     return memory_forensics.run_analysis(pid, process_name)
 
 
-@app.post("/processes/{pid}/actions/{action}", dependencies=[Depends(ensure_dangerous_actions_enabled)])
-def process_action(pid: int, action: str, process_name: str) -> dict[str, Any]:
+@app.post("/processes/{pid}/actions/{action}", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
+def process_action(request: Request, pid: int, action: str, process_name: str) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name=f"process:{action.lower()}")
     action_name = action.lower()
     profile = process_intel_service.profile_process(pid)
+    enforce_process_action_policy(request, process_name)
     if action_name == "suspend":
         result = response_service.suspend(pid, process_name)
     elif action_name == "resume":
@@ -479,8 +726,9 @@ def persistence_items() -> list[dict[str, Any]]:
     return persistence_scanner.get_persistence_items()
 
 
-@app.post("/persistence/remediate", dependencies=[Depends(ensure_dangerous_actions_enabled)])
-def remediate_persistence(payload: PersistenceRemediationRequest) -> dict[str, Any]:
+@app.post("/persistence/remediate", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
+def remediate_persistence(request: Request, payload: PersistenceRemediationRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="persistence:remediate")
     import plugins.persistence as persistence_scanner
 
     result = persistence_scanner.remediate_persistence_item(payload.item_type, payload.path, payload.name)
@@ -503,8 +751,9 @@ def remediate_persistence(payload: PersistenceRemediationRequest) -> dict[str, A
     return result
 
 
-@app.post("/persistence/rollback/{remediation_id}", dependencies=[Depends(ensure_dangerous_actions_enabled)])
-def rollback_persistence(remediation_id: int) -> dict[str, Any]:
+@app.post("/persistence/rollback/{remediation_id}", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
+def rollback_persistence(request: Request, remediation_id: int) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="persistence:rollback")
     import plugins.persistence as persistence_scanner
 
     conn = db.create_connection()
@@ -616,6 +865,55 @@ def remediation_history() -> list[dict[str, Any]]:
     return frame.to_dict(orient="records")
 
 
+@app.get("/history/auth", dependencies=[Depends(require_admin)])
+def auth_history() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_auth_logs(conn)
+    finally:
+        conn.close()
+    return frame.to_dict(orient="records")
+
+
+@app.get("/history/actions", dependencies=[Depends(require_admin)])
+def action_history() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_action_audits(conn)
+    finally:
+        conn.close()
+    return frame.to_dict(orient="records")
+
+
+@app.get("/history/external", dependencies=[Depends(require_admin)])
+def external_request_history() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        frame = db.get_external_requests(conn)
+    finally:
+        conn.close()
+    return frame.to_dict(orient="records")
+
+
+@app.get("/history/auth/anomalies", dependencies=[Depends(require_admin)])
+def auth_anomalies() -> list[dict[str, Any]]:
+    conn = db.create_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        auth_rows = db.get_auth_logs(conn).fillna("").to_dict(orient="records")
+        action_rows = db.get_action_audits(conn).fillna("").to_dict(orient="records")
+    finally:
+        conn.close()
+    return _build_auth_anomalies(auth_rows, action_rows)
+
+
 @app.patch("/incidents/{incident_id}", dependencies=[Depends(require_analyst_or_admin)])
 def update_incident(incident_id: str, payload: IncidentUpdateRequest) -> dict[str, str]:
     conn = db.create_connection()
@@ -628,7 +926,7 @@ def update_incident(incident_id: str, payload: IncidentUpdateRequest) -> dict[st
     return {"status": "updated", "incident_id": incident_id}
 
 
-@app.get("/quarantine")
+@app.get("/quarantine", dependencies=[Depends(require_analyst_or_admin)])
 def quarantine_items() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -640,8 +938,9 @@ def quarantine_items() -> list[dict[str, Any]]:
     return frame.to_dict(orient="records")
 
 
-@app.post("/quarantine/{quarantine_id}/restore", dependencies=[Depends(ensure_dangerous_actions_enabled)])
-def restore_quarantine(quarantine_id: int) -> dict[str, Any]:
+@app.post("/quarantine/{quarantine_id}/restore", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
+def restore_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="quarantine:restore")
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
@@ -663,7 +962,8 @@ def restore_quarantine(quarantine_id: int) -> dict[str, Any]:
 
 
 @app.delete("/quarantine/{quarantine_id}", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
-def delete_quarantine(quarantine_id: int) -> dict[str, Any]:
+def delete_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="quarantine:delete")
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
@@ -765,7 +1065,7 @@ def register_agent(payload: AgentRegistrationRequest) -> dict[str, Any]:
         conn.close()
 
 
-@app.post("/alerts/test", dependencies=[Depends(ensure_dangerous_actions_enabled)])
+@app.post("/alerts/test", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
 def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
     webhook_url = _validate_webhook_url(payload.webhook_url)
     result = alert_service.dispatch(
@@ -789,14 +1089,14 @@ def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
     return result.to_dict()
 
 
-@app.post("/alerts/configure", dependencies=[Depends(ensure_dangerous_actions_enabled)])
+@app.post("/alerts/configure", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
 def configure_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
     global alert_webhook_url
     alert_webhook_url = _validate_webhook_url(payload.webhook_url)
     return {"status": "configured", "webhook_url": alert_webhook_url}
 
 
-@app.post("/triage/{pid}")
+@app.post("/triage/{pid}", dependencies=[Depends(require_analyst_or_admin)])
 def auto_triage(pid: int, payload: TriageRequest) -> dict[str, Any]:
     import plugins.ai_analyst as ai_analyst
     import plugins.internals as internals
@@ -849,7 +1149,7 @@ def network_connections() -> list[dict[str, Any]]:
     return monitor_core.get_network_connections()
 
 
-@app.post("/network/sniff")
+@app.post("/network/sniff", dependencies=[Depends(require_analyst_or_admin)])
 def network_sniff(payload: SnifferRequest) -> dict[str, Any]:
     import plugins.sniffer as net_sniffer
 
@@ -871,21 +1171,21 @@ def telemetry_fabric_status() -> dict[str, Any]:
     return collector_bridge.collector_status()
 
 
-@app.post("/integrations/telemetry-fabric/start")
+@app.post("/integrations/telemetry-fabric/start", dependencies=[Depends(require_admin)])
 def start_telemetry_fabric() -> dict[str, Any]:
     result = collector_bridge.start_collector()
     _log_single_collector_export("collector_start", result)
     return result
 
 
-@app.post("/integrations/telemetry-fabric/stop")
+@app.post("/integrations/telemetry-fabric/stop", dependencies=[Depends(require_admin)])
 def stop_telemetry_fabric() -> dict[str, Any]:
     result = collector_bridge.stop_collector()
     _log_single_collector_export("collector_stop", result)
     return result
 
 
-@app.post("/integrations/telemetry-fabric/export/incidents/{incident_id}")
+@app.post("/integrations/telemetry-fabric/export/incidents/{incident_id}", dependencies=[Depends(require_admin)])
 def resend_incident_to_telemetry_fabric(incident_id: str) -> dict[str, Any]:
     conn = db.create_connection()
     if conn is None:
@@ -901,7 +1201,7 @@ def resend_incident_to_telemetry_fabric(incident_id: str) -> dict[str, Any]:
     return result
 
 
-@app.get("/integrations/telemetry-fabric/exports")
+@app.get("/integrations/telemetry-fabric/exports", dependencies=[Depends(require_admin)])
 def list_telemetry_fabric_exports() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if conn is None:
@@ -929,7 +1229,7 @@ def html_report():
     return FileResponse(target)
 
 
-@app.post("/deception/honeypot/deploy", dependencies=[Depends(require_admin)])
+@app.post("/deception/honeypot/deploy", dependencies=[Depends(require_admin), Depends(ensure_deception_enabled)])
 def deploy_honeypot(payload: HoneypotRequest) -> dict[str, Any]:
     import plugins.honeypot as honeypot
 
@@ -941,7 +1241,7 @@ def deploy_honeypot(payload: HoneypotRequest) -> dict[str, Any]:
     return {"status": "deployed", "message": message, "filepath": str(honeypot_instance.filepath)}
 
 
-@app.get("/deception/honeypot/status")
+@app.get("/deception/honeypot/status", dependencies=[Depends(require_analyst_or_admin)])
 def honeypot_status() -> dict[str, Any]:
     if honeypot_instance is None:
         return {"status": "inactive"}
@@ -952,7 +1252,7 @@ def honeypot_status() -> dict[str, Any]:
     }
 
 
-@app.delete("/deception/honeypot")
+@app.delete("/deception/honeypot", dependencies=[Depends(require_admin), Depends(ensure_deception_enabled)])
 def cleanup_honeypot() -> dict[str, str]:
     global honeypot_instance
     if honeypot_instance is not None:
@@ -961,7 +1261,7 @@ def cleanup_honeypot() -> dict[str, str]:
     return {"status": "cleaned"}
 
 
-@app.post("/deception/canary/deploy")
+@app.post("/deception/canary/deploy", dependencies=[Depends(require_admin), Depends(ensure_deception_enabled)])
 def deploy_canary() -> dict[str, Any]:
     import plugins.canary as canary
 
@@ -976,7 +1276,7 @@ def deploy_canary() -> dict[str, Any]:
     return {"status": "deployed", "files": created}
 
 
-@app.get("/deception/canary/status")
+@app.get("/deception/canary/status", dependencies=[Depends(require_analyst_or_admin)])
 def canary_status() -> dict[str, Any]:
     active = canary_instance is not None
     canary_dir = getattr(canary_instance, "canary_dir", None)
@@ -987,7 +1287,7 @@ def canary_status() -> dict[str, Any]:
     }
 
 
-@app.delete("/deception/canary")
+@app.delete("/deception/canary", dependencies=[Depends(require_admin), Depends(ensure_deception_enabled)])
 def cleanup_canary() -> dict[str, str]:
     global canary_instance, canary_alerts
     if canary_instance is not None:
@@ -997,7 +1297,7 @@ def cleanup_canary() -> dict[str, str]:
     return {"status": "cleaned"}
 
 
-@app.post("/evidence/capture")
+@app.post("/evidence/capture", dependencies=[Depends(require_analyst_or_admin)])
 def capture_evidence(payload: EvidenceRequest) -> dict[str, Any]:
     import plugins.evidence as evidence
 
@@ -1008,7 +1308,7 @@ def capture_evidence(payload: EvidenceRequest) -> dict[str, Any]:
     return {"status": "captured", "path": path}
 
 
-@app.get("/evidence")
+@app.get("/evidence", dependencies=[Depends(require_analyst_or_admin)])
 def list_evidence() -> dict[str, Any]:
     import plugins.evidence as evidence
 
@@ -1016,7 +1316,7 @@ def list_evidence() -> dict[str, Any]:
     return {"items": collector.list_evidence()}
 
 
-@app.delete("/evidence/{filename}", dependencies=[Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
+@app.delete("/evidence/{filename}", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled), Depends(ensure_delete_enabled)])
 def delete_evidence(filename: str) -> dict[str, str]:
     target = safe_child_path(BASE_DIR / "evidence_locker", filename, allowed_suffixes={".png", ".jpg", ".jpeg", ".webp"})
     if not target.exists():
@@ -1025,7 +1325,7 @@ def delete_evidence(filename: str) -> dict[str, str]:
     return {"status": "deleted", "path": str(target)}
 
 
-@app.post("/network/warfare/scan", dependencies=[Depends(ensure_network_warfare_enabled)])
+@app.post("/network/warfare/scan", dependencies=[Depends(require_admin), Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
 def network_warfare_scan(payload: NetworkScanRequest) -> dict[str, Any]:
     import plugins.net_warfare as net_warfare
 
@@ -1035,7 +1335,8 @@ def network_warfare_scan(payload: NetworkScanRequest) -> dict[str, Any]:
 
 
 @app.post("/network/warfare/block", dependencies=[Depends(require_admin), Depends(ensure_network_warfare_enabled), Depends(ensure_dangerous_actions_enabled)])
-def network_warfare_block(payload: BlockerRequest) -> dict[str, Any]:
+def network_warfare_block(request: Request, payload: BlockerRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="network:warfare:block")
     import plugins.net_warfare as net_warfare
 
     global network_warfare_instance
@@ -1191,3 +1492,119 @@ def _normalize_incident_row(incident: dict[str, Any]) -> dict[str, Any]:
         normalized["notes"] = [line for line in notes.splitlines() if line]
     normalized["mitre_techniques"] = normalized.get("mitre_mapping", [])
     return normalized
+
+
+def _require_enterprise_approval(request: Request | None, action_name: str) -> None:
+    if not policy_requires_approval():
+        return
+    if request is None:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Action `{action_name}` requires approved change control in profile `{get_active_policy_name()}`",
+        )
+    approval_id = str(request.headers.get("X-ShadowLab-Approval-Id", "") or "").strip()
+    if not approval_id.isdigit():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Action `{action_name}` requires an approved request in profile `{get_active_policy_name()}`. "
+                "Provide X-ShadowLab-Approval-Id header."
+            ),
+        )
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        approvals = db.get_approval_requests(conn)
+    finally:
+        conn.close()
+    row = approvals[approvals["id"] == int(approval_id)]
+    if row.empty:
+        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` not found")
+    item = row.iloc[0].to_dict()
+    status_value = str(item.get("status", "")).lower()
+    if status_value not in {"approved", "allow", "granted"}:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Approval `{approval_id}` status is `{status_value or 'unknown'}`; approved status required",
+        )
+
+
+def _connector_queue_worker_loop() -> None:
+    while not _connector_worker_stop.wait(connector_worker_interval_seconds):
+        try:
+            enterprise_service.process_connector_queue(limit=50)
+        except Exception:
+            # Keep worker alive; failures are captured through queue state and export logs.
+            continue
+
+
+def _audit_mutating_request(request: Request, status_code: int) -> None:
+    try:
+        conn = db.create_connection()
+        if conn is None:
+            return
+        try:
+            context = getattr(request.state, "security_context", None)
+            role = getattr(context, "role", "")
+            client_ip = request.client.host if request.client else ""
+            detail = request.url.query[:200] if request.url.query else ""
+            db.log_action_audit(conn, request.method.upper(), request.url.path, int(status_code), role, client_ip, detail)
+        finally:
+            conn.close()
+    except Exception:
+        return
+
+
+def _build_auth_anomalies(auth_rows: list[dict[str, Any]], action_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    anomalies: list[dict[str, Any]] = []
+    failures_by_ip: dict[str, int] = {}
+    for row in auth_rows:
+        if str(row.get("event_type", "")) == "auth_failure":
+            ip = str(row.get("client_ip", "") or "unknown")
+            failures_by_ip[ip] = failures_by_ip.get(ip, 0) + 1
+    for ip, count in failures_by_ip.items():
+        if count >= 5:
+            anomalies.append(
+                {
+                    "type": "repeated_auth_failures",
+                    "severity": "high",
+                    "client_ip": ip,
+                    "count": count,
+                    "summary": f"{count} failed authentication attempts observed from {ip}.",
+                }
+            )
+
+    denied_by_role: dict[str, int] = {}
+    for row in auth_rows:
+        if str(row.get("event_type", "")) in {"authz_denied", "policy_denied", "signature_failure", "signature_replay"}:
+            role = str(row.get("role", "") or "unknown")
+            denied_by_role[role] = denied_by_role.get(role, 0) + 1
+    for role, count in denied_by_role.items():
+        if count >= 3:
+            anomalies.append(
+                {
+                    "type": "privilege_or_policy_probe",
+                    "severity": "medium",
+                    "role": role,
+                    "count": count,
+                    "summary": f"{role} triggered {count} denied privileged requests.",
+                }
+            )
+
+    dangerous_mutations = [
+        row for row in action_rows
+        if str(row.get("method", "")).upper() in {"POST", "PATCH", "DELETE"}
+        and any(token in str(row.get("path", "")) for token in ["/actions/", "/network/warfare/", "/quarantine/", "/deception/"])
+    ]
+    if len(dangerous_mutations) >= 10:
+        anomalies.append(
+            {
+                "type": "high_mutation_volume",
+                "severity": "medium",
+                "count": len(dangerous_mutations),
+                "summary": "High volume of dangerous or destructive mutation requests detected.",
+            }
+        )
+
+    return anomalies

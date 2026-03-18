@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -13,6 +14,12 @@ YARAIFY_AUTH_KEY = os.environ.get("YARAIFY_AUTH_KEY")
 MALWAREBAZAAR_API_URL = "https://mb-api.abuse.ch/api/v1/"
 YARAIFY_API_URL = "https://yaraify-api.abuse.ch/api/v1/"
 logger = logging.getLogger(__name__)
+ALLOWED_OUTBOUND_HOSTS = {
+    "api.abuseipdb.com",
+    "mb-api.abuse.ch",
+    "yaraify-api.abuse.ch",
+    "www.virustotal.com",
+}
 
 
 def _safe_json(response: requests.Response) -> dict[str, Any]:
@@ -23,13 +30,55 @@ def _safe_json(response: requests.Response) -> dict[str, Any]:
         return {}
 
 
+def _log_external_request(service: str, method: str, target: str, status: str, detail: str = "") -> None:
+    try:
+        import database as db
+
+        conn = db.create_connection()
+        if conn is None:
+            return
+        try:
+            db.log_external_request(conn, service, method, target, status, detail[:300])
+        finally:
+            conn.close()
+    except Exception:
+        return
+
+
+def _safe_request(
+    service: str,
+    method: str,
+    url: str,
+    *,
+    allowed_hosts: set[str] | None = None,
+    timeout: int = 25,
+    **kwargs,
+) -> requests.Response:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    approved = allowed_hosts or ALLOWED_OUTBOUND_HOSTS
+    if hostname not in approved:
+        detail = f"Blocked outbound target: {hostname or 'unknown-host'}"
+        _log_external_request(service, method.upper(), url, "blocked", detail)
+        raise ValueError(detail)
+    try:
+        response = requests.request(method.upper(), url, timeout=timeout, **kwargs)
+        _log_external_request(service, method.upper(), url, "ok" if response.ok else "http_error", str(response.status_code))
+        return response
+    except requests.RequestException as exc:
+        _log_external_request(service, method.upper(), url, "error", str(exc))
+        raise
+
+
 def check_ip(ip: str) -> dict | None:
     if not ABUSEIPDB_API_KEY:
         logger.warning("ABUSEIPDB_API_KEY not set. Skipping threat intelligence check.")
         return None
 
     try:
-        response = requests.get(
+        response = _safe_request(
+            "abuseipdb",
+            "GET",
             "https://api.abuseipdb.com/api/v2/check",
             headers={"Accept": "application/json", "Key": ABUSEIPDB_API_KEY},
             params={"ipAddress": ip, "maxAgeInDays": "90"},
@@ -59,7 +108,9 @@ def check_file_vt(file_hash: str, api_key: str | None) -> dict[str, Any] | None:
     if not api_key:
         return {"status": "skipped", "reason": "No VirusTotal API key provided"}
     try:
-        response = requests.get(
+        response = _safe_request(
+            "virustotal",
+            "GET",
             f"https://www.virustotal.com/api/v3/files/{file_hash}",
             headers={"x-apikey": api_key},
             timeout=25,
@@ -87,7 +138,7 @@ def check_file_malwarebazaar(file_hash: str, auth_key: str | None = None) -> dic
 
     payload = {"query": "get_info", "hash": file_hash}
     try:
-        response = requests.post(MALWAREBAZAAR_API_URL, data=payload, headers=headers, timeout=25)
+        response = _safe_request("malwarebazaar", "POST", MALWAREBAZAAR_API_URL, data=payload, headers=headers, timeout=25)
         result = _safe_json(response)
         if response.status_code == 403:
             return {
@@ -126,7 +177,7 @@ def check_file_yaraify(file_hash: str, auth_key: str | None = None) -> dict[str,
     headers["Content-Type"] = "application/json"
     payload = {"query": "lookup_hash", "search_term": file_hash}
     try:
-        response = requests.post(YARAIFY_API_URL, json=payload, headers=headers, timeout=25)
+        response = _safe_request("yaraify", "POST", YARAIFY_API_URL, json=payload, headers=headers, timeout=25)
         result = _safe_json(response)
         if response.status_code == 403:
             return {

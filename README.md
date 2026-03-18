@@ -15,6 +15,17 @@ ShadowLab is an API-first cybersecurity research platform focused on:
 - incident artifact generation
 - advanced hunt workflows across local host telemetry and forensic modules
 
+## Screenshots
+
+![ShadowLab Screenshot 1](images/image1.png)
+![ShadowLab Screenshot 2](images/image2.png)
+![ShadowLab Screenshot 3](images/image3.png)
+![ShadowLab Screenshot 4](images/image4.png)
+![ShadowLab Screenshot 5](images/image5.png)
+![ShadowLab Screenshot 6](images/image6.png)
+![ShadowLab Screenshot 7](images/image7.png)
+![ShadowLab Screenshot 8](images/image8.png)
+
 ## Demo Video
 
 A full walkthrough of ShadowLab is available on YouTube:
@@ -105,6 +116,8 @@ export SHADOWLAB_ALLOWED_ORIGINS="http://127.0.0.1,http://localhost"
 python app.py
 ```
 
+Generate your own raw API keys, hash them with SHA-256, and place only the hashes in environment variables. Do not commit raw keys or production hashes to the repository.
+
 Detailed operational usage:
 
 ```text
@@ -116,6 +129,10 @@ Desktop client:
 ```bash
 python desktop/main.py
 ```
+
+The desktop client now includes an `API Key` field. Paste a `viewer`, `analyst`, or `admin` raw key there so the UI can call protected endpoints and hide actions your role cannot use.  
+For corp/prod approval-gated actions, use the `Approval ID` field in Primary Controls; the client forwards it as `X-ShadowLab-Approval-Id` on mutating requests.
+If you enable `Remember API key on this machine`, the desktop stores secrets in the Windows Credential Manager when available instead of plain app settings.
 
 Windows EXE packaging:
 
@@ -149,6 +166,7 @@ docker run --rm -p 8000:8000 --name shadowlab shadowlab-api
 
 ```text
 GET  /health
+GET  /auth/context
 GET  /config
 POST /monitor/run
 GET  /processes
@@ -169,6 +187,34 @@ GET  /history/telemetry
 GET  /history/responses
 GET  /history/alerts
 GET  /history/remediations
+GET  /history/auth
+GET  /history/auth/anomalies
+GET  /history/actions
+GET  /history/external
+GET  /enterprise/policy
+GET  /enterprise/assets
+GET  /enterprise/triage
+POST /enterprise/cases
+GET  /enterprise/cases
+POST /enterprise/cases/{case_id}/chain
+GET  /enterprise/cases/{case_id}/chain
+POST /enterprise/approvals
+PATCH /enterprise/approvals/{approval_id}
+GET  /enterprise/approvals
+GET  /enterprise/detections/lifecycle
+POST /enterprise/detections/lifecycle
+POST /enterprise/detections/false-positive
+GET  /enterprise/connectors
+POST /enterprise/connectors
+POST /enterprise/connectors/dispatch
+POST /enterprise/connectors/queue/process
+GET  /enterprise/connectors/queue
+GET  /enterprise/adversary/profiles
+POST /enterprise/purple/replay
+GET  /enterprise/canary/bypass
+GET  /enterprise/telemetry/gaps
+GET  /enterprise/web/inspection
+POST /enterprise/network/assessment
 GET  /incidents
 PATCH /incidents/{incident_id}
 POST /persistence/remediate
@@ -272,10 +318,47 @@ Runtime configuration:
 - `SHADOWLAB_ENABLE_DANGEROUS_ACTIONS`
 - `SHADOWLAB_ENABLE_NETWORK_WARFARE`
 - `SHADOWLAB_ALLOW_FILE_DELETE`
+- `SHADOWLAB_POLICY_PROFILE` (`lab`, `corp`, `prod`)
+- `SHADOWLAB_CONNECTOR_QUEUE_WORKER`
+- `SHADOWLAB_CONNECTOR_QUEUE_INTERVAL_SECONDS`
 - `SHADOWLAB_OTLP_HTTP_ENDPOINT`
 - `SHADOWLAB_OTELCOL_BIN`
 - `SHADOWLAB_OTELCOL_CONFIG`
 - `SHADOWLAB_OTEL_ZPAGES_URL`
+
+RBAC model:
+
+- `viewer`: read-only process, graph, timeline, artifact, and threat-intel access
+- `analyst`: viewer access plus monitor runs, deep hunt, persistence review, triage, and evidence capture
+- `admin`: analyst access plus dangerous response, deception deployment, webhook configuration, telemetry-fabric control, and network warfare when policy flags allow it
+
+Auth helpers:
+
+- `GET /auth/context` returns the authenticated role, enabled features, and capability flags for the current API key
+- `GET /history/auth` returns auth success, denial, and rate-limit audit events for admins
+- `GET /history/auth/anomalies` highlights repeated auth failures, replay attempts, and suspicious privileged probing
+- Mutating admin and dangerous requests require `X-ShadowLab-Timestamp`, `X-ShadowLab-Nonce`, and `X-ShadowLab-Signature` headers
+- When policy profile requires approval (`corp`/`prod`), destructive actions also require `X-ShadowLab-Approval-Id`
+
+Security helper scripts:
+
+- `scripts/generate_api_keys.py` creates fresh viewer/analyst/admin raw keys and SHA-256 digests
+- `scripts/build_sbom.ps1` writes a dependency snapshot for packaging review
+- `desktop/build_exe.ps1` now emits `ShadowLab-pip-freeze.txt` and `ShadowLab-SHA256SUMS.txt` in `dist/`
+
+Enterprise additions:
+
+- Central policy profiles for `lab`, `corp`, and `prod`
+- Asset criticality scoring for hosts and processes
+- Case workflow with SLA, chain-of-custody, and approval requests
+- Detection lifecycle registry with tuning, suppressions, and false-positive feedback
+- SIEM/SOAR connector registry for Splunk, Sentinel, Elastic, TheHive, and Shuffle
+- Native connector delivery for Splunk HEC, Sentinel Log Analytics, Elastic, TheHive, and Shuffle
+- Connector retry queue with automatic background worker processing
+- Adversary emulation, purple replay, canary bypass assessment, and telemetry-gap review
+- Web surface inspection with passive findings and auth review helper
+- Network assessment with optional Nmap integration, lateral movement mapping, segmentation checks, and DNS/ARP anomaly hints
+- Desktop Enterprise tab with triage-first narrative and progressive disclosure panels
 
 ## Telemetry Fabric Integration
 
