@@ -1330,6 +1330,8 @@ class ShadowLabDesktop(QMainWindow):
         tactics_html = "".join(f"<span style='color:#a8b8c8;'>{html.escape(str(item))}</span><br>" for item in tactics[:6])
         notes_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in notes[:4])
         actions_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in recommended)
+        chain_fallback = '<span style="color:#7e93a8;">No chain built yet.</span>'
+        tactics_fallback = '<span style="color:#7e93a8;">No ATT&CK mapping yet.</span>'
 
         return (
             "<div style='font-family:Segoe UI, Arial, sans-serif;'>"
@@ -1353,11 +1355,11 @@ class ShadowLabDesktop(QMainWindow):
             "</div>"
             "<div style='flex:1;background:#16202c;border:1px solid #243446;border-radius:8px;padding:10px;'>"
             "<div style='font-weight:700;color:#f4f7fb;margin-bottom:8px;'>Attack Chain</div>"
-            f"<div style='color:#dfe8f2;'>{attack_chain_html or '<span style=\"color:#7e93a8;\">No chain built yet.</span>'}</div>"
+            f"<div style='color:#dfe8f2;'>{attack_chain_html or chain_fallback}</div>"
             "</div>"
             "<div style='flex:1;background:#16202c;border:1px solid #243446;border-radius:8px;padding:10px;'>"
             "<div style='font-weight:700;color:#f4f7fb;margin-bottom:8px;'>ATT&CK / Notes</div>"
-            f"<div style='margin-bottom:8px;color:#dfe8f2;'>{tactics_html or '<span style=\"color:#7e93a8;\">No ATT&CK mapping yet.</span>'}</div>"
+            f"<div style='margin-bottom:8px;color:#dfe8f2;'>{tactics_html or tactics_fallback}</div>"
             f"<ul style='margin:0;padding-left:18px;color:#dfe8f2;'>{notes_html or '<li>No additional notes.</li>'}</ul>"
             "</div>"
             "</div>"

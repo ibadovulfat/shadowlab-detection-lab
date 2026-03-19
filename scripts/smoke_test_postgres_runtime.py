@@ -1,10 +1,12 @@
-from __future__ import annotations
-
+import sys
 import json
 import os
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+
+# Ensure root is in sys.path for database import
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import database as db
 
