@@ -76,9 +76,12 @@ class SecurityValidationTests(unittest.TestCase):
 class AuthApiTests(unittest.TestCase):
     def setUp(self) -> None:
         security._RATE_LIMIT_BUCKETS.clear()
+        self._secret_env = mock.patch.dict(os.environ, {"SHADOWLAB_SECRET_KEY": "unit-test-secret-key"}, clear=False)
+        self._secret_env.start()
         self.client = TestClient(api.main.app)
 
     def tearDown(self) -> None:
+        self._secret_env.stop()
         security._RATE_LIMIT_BUCKETS.clear()
 
     def test_auth_context_reports_viewer_capabilities(self) -> None:

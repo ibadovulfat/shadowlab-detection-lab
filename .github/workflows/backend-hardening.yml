@@ -7,6 +7,9 @@ on:
       - "codex/**"
   pull_request:
 
+env:
+  SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key
+
 jobs:
   verify:
     runs-on: ubuntu-latest

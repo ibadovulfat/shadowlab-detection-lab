@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,8 +20,13 @@ class DummyProcessService:
 
 class EnterpriseServiceTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._secret_env = mock.patch.dict(os.environ, {"SHADOWLAB_SECRET_KEY": "unit-test-secret-key"}, clear=False)
+        self._secret_env.start()
         db.init_db()
         self.service = EnterpriseService(Path("."), DummyProcessService(), mock.Mock())
+
+    def tearDown(self) -> None:
+        self._secret_env.stop()
 
     def test_asset_criticality_prioritizes_os_processes(self) -> None:
         result = self.service.assess_asset_criticality()
