@@ -34,11 +34,11 @@ def main() -> None:
         if src.exists() and _is_relative_to(src, backup_root):
             shutil.copytree(src, Path(name), dirs_exist_ok=True)
 
-    database_backup = Path(str(manifest.get("database_backup", ""))).resolve()
+    db_backup_raw = str(manifest.get("database_backup", ""))
+    database_backup = (backup_root / Path(db_backup_raw.replace("\\", "/")).name).resolve()
     profile = manifest.get("database_profile", {})
-    import os
     db_url_raw = str(profile.get("database_url", "shadowlab.db"))
-    target_name = os.path.basename(db_url_raw.replace("\\", "/"))
+    target_name = Path(db_url_raw.replace("\\", "/")).name
     target_path = Path(target_name)
     if profile.get("backend") == "sqlite" and database_backup.exists() and _is_relative_to(database_backup, backup_root):
         if database_backup.suffix.lower() != ".db":

@@ -44,9 +44,8 @@ class OpsScriptsTests(unittest.TestCase):
             }
             manifest_path.write_text(json.dumps(payload), encoding="utf-8")
             parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
-            import os
             database_url = parsed["database_profile"]["database_url"]
-            target_name = os.path.basename(database_url)
+            target_name = Path(database_url.replace("\\", "/")).name
             self.assertEqual(target_name, "shadowlab.db")
 
 
