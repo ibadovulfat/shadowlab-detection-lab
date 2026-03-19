@@ -36,8 +36,9 @@ def main() -> None:
 
     database_backup = Path(str(manifest.get("database_backup", ""))).resolve()
     profile = manifest.get("database_profile", {})
+    import os
     db_url_raw = str(profile.get("database_url", "shadowlab.db"))
-    target_name = Path(db_url_raw.replace("\\", "/")).name
+    target_name = os.path.basename(db_url_raw.replace("\\", "/"))
     target_path = Path(target_name)
     if profile.get("backend") == "sqlite" and database_backup.exists() and _is_relative_to(database_backup, backup_root):
         if database_backup.suffix.lower() != ".db":
