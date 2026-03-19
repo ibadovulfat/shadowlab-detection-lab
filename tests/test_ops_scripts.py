@@ -39,7 +39,7 @@ class OpsScriptsTests(unittest.TestCase):
             db_artifact = root / "shadowlab.db"
             db_artifact.write_text("ok", encoding="utf-8")
             payload = {
-                "database_profile": {"backend": "sqlite", "database_url": "..\\outside\\shadowlab.db"},
+                "database_profile": {"backend": "sqlite", "database_url": "../outside/shadowlab.db"},
                 "database_backup": str(db_artifact),
             }
             manifest_path.write_text(json.dumps(payload), encoding="utf-8")
