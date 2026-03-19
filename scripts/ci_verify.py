@@ -9,9 +9,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(command: list[str]) -> None:
-    completed = subprocess.run(command, cwd=ROOT, check=False)
+    print(f"Executing: {' '.join(command)}")
+    completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
     if completed.returncode != 0:
+        print(f"Error executing command: {' '.join(command)}")
+        print("STDOUT:")
+        print(completed.stdout)
+        print("STDERR:")
+        print(completed.stderr)
         raise SystemExit(completed.returncode)
+    else:
+        print("SUCCESS")
+        print(completed.stdout)
 
 
 def main() -> None:

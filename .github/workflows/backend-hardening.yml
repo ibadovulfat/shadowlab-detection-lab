@@ -9,6 +9,7 @@ on:
 
 env:
   SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key
+  PYTHONPATH: ${{ github.workspace }}
 
 jobs:
   verify:
