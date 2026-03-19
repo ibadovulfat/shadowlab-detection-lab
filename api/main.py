@@ -47,6 +47,7 @@ from services.fleet_service import FleetService
 from services.graph_service import GraphService
 from services.incident_service import IncidentArtifactService
 from services.integrity_service import IntegrityService
+from services.investigation_service import InvestigationService
 from services.migration_service import MigrationService
 from services.observability_service import ObservabilityService
 from services.outbound_security import normalize_outbound_url
@@ -119,6 +120,7 @@ artifact_service = IncidentArtifactService(OUT_DIR)
 alert_service = AlertingService()
 fleet_service = FleetService(db)
 timeline_service = TimelineService()
+investigation_service = InvestigationService(timeline_service)
 graph_service = GraphService(OUT_DIR)
 collector_bridge = CollectorTelemetryBridge(config, OUT_DIR)
 enterprise_service = EnterpriseService(BASE_DIR, process_intel_service, fleet_service)
@@ -349,6 +351,169 @@ class CaseCreateRequest(BaseModel):
         return _validated_incident_id(value)
 
 
+class InvestigationViewRequest(BaseModel):
+    name: str
+    description: str = ""
+    query_text: str = ""
+    event_types: list[str] = Field(default_factory=list)
+    severities: list[EventSeverity] = Field(default_factory=list)
+    start_time: float | None = None
+    end_time: float | None = None
+    case_id: int | None = None
+    created_by: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3 or len(value) > 80:
+            raise ValueError("name must be between 3 and 80 characters")
+        return value
+
+    @field_validator("description", "query_text", "created_by")
+    @classmethod
+    def _trim_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class InvestigationNoteRequest(BaseModel):
+    note_text: str
+    case_id: int | None = None
+    view_id: int | None = None
+    item_time: float = 0
+    item_type: str = ""
+    item_title: str = ""
+    tags: list[str] = Field(default_factory=list)
+    author: str = ""
+
+    @field_validator("note_text")
+    @classmethod
+    def _validate_note_text(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 4 or len(value) > 2000:
+            raise ValueError("note_text must be between 4 and 2000 characters")
+        return value
+
+    @field_validator("item_type", "item_title", "author")
+    @classmethod
+    def _trim_note_fields(cls, value: str) -> str:
+        return value.strip()
+
+
+class InvestigationStoryRequest(BaseModel):
+    title: str
+    hypothesis: str = ""
+    summary: str = ""
+    confidence: str = "medium"
+    tags: list[str] = Field(default_factory=list)
+    case_id: int | None = None
+    created_by: str = ""
+
+    @field_validator("title")
+    @classmethod
+    def _validate_story_title(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3 or len(value) > 120:
+            raise ValueError("title must be between 3 and 120 characters")
+        return value
+
+    @field_validator("hypothesis", "summary", "created_by")
+    @classmethod
+    def _trim_story_fields(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("confidence")
+    @classmethod
+    def _validate_confidence(cls, value: str) -> str:
+        candidate = value.strip().lower()
+        if candidate not in {"low", "medium", "high"}:
+            raise ValueError("confidence must be low, medium, or high")
+        return candidate
+
+
+class InvestigationPinRequest(BaseModel):
+    case_id: int | None = None
+    view_id: int | None = None
+    item_time: float = 0
+    item_type: str
+    item_title: str
+    item_severity: str = ""
+    item_payload: dict[str, Any] = Field(default_factory=dict)
+    rationale: str = ""
+    pinned_by: str = ""
+
+    @field_validator("item_type", "item_title", "item_severity", "rationale", "pinned_by")
+    @classmethod
+    def _trim_pin_fields(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("item_type")
+    @classmethod
+    def _validate_item_type(cls, value: str) -> str:
+        if len(value) < 2 or len(value) > 40:
+            raise ValueError("item_type must be between 2 and 40 characters")
+        return value
+
+    @field_validator("item_title")
+    @classmethod
+    def _validate_item_title(cls, value: str) -> str:
+        if len(value) < 3 or len(value) > 200:
+            raise ValueError("item_title must be between 3 and 200 characters")
+        return value
+
+
+class CaseAssignmentRequest(BaseModel):
+    analyst: str
+    role: str = "owner"
+    status: str = "active"
+    assigned_by: str = ""
+
+    @field_validator("analyst", "role", "status", "assigned_by")
+    @classmethod
+    def _trim_assignment_fields(cls, value: str) -> str:
+        value = value.strip()
+        if not value and cls.__name__ == "CaseAssignmentRequest":
+            return value
+        return value
+
+
+class CaseTaskRequest(BaseModel):
+    title: str
+    description: str = ""
+    status: str = "todo"
+    priority: str = "medium"
+    assigned_to: str = ""
+    due_at: float = 0
+    created_by: str = ""
+
+    @field_validator("title")
+    @classmethod
+    def _validate_task_title(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3 or len(value) > 120:
+            raise ValueError("title must be between 3 and 120 characters")
+        return value
+
+    @field_validator("description", "status", "priority", "assigned_to", "created_by")
+    @classmethod
+    def _trim_task_fields(cls, value: str) -> str:
+        return value.strip()
+
+
+class CaseTaskUpdateRequest(BaseModel):
+    status: str | None = None
+    priority: str | None = None
+    assigned_to: str | None = None
+    due_at: float | None = None
+
+    @field_validator("status", "priority", "assigned_to")
+    @classmethod
+    def _trim_update_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
+
+
 class ChainOfCustodyRequest(BaseModel):
     event_type: str
     actor: str = ""
@@ -557,6 +722,169 @@ def add_case_chain_event(case_id: int, payload: ChainOfCustodyRequest) -> dict[s
 @app.get("/enterprise/cases/{case_id}/chain", dependencies=[Depends(require_analyst_or_admin)])
 def case_chain(case_id: int) -> list[dict[str, Any]]:
     return enterprise_service.get_chain_of_custody(case_id)
+
+
+@app.get("/enterprise/investigations/workspace", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_investigation_workspace(
+    query_text: str = "",
+    event_types: str = "",
+    severities: str = "",
+    start_time: float | None = None,
+    end_time: float | None = None,
+    limit: int = 150,
+    case_id: int | None = None,
+) -> dict[str, Any]:
+    return investigation_service.workspace(
+        query_text=query_text,
+        event_types=_parse_csv_query_values(event_types),
+        severities=_parse_csv_query_values(severities),
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        case_id=case_id,
+    )
+
+
+@app.post("/enterprise/investigations/views", dependencies=[Depends(require_analyst_or_admin)])
+def create_investigation_view(payload: InvestigationViewRequest) -> dict[str, Any]:
+    return investigation_service.create_saved_view(
+        name=payload.name,
+        description=payload.description,
+        query_text=payload.query_text,
+        event_types=payload.event_types,
+        severities=[severity.value if isinstance(severity, EventSeverity) else str(severity) for severity in payload.severities],
+        start_time=payload.start_time,
+        end_time=payload.end_time,
+        case_id=payload.case_id,
+        created_by=payload.created_by,
+    )
+
+
+@app.get("/enterprise/investigations/views", dependencies=[Depends(require_analyst_or_admin)])
+def list_investigation_views(case_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_saved_views(case_id=case_id)
+
+
+@app.post("/enterprise/investigations/notes", dependencies=[Depends(require_analyst_or_admin)])
+def create_investigation_note(payload: InvestigationNoteRequest) -> dict[str, Any]:
+    return investigation_service.create_note(**payload.model_dump())
+
+
+@app.get("/enterprise/investigations/notes", dependencies=[Depends(require_analyst_or_admin)])
+def list_investigation_notes(case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_notes(case_id=case_id, view_id=view_id)
+
+
+@app.post("/enterprise/investigations/stories", dependencies=[Depends(require_analyst_or_admin)])
+def create_investigation_story(payload: InvestigationStoryRequest) -> dict[str, Any]:
+    return investigation_service.create_story(**payload.model_dump())
+
+
+@app.get("/enterprise/investigations/stories", dependencies=[Depends(require_analyst_or_admin)])
+def list_investigation_stories(case_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_stories(case_id=case_id)
+
+
+@app.post("/enterprise/investigations/pins", dependencies=[Depends(require_analyst_or_admin)])
+def create_investigation_pin(payload: InvestigationPinRequest) -> dict[str, Any]:
+    return investigation_service.create_pin(**payload.model_dump())
+
+
+@app.get("/enterprise/investigations/pins", dependencies=[Depends(require_analyst_or_admin)])
+def list_investigation_pins(case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_pins(case_id=case_id, view_id=view_id)
+
+
+@app.get("/enterprise/cases/{case_id}/board", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_case_board(case_id: int) -> dict[str, Any]:
+    return investigation_service.case_board(case_id=case_id)
+
+
+@app.get("/enterprise/cases/{case_id}/graph", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_case_graph(case_id: int) -> dict[str, Any]:
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        cases = db.get_case_records(conn).fillna("").to_dict(orient="records")
+        case_record = next((item for item in cases if int(item.get("id", 0) or 0) == case_id), None)
+        if case_record is None:
+            raise HTTPException(status_code=404, detail="Case not found")
+        assignments = db.get_case_assignments(conn, case_id).fillna("").to_dict(orient="records")
+        tasks = db.get_case_tasks(conn, case_id).fillna("").to_dict(orient="records")
+        activity = db.get_case_activity(conn, case_id).fillna("").to_dict(orient="records")
+        pins = db.get_investigation_pins(conn, case_id=case_id).fillna("").to_dict(orient="records")
+        notes = db.get_investigation_notes(conn, case_id=case_id).fillna("").to_dict(orient="records")
+        stories = db.get_investigation_stories(conn, case_id=case_id).fillna("").to_dict(orient="records")
+        incidents = db.get_incidents(conn).fillna("").to_dict(orient="records")
+        hosts_data = fleet_service.list_hosts(conn)
+    finally:
+        conn.close()
+    processes = process_intel_service.snapshot_processes(include_deep_fields=False)
+    connections = monitor_core.get_network_connections()
+    try:
+        import plugins.persistence as persistence_scanner
+
+        persistence_items = persistence_scanner.get_persistence_items_fast()
+    except Exception:
+        persistence_items = []
+    return graph_service.build_case_graph(
+        case_record=case_record,
+        assignments=assignments,
+        tasks=tasks,
+        activity=activity,
+        pins=pins,
+        notes=notes,
+        stories=stories,
+        hosts=hosts_data,
+        processes=processes,
+        connections=connections,
+        incidents=incidents,
+        persistence_items=persistence_items,
+    )
+
+
+@app.post("/enterprise/cases/{case_id}/assignments", dependencies=[Depends(require_analyst_or_admin)])
+def create_case_assignment(case_id: int, payload: CaseAssignmentRequest) -> dict[str, Any]:
+    return investigation_service.assign_analyst(case_id=case_id, **payload.model_dump())
+
+
+@app.get("/enterprise/cases/{case_id}/assignments", dependencies=[Depends(require_analyst_or_admin)])
+def list_case_assignments(case_id: int) -> list[dict[str, Any]]:
+    return investigation_service.list_assignments(case_id=case_id)
+
+
+@app.post("/enterprise/cases/{case_id}/tasks", dependencies=[Depends(require_analyst_or_admin)])
+def create_case_task(case_id: int, payload: CaseTaskRequest) -> dict[str, Any]:
+    return investigation_service.create_task(case_id=case_id, **payload.model_dump())
+
+
+@app.get("/enterprise/cases/{case_id}/tasks", dependencies=[Depends(require_analyst_or_admin)])
+def list_case_tasks(case_id: int) -> list[dict[str, Any]]:
+    return investigation_service.list_tasks(case_id=case_id)
+
+
+@app.patch("/enterprise/cases/{case_id}/tasks/{task_id}", dependencies=[Depends(require_analyst_or_admin)])
+def update_case_task(case_id: int, task_id: int, payload: CaseTaskUpdateRequest) -> dict[str, Any]:
+    return investigation_service.update_task(case_id=case_id, task_id=task_id, **payload.model_dump())
+
+
+@app.get("/enterprise/cases/{case_id}/activity", dependencies=[Depends(require_analyst_or_admin)])
+def list_case_activity(case_id: int) -> list[dict[str, Any]]:
+    return investigation_service.list_activity(case_id=case_id)
+
+
+@app.post("/enterprise/cases/{case_id}/investigation-report/export", dependencies=[Depends(require_admin)])
+def export_case_investigation_report(case_id: int) -> dict[str, Any]:
+    result = investigation_service.export_case_report(case_id=case_id, out_dir=str(OUT_DIR))
+    observability_service.log_event(
+        "investigation_report_exported",
+        case_id=case_id,
+        json_path=result.get("json_path", ""),
+        html_path=result.get("html_path", ""),
+    )
+    integrity_service.refresh_manifest()
+    return result
 
 
 @app.post("/enterprise/approvals", dependencies=[Depends(require_analyst_or_admin)])
@@ -1878,6 +2206,10 @@ def _validated_ip_address(value: str) -> str:
         raise ValueError("Invalid IP address") from exc
 
 
+def _parse_csv_query_values(raw: str) -> list[str]:
+    return [item.strip().lower() for item in (raw or "").split(",") if item.strip()]
+
+
 def _validated_network_range(value: str) -> str:
     candidate = (value or "").strip()
     try:
@@ -2066,36 +2398,44 @@ def _require_enterprise_approval(request: Request | None, action_name: str) -> N
                 "Provide X-ShadowLab-Approval-Id header."
             ),
         )
+    now_value = time.time()
     conn = db.create_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        approvals = db.get_approval_requests(conn)
+        reserved = db.reserve_approval_request(conn, int(approval_id), action_name, now_value)
+        if not reserved:
+            approvals = db.get_approval_requests(conn)
+            row = approvals[approvals["id"] == int(approval_id)]
+        else:
+            row = None
     finally:
         conn.close()
-    row = approvals[approvals["id"] == int(approval_id)]
-    if row.empty:
-        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` not found")
-    item = row.iloc[0].to_dict()
-    status_value = str(item.get("status", "")).lower()
-    if status_value not in {"approved", "allow", "granted"}:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Approval `{approval_id}` status is `{status_value or 'unknown'}`; approved status required",
-        )
-    expected_action = str(item.get("action", "")).strip().lower()
-    if expected_action != action_name.strip().lower():
-        raise HTTPException(
-            status_code=403,
-            detail=f"Approval `{approval_id}` is scoped to `{expected_action or 'unknown'}` and cannot be used for `{action_name}`",
-        )
-    expires_at = float(item.get("expires_at", 0) or 0)
-    if expires_at and time.time() > expires_at:
-        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has expired")
-    used_at = float(item.get("used_at", 0) or 0)
-    if used_at:
-        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has already been consumed")
+    if not reserved:
+        if row is None or row.empty:
+            raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` not found")
+        item = row.iloc[0].to_dict()
+        status_value = str(item.get("status", "")).lower()
+        if status_value not in {"approved", "allow", "granted"}:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Approval `{approval_id}` status is `{status_value or 'unknown'}`; approved status required",
+            )
+        expected_action = str(item.get("action", "")).strip().lower()
+        if expected_action != action_name.strip().lower():
+            raise HTTPException(
+                status_code=403,
+                detail=f"Approval `{approval_id}` is scoped to `{expected_action or 'unknown'}` and cannot be used for `{action_name}`",
+            )
+        expires_at = float(item.get("expires_at", 0) or 0)
+        if expires_at and now_value > expires_at:
+            raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has expired")
+        used_at = float(item.get("used_at", 0) or 0)
+        if used_at:
+            raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has already been consumed")
+        raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` could not be reserved")
     request.state.pending_approval_id = int(approval_id)
+    request.state.pending_approval_reserved = True
 
 
 def _connector_queue_worker_loop() -> None:
@@ -2126,17 +2466,24 @@ def _audit_mutating_request(request: Request, status_code: int) -> None:
 
 def _consume_pending_approval(request: Request, status_code: int) -> None:
     approval_id = getattr(request.state, "pending_approval_id", None)
-    if not approval_id or status_code >= 400:
+    if not approval_id:
         return
     try:
         conn = db.create_connection()
         if conn is None:
             return
         try:
-            db.mark_approval_used(conn, int(approval_id), time.time())
+            if status_code >= 400:
+                db.release_approval_request(conn, int(approval_id))
+            else:
+                db.finalize_approval_request(conn, int(approval_id), time.time())
         finally:
             conn.close()
-        observability_service.log_event("approval_consumed", approval_id=int(approval_id), status_code=int(status_code))
+        observability_service.log_event(
+            "approval_consumed" if status_code < 400 else "approval_released",
+            approval_id=int(approval_id),
+            status_code=int(status_code),
+        )
     except Exception:
         return
 

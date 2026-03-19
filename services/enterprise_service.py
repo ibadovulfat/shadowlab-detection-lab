@@ -135,6 +135,15 @@ class EnterpriseService:
             )
             db.log_evidence_chain(conn, case_id, "case_created", actor=owner, notes="Enterprise case opened")
             frame = db.get_case_records(conn)
+            self._seed_case_checklist(conn, case_id, owner=owner or "unassigned", created_by=owner or "system")
+            db.log_case_activity(
+                conn,
+                case_id=case_id,
+                event_type="case_created",
+                actor=owner,
+                summary=f"Case '{title}' created",
+                detail_json=json.dumps({"priority": priority, "stage": stage}),
+            )
             return frame[frame["id"] == case_id].fillna("").to_dict(orient="records")[0]
         finally:
             conn.close()
@@ -158,6 +167,14 @@ class EnterpriseService:
             if artifact_path and path.exists() and path.is_file():
                 artifact_hash = self._sha256(path)
             db.log_evidence_chain(conn, case_id, event_type, actor=actor, artifact_path=artifact_path, artifact_hash=artifact_hash, notes=notes)
+            db.log_case_activity(
+                conn,
+                case_id=case_id,
+                event_type="chain_of_custody",
+                actor=actor,
+                summary=f"Chain of custody event recorded: {event_type}",
+                detail_json=json.dumps({"artifact_path": artifact_path, "artifact_hash": artifact_hash, "notes": notes}),
+            )
             return {"case_id": case_id, "event_type": event_type, "actor": actor, "artifact_hash": artifact_hash, "notes": notes}
         finally:
             conn.close()
@@ -186,6 +203,14 @@ class EnterpriseService:
                 reason=reason,
                 expires_at=expires_at,
             )
+            db.log_case_activity(
+                conn,
+                case_id=case_id,
+                event_type="approval_requested",
+                actor=requested_by,
+                summary=f"Approval requested for {action}",
+                detail_json=json.dumps({"approver": approver, "reason": reason}),
+            )
             return {"approval_id": approval_id, "case_id": case_id, "status": "pending", "action": action, "expires_at": expires_at}
         finally:
             conn.close()
@@ -195,10 +220,38 @@ class EnterpriseService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            approvals = db.get_approval_requests(conn).fillna("").to_dict(orient="records")
+            approval = next((item for item in approvals if int(item.get("id", 0) or 0) == approval_id), None)
             db.resolve_approval_request(conn, approval_id, status, approver)
+            if approval:
+                db.log_case_activity(
+                    conn,
+                    case_id=int(approval.get("case_id", 0) or 0),
+                    event_type="approval_resolved",
+                    actor=approver,
+                    summary=f"Approval {status}",
+                    detail_json=json.dumps({"approval_id": approval_id, "action": approval.get("action", "")}),
+                )
             return {"approval_id": approval_id, "status": status, "approver": approver}
         finally:
             conn.close()
+
+    def _seed_case_checklist(self, conn, case_id: int, *, owner: str, created_by: str) -> None:
+        default_tasks = [
+            ("Validate triggering evidence", "Review the initial alert, telemetry, or incident summary."),
+            ("Confirm process ancestry", "Inspect parent-child relationships and execution context."),
+            ("Review network activity", "Check outbound connections, DNS, and suspicious egress."),
+            ("Capture analyst narrative", "Document the working hypothesis and next steps."),
+        ]
+        for title, description in default_tasks:
+            db.create_case_task(
+                conn,
+                case_id=case_id,
+                title=title,
+                description=description,
+                assigned_to=owner,
+                created_by=created_by,
+            )
 
     def list_approvals(self) -> list[dict[str, Any]]:
         conn = db.create_connection()

@@ -1,133 +1,67 @@
 # ShadowLab Usage Guide
 
-This guide expands on the main project README and focuses on the operational parts of ShadowLab that go beyond a basic API startup.
+This guide covers the current operator workflow for backend, desktop, auth, enterprise investigation, and security-ops usage.
 
-## What This Covers
+## Start Modes
 
-- backend and desktop runtime usage
-- telemetry fabric lifecycle
-- process investigation and triage
-- persistence hunting and remediation
-- timeline, graph, and host inventory workflows
-- deception controls
-- artifacts and reporting
-- packaging notes
-
-## Backend and Desktop
-
-Start the API:
+### Basic local mode
 
 ```powershell
 python app.py
-```
-
-Start the desktop client:
-
-```powershell
 python desktop\main.py
 ```
 
-The desktop client expects the local API to be reachable at `http://127.0.0.1:8000` unless changed in the UI settings.
-
-## Telemetry Fabric
-
-ShadowLab can forward monitor session metrics, logs, and traces to its telemetry fabric over OTLP.
-
-Key files:
-
-- `config/telemetry-fabric-runtime.yaml`
-- `config/telemetry-fabric-builder.yaml`
-- `scripts/build_telemetry_fabric.ps1`
-
-Main API routes:
-
-- `GET /integrations/telemetry-fabric/status`
-- `POST /integrations/telemetry-fabric/start`
-- `POST /integrations/telemetry-fabric/stop`
-- `POST /integrations/telemetry-fabric/export/incidents/{incident_id}`
-- `GET /integrations/telemetry-fabric/exports`
-
-Typical flow:
-
-1. Start the API.
-2. Start the telemetry fabric.
-3. Run `POST /monitor/run`.
-4. Inspect export audit history.
-
-Build a custom Windows telemetry binary:
+### Auth-enabled local mode
 
 ```powershell
-scripts\build_telemetry_fabric.ps1
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
+python desktop\main.py
 ```
 
-## Monitor and Detection Workflow
+Use auth-enabled mode when you want to test:
 
-Core monitor route:
+- role-based access
+- capability gating
+- enterprise/admin-only actions
+- approval-dependent workflows
 
-- `POST /monitor/run`
+## Desktop Workflow
 
-This route:
+Typical desktop flow:
 
-- collects local telemetry samples
-- summarizes Defender and Sysmon context
-- computes blended likelihood
-- creates an incident record
-- writes artifacts
-- optionally exports to telemetry fabric
-
-Returned fields of interest:
-
-- `telemetry_rows`
-- `final_score`
-- `incident`
-- `collector_export`
-- `artifacts`
+1. confirm backend health
+2. enter an API key when auth is enabled
+3. inspect overview and dashboards
+4. investigate suspicious processes
+5. triage, enrich, and review graph or timeline context
+6. open or work an enterprise case if needed
+7. export findings or reports
 
 ## Process Investigation
 
-Useful routes:
+Primary routes:
 
 - `GET /processes`
 - `GET /processes/{pid}`
-- `POST /processes/{pid}/scan`
+- `GET /processes/{pid}/tree`
 - `GET /processes/{pid}/internals`
 - `POST /processes/{pid}/strings`
 - `POST /processes/{pid}/yara`
 - `POST /processes/{pid}/sandbox-trace`
-- `GET /processes/{pid}/tree`
 - `GET /processes/{pid}/ai-analysis`
+- `POST /processes/{pid}/scan`
+- `GET /processes/{pid}/memory-analysis`
 - `POST /triage/{pid}`
 
-Recommended operator sequence:
+Recommended flow:
 
-1. List processes.
-2. Inspect a suspicious PID profile.
-3. Run strings, YARAify lookup, and sandbox trace.
-4. Use one-click triage for a correlated view.
-5. Contain with response actions only after review.
-
-## Persistence Hunting and Remediation
-
-Routes:
-
-- `GET /persistence`
-- `POST /persistence/remediate`
-- `POST /persistence/rollback/{remediation_id}`
-- `GET /history/remediations`
-
-Current implementation focus:
-
-- Windows Run keys
-- Startup folder items
-- Scheduled tasks
-- Windows services
-- Winlogon autorun values
-
-Remediation backups are stored under:
-
-```text
-shadowlab_out/remediation_backups/
-```
+1. load the process list
+2. inspect the selected process profile
+3. review process tree and internals
+4. run strings and YARAify lookup when relevant
+5. run sandbox trace for short-lived behavior capture
+6. use one-click triage for a bundled view
+7. take response action only after review
 
 ## Threat Intelligence
 
@@ -138,91 +72,115 @@ Routes:
 - `POST /threat-intel/hash/lookup`
 - `POST /processes/{pid}/scan`
 
-Supported providers in the codebase:
+Supported providers in code:
 
 - VirusTotal
 - MalwareBazaar
-- YARAify
 - AbuseIPDB
+- YARAify
 
-YARA behavior:
+YARAify desktop note:
 
-- `POST /processes/{pid}/yara` is backed by YARAify, not a local vendored YARA pack
-- paste only the abuse.ch `Auth Key` value into the desktop `YARAify Auth-Key` field
+- paste only the abuse.ch `Auth Key` value
+- do not paste `curl`, quotes, or header labels
 
-## History, Timeline, and Graph Views
-
-Routes:
-
-- `GET /history/telemetry`
-- `GET /history/responses`
-- `GET /history/alerts`
-- `GET /history/remediations`
-- `GET /timeline`
-- `GET /timeline/graph`
-- `GET /hosts`
-- `GET /graph/entity-map`
-- `GET /graph/entity-map/html`
-
-These views help correlate:
-
-- telemetry spikes
-- response actions
-- incident creation
-- remediation history
-- host/process/network relationships
-
-## Deception and Evidence
+## Persistence, Quarantine, And Evidence
 
 Routes:
 
-- `POST /deception/honeypot/deploy`
-- `GET /deception/honeypot/status`
-- `DELETE /deception/honeypot`
-- `POST /deception/canary/deploy`
-- `GET /deception/canary/status`
-- `DELETE /deception/canary`
+- `GET /persistence`
+- `POST /persistence/remediate`
+- `POST /persistence/rollback/{remediation_id}`
+- `GET /quarantine`
+- `POST /quarantine/{quarantine_id}/restore`
+- `DELETE /quarantine/{quarantine_id}`
 - `POST /evidence/capture`
 - `GET /evidence`
 - `DELETE /evidence/{filename}`
 
-These features are intended for owned lab systems only.
+Use these only in systems you own and control. Dangerous or destructive actions remain role- and policy-gated.
 
-## Artifacts and Reports
+## Enterprise Case Workflow
+
+Main case routes:
+
+- `POST /enterprise/cases`
+- `GET /enterprise/cases`
+- `GET /enterprise/cases/{case_id}/board`
+- `GET /enterprise/cases/{case_id}/activity`
+- `GET /enterprise/cases/{case_id}/graph`
+- `POST /enterprise/cases/{case_id}/assignments`
+- `GET /enterprise/cases/{case_id}/assignments`
+- `POST /enterprise/cases/{case_id}/tasks`
+- `GET /enterprise/cases/{case_id}/tasks`
+- `PATCH /enterprise/cases/{case_id}/tasks/{task_id}`
+- `POST /enterprise/cases/{case_id}/investigation-report/export`
+
+Investigation routes:
+
+- `GET /enterprise/investigations/workspace`
+- `POST /enterprise/investigations/views`
+- `GET /enterprise/investigations/views`
+- `POST /enterprise/investigations/notes`
+- `GET /enterprise/investigations/notes`
+- `POST /enterprise/investigations/stories`
+- `GET /enterprise/investigations/stories`
+- `POST /enterprise/investigations/pins`
+- `GET /enterprise/investigations/pins`
+
+Typical enterprise workflow:
+
+1. create or select a case
+2. review the case board
+3. assign an analyst
+4. use checklist tasks to track work
+5. add notes and stories
+6. pin important evidence
+7. review activity, notifications, entity links, and scoped graph context
+8. export an investigation report when ready
+
+## Security Ops
+
+Security-ops routes:
+
+- `GET /integrity`
+- `GET /integrity/history`
+- `POST /integrity/refresh`
+- `GET /observability/summary`
+- `GET /enterprise/database/readiness`
+- `GET /enterprise/report/security-ops`
+- `POST /enterprise/report/security-ops/export`
+- `POST /enterprise/secrets/rotate`
+- `GET /enterprise/secrets/status`
+- `POST /enterprise/maintenance/retention`
+
+Use the `Security Ops` desktop tab for a safer operational entry point to these features.
+
+## Telemetry Fabric
 
 Routes:
 
-- `GET /artifacts`
-- `GET /artifacts/{filename}`
-- `GET /reports/html`
+- `GET /integrations/telemetry-fabric/status`
+- `POST /integrations/telemetry-fabric/start`
+- `POST /integrations/telemetry-fabric/stop`
+- `POST /integrations/telemetry-fabric/export/incidents/{incident_id}`
+- `GET /integrations/telemetry-fabric/exports`
 
-Generated outputs commonly include:
+Relevant files:
 
-- telemetry CSV
-- Defender and Sysmon summaries
-- final score JSON
-- incident bundle JSON
-- HTML/PDF reports
-- entity graph HTML/JSON
+- `config/telemetry-fabric-runtime.yaml`
+- `config/telemetry-fabric-builder.yaml`
+- `scripts/build_telemetry_fabric.ps1`
 
-## Desktop Packaging
+## Packaging
 
-Desktop packaging assets:
+Desktop packaging files:
 
 - `desktop/build_exe.ps1`
 - `desktop/shadowlab.spec`
 - `desktop/shadowlab.iss`
 - `desktop/version_info.txt`
 
-Use these when packaging the PySide6 desktop client as a Windows executable.
+## Safety
 
-## Safety Notes
-
-Some modules are explicitly lab-only:
-
-- ARP blocking
-- packet sniffing
-- deception features
-- process kill and quarantine workflows
-
-Use only in systems and networks you own and control.
+ShadowLab contains lab-only capabilities such as response actions, deception controls, packet sniffing, and network warfare helpers. Use only in environments you own and control.

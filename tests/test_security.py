@@ -223,9 +223,40 @@ class AuthApiTests(unittest.TestCase):
             with mock.patch.object(security, "security_settings", settings):
                 api.main._require_enterprise_approval(request, "process:kill")
                 self.assertEqual(request.state.pending_approval_id, approval_id)
+                self.assertTrue(request.state.pending_approval_reserved)
                 api.main._consume_pending_approval(request, 200)
                 with self.assertRaises(HTTPException):
                     api.main._require_enterprise_approval(request, "process:kill")
+
+    def test_failed_mutation_releases_reserved_approval(self) -> None:
+        db = __import__("database")
+        db.init_db()
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            approval_id = db.create_approval_request(
+                conn,
+                case_id=1,
+                action="process:kill",
+                requested_by="analyst",
+                approver="admin",
+                reason="unit test",
+                expires_at=time.time() + 3600,
+            )
+            db.resolve_approval_request(conn, approval_id, "approved", "admin")
+        finally:
+            conn.close()
+
+        settings = make_settings(auth_required=True, policy_profile="corp")
+        request = SimpleNamespace(
+            headers={"X-ShadowLab-Approval-Id": str(approval_id)},
+            state=SimpleNamespace(),
+        )
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                api.main._require_enterprise_approval(request, "process:kill")
+                api.main._consume_pending_approval(request, 500)
+                api.main._require_enterprise_approval(request, "process:kill")
 
     def test_alert_configuration_persists_encrypted_webhook(self) -> None:
         db = __import__("database")

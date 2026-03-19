@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 
@@ -66,7 +67,7 @@ class TimelineService:
                 }
             )
 
-        items.sort(key=lambda item: float(item.get("time") or 0.0), reverse=True)
+        items.sort(key=lambda item: self._time_value(item.get("time")), reverse=True)
         return items
 
     def build_graph(self, items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -98,6 +99,53 @@ class TimelineService:
         }
         return {"nodes": nodes, "edges": edges, "summary": summary}
 
+    def filter_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        query_text: str = "",
+        event_types: list[str] | None = None,
+        severities: list[str] | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 150,
+    ) -> list[dict[str, Any]]:
+        normalized_query = (query_text or "").strip().lower()
+        allowed_types = {str(value).strip().lower() for value in (event_types or []) if str(value).strip()}
+        allowed_severities = {str(value).strip().lower() for value in (severities or []) if str(value).strip()}
+        bounded_limit = max(1, min(int(limit), 500))
+
+        filtered: list[dict[str, Any]] = []
+        for item in items:
+            item_time = self._time_value(item.get("time"))
+            item_type = str(item.get("type", "") or "").lower()
+            item_severity = str(item.get("severity", "") or "").lower()
+            if allowed_types and item_type not in allowed_types:
+                continue
+            if allowed_severities and item_severity not in allowed_severities:
+                continue
+            if start_time is not None and item_time < float(start_time):
+                continue
+            if end_time is not None and item_time > float(end_time):
+                continue
+            if normalized_query and normalized_query not in self._search_blob(item):
+                continue
+            filtered.append(item)
+            if len(filtered) >= bounded_limit:
+                break
+        return filtered
+
+    def build_summary(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        by_type = Counter(str(item.get("type", "unknown") or "unknown") for item in items)
+        by_severity = Counter(str(item.get("severity", "unknown") or "unknown") for item in items)
+        return {
+            "total_events": len(items),
+            "by_type": dict(by_type),
+            "by_severity": dict(by_severity),
+            "latest_event": items[0].get("title", "") if items else "",
+            "high_severity_titles": [item.get("title", "") for item in items if item.get("severity") == "high"][:5],
+        }
+
     def _telemetry_severity(self, row: dict[str, Any]) -> str:
         cpu = float(row.get("cpu", 0.0) or 0.0)
         tcp = float(row.get("tcp_conns", 0.0) or 0.0)
@@ -106,3 +154,31 @@ class TimelineService:
         if cpu >= 70 or tcp >= 10:
             return "medium"
         return "low"
+
+    def _search_blob(self, item: dict[str, Any]) -> str:
+        parts = [
+            str(item.get("title", "") or ""),
+            str(item.get("type", "") or ""),
+            str(item.get("severity", "") or ""),
+            str(item.get("details", {}) or ""),
+        ]
+        return " ".join(parts).lower()
+
+    def _time_value(self, raw: Any) -> float:
+        if raw in (None, ""):
+            return 0.0
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        candidate = str(raw).strip()
+        if not candidate:
+            return 0.0
+        try:
+            return float(candidate)
+        except ValueError:
+            pass
+        for parser in (lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")), datetime.fromisoformat):
+            try:
+                return parser(candidate).timestamp()
+            except ValueError:
+                continue
+        return 0.0

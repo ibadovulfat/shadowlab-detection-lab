@@ -1,68 +1,127 @@
-# ShadowLab Platform Upgrade
+# ShadowLab Architecture
 
-ShadowLab is transitioning from a single-file Streamlit lab app into a layered detection platform.
+ShadowLab is no longer a single-surface lab app. The current shape is a local platform with a FastAPI backend, a PySide6 desktop client, shared services, and enterprise investigation flows on top of the same data model.
 
-## Target shape
+## Runtime Shape
 
-- `core/`
-  Domain models and normalized event schema.
-- `services/`
-  Orchestration logic for telemetry, detections, and incident artifacts.
-- `detections/`
-  Rule packs and correlation logic.
-- `plugins/`
-  Host-native modules for forensic, deception, and response operations.
-- `app.py`
-  Transitional UI shell until a dedicated Windows desktop client replaces it.
+```text
+desktop/main.py  ->  local operator console
+api/main.py      ->  REST API, auth, RBAC, feature gating
+services/        ->  orchestration and domain logic
+database.py      ->  SQLite/PostgreSQL-backed persistence helpers
+plugins/         ->  host-native collection and response modules
+shadowlab_out/   ->  generated artifacts, reports, and runtime outputs
+```
 
-## Strategic direction
+## Major Layers
 
-The strongest path for this project is a Windows-first desktop security workstation:
+### API layer
 
-- Local agent behavior
-- Host-native privileges
-- Event log visibility
-- Process/network response actions
-- Forensics and evidence capture
+`api/main.py` exposes:
 
-Web/SaaS can still be layered later for fleet reporting and historical analytics, but local desktop remains the operational control plane.
+- process investigation endpoints
+- incident and history endpoints
+- enterprise case and investigation endpoints
+- integrity, observability, secrets, and retention controls
+- auth context and RBAC enforcement
 
-## New building blocks
+The API is the source of truth for authorization. The desktop reads capability flags from `/auth/context` and adapts the UI, but permission enforcement remains server-side.
 
-### Normalized event model
+### Service layer
 
-All detections should converge on a shared structure:
+Key services include:
 
-- telemetry sample
-- security event
-- detection finding
-- incident record
+- telemetry and incident orchestration
+- response and persistence handling
+- process intelligence
+- graph correlation
+- enterprise case management
+- investigation workspace assembly
+- reporting and export logic
 
-This allows the same backend logic to feed:
+This layer keeps desktop concerns separate from backend behavior so the same API can serve future clients or automation.
 
-- current Streamlit UI
-- future PySide6 desktop UI
-- future API or fleet backend
+### Persistence layer
 
-### Rule engine
+`database.py` backs:
 
-`detections/default_rules.yaml` introduces a YAML-driven detection pack so new behaviors can be added without editing the UI layer.
+- incidents
+- case workflow
+- approvals
+- tasks and assignments
+- investigation notes, stories, pins, and saved views
+- integrity history
+- observability logs
+- connector and secret state
 
-### Incident bundle
+SQLite remains the default local mode. PostgreSQL is supported as a shared runtime target through environment configuration and migration scripts.
 
-`services/incident_service.py` writes a machine-readable incident bundle that can later feed:
+### Desktop layer
 
-- case management
-- desktop incident views
-- SOC reporting
-- fleet sync
+The desktop is the operator-facing control plane. It exposes:
 
-## Recommended next phases
+- telemetry and process workflows
+- threat-intel and persistence review
+- graph, timeline, and artifacts
+- enterprise investigation workflows
+- security-ops controls
 
-1. Replace direct plugin calls in `app.py` with service interfaces.
-2. Add Windows persistence coverage beyond macOS-only checks.
-3. Move response actions into a dedicated `response_service`.
-4. Add a PySide6 desktop shell.
-5. Add a lightweight agent mode and local IPC.
-6. Add rule packs for LOLBins, ransomware chains, and suspicious parent-child execution.
+Recent UI design choices:
 
+- large workspaces are local-scroll surfaces instead of forcing full-window growth
+- `Enterprise` is split into `Enterprise Ops` and `Enterprise Intel`
+- heavy enterprise refresh behavior is deferred to avoid UI freezes
+- role-aware controls respect server capability flags
+
+## Enterprise Investigation Model
+
+The enterprise workspace is built around a case-first flow:
+
+1. create or load a case
+2. review the case board
+3. assign analysts
+4. work checklist tasks
+5. pin evidence and add notes
+6. capture stories and hypotheses
+7. review activity, timeline, notifications, and linked entities
+8. export investigation reports
+
+Key backend objects:
+
+- cases
+- case chain entries
+- assignments
+- tasks
+- activity entries
+- notes
+- stories
+- pins
+- saved views
+- scoped case graphs
+
+## Security Model
+
+ShadowLab uses:
+
+- `viewer`, `analyst`, and `admin` roles
+- feature flags for dangerous actions, deception, and network warfare
+- policy profiles such as `lab`, `corp`, and `prod`
+- approval workflows for higher-risk operations in stricter policy modes
+
+Notable hardening points:
+
+- auth-disabled mode no longer causes the desktop to present fake admin state
+- approval one-time use is reserved and finalized atomically to avoid duplicate use races
+- dangerous endpoints remain gated server-side even if a client is modified
+
+## Strategic Direction
+
+The strongest direction remains a Windows-first security workstation with:
+
+- local host visibility
+- rich process investigation
+- operator-led response
+- case-driven investigation
+- desktop-first workflows
+
+Fleet or remote management can be layered later, but the current product is intentionally optimized for local or lab-controlled operations first.

@@ -1,51 +1,95 @@
 # ShadowLab Desktop Client
 
-This folder contains the PySide6 desktop client for the local ShadowLab FastAPI backend.
+This folder contains the PySide6 desktop client for the local ShadowLab API.
 
-For the broader operator workflow and feature usage across backend, desktop, telemetry fabric, remediation, and artifacts, also see:
+## What The Desktop Covers
 
-- `docs/USAGE_GUIDE.md`
+The desktop is the main operator console and currently exposes:
 
-Current features:
+- dashboards and overview telemetry views
+- process investigation, deep hunt, and response workflows
+- persistence review and remediation controls
+- threat-intel lookups
+- network, hosts, graph, timeline, quarantine, history, and artifact views
+- deception and scenario workflows
+- enterprise case operations and investigation intelligence views
+- security-ops posture and reporting controls
 
-- backend health check
-- process table loading
-- selected process detail view
-- monitor-session trigger
-- advanced response actions (`suspend`, `resume`, `kill`, `kill-tree`, `quarantine`)
-- case and incident visibility in History
-- incident owner/status update workflow
-- richer threat-intel workflow with lookup history and process auto-fill
-- deeper hunt workflow with strings, YARA, sandbox trace, process tree, and AI analyst
-- one-click auto triage workflow for selected processes
-- hosts, timeline, and quarantine tabs
-- persistence remediation workflow
-- webhook alert configuration and test path
-- memory analysis metadata with Volatility availability tracking
-- persistence, threat intel, network, history, artifacts, and scenario tabs
-- overview chart and severity highlighting
+## Enterprise Layout
 
-Run locally:
+The `Enterprise` tab is split into:
+
+- `Enterprise Ops`
+  - case controls
+  - case board
+  - assignments
+  - tasks
+  - activity feed
+  - notifications
+  - report export
+- `Enterprise Intel`
+  - critical assets
+  - detection lifecycle
+  - notes
+  - stories
+  - timeline
+  - entity links
+  - graph correlation
+
+Large tabs use local scrolling instead of forcing the full window to grow beyond the screen.
+
+## Auth And Roles
+
+The desktop reads role and capability state from `GET /auth/context`.
+
+Supported roles:
+
+- `viewer`
+- `analyst`
+- `admin`
+
+The client:
+
+- shows role-aware actions
+- hides or disables unavailable controls
+- does not treat auth-disabled backends as implicit admin anymore
+
+For local role-based testing, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
+python desktop\main.py
+```
+
+## Run Locally
 
 ```powershell
 python app.py
 python desktop\main.py
 ```
 
-Telemetry-aware workflow:
+Auth-enabled local start:
 
 ```powershell
-Invoke-RestMethod -Method Post http://127.0.0.1:8000/integrations/telemetry-fabric/start
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
 python desktop\main.py
 ```
 
-Build EXE:
+## Build EXE
 
 ```powershell
 pip install pyinstaller
 desktop\build_exe.ps1
 ```
 
-Spec file:
+Packaging assets:
 
-- [shadowlab.spec](C:\Users\ulfat\Downloads\shadowlab-detection-lab\desktop\shadowlab.spec)
+- `desktop\shadowlab.spec`
+- `desktop\shadowlab.iss`
+- `desktop\version_info.txt`
+
+## Related Docs
+
+- [README.md](../README.md)
+- [docs/USAGE_GUIDE.md](../docs/USAGE_GUIDE.md)
+- [docs/PRODUCTION_RUNBOOK.md](../docs/PRODUCTION_RUNBOOK.md)

@@ -6,30 +6,30 @@ Use the short product name consistently:
 
 - `ShadowLab`
 
-Avoid long UI titles unless needed for a document subtitle.
+Avoid switching between alternate titles in the UI unless a subtitle is needed for a specific workspace such as `Enterprise Ops` or `Security Ops`.
 
-## Recommended Logo Direction
+## Visual Direction
 
-The active direction for ShadowLab is:
+Preferred tone:
 
-- a minimal `S` monogram
-- compact enough for taskbar, EXE, and window icon use
-- simple enough to stay readable at small sizes
+- precise
+- tactical
+- modern
+- operator-focused
 
-## Visual Tone
+Avoid:
 
-- primary mood: precise, tactical, modern
-- avoid cartoon cyber icons
-- avoid generic padlock-only logos
-- keep the silhouette simple enough for EXE, taskbar, and favicon use
+- cartoonish cyber imagery
+- generic lock-only branding
+- noisy gradients that reduce dashboard readability
 
-## Current Assets
+## Logo Direction
 
-Current active product icon:
+The active logo direction remains:
 
-- `shadowlab-logo-monogram.svg`
-- rendered to `shadowlab-logo-active.png`
-- packaged as `shadowlab.ico`
+- a compact `S` monogram
+- readable at taskbar and EXE icon sizes
+- simple enough for desktop window, installer, and favicon use
 
 ## Recommended Colors
 
@@ -39,8 +39,22 @@ Current active product icon:
 - alert red: `#d64550`
 - success green: `#2f9e67`
 
-## Where the Logo Should Appear
+## UI Naming Guidance
+
+Preferred workspace labels:
+
+- `Enterprise`
+- `Enterprise Ops`
+- `Enterprise Intel`
+- `Security Ops`
+
+These labels align with the current desktop layout and should be preserved in screenshots, docs, and packaging unless the product structure changes again.
+
+## Asset Placement
+
+Current logo assets should appear in:
 
 - app window icon
 - EXE icon
-- splash / top-left hero area
+- installer visuals
+- top-left desktop branding area

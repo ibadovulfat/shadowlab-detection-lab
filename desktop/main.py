@@ -10,14 +10,15 @@ from pathlib import Path
 
 import requests
 from requests import Response
-from PySide6.QtCore import QMargins, QSettings, Qt, QUrl
+from PySide6.QtCore import QMargins, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QPen, QPixmap
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtWidgets import (
-    QApplication, QBoxLayout, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
-    QCheckBox, QInputDialog, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QSpinBox,
+    QApplication, QAbstractItemView, QBoxLayout, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
+    QCheckBox, QInputDialog, QLineEdit, QListWidget, QMainWindow, QMessageBox, QMenu, QPushButton, QSpinBox,
     QDialog,
     QFrame, QScrollArea, QSplitter, QSizePolicy, QStatusBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QTextEdit,
+    QToolButton,
     QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -48,10 +49,17 @@ class ShadowLabDesktop(QMainWindow):
         self.capability_widgets: list[tuple[QWidget, str]] = []
         self.panel_windows: list[QDialog] = []
         self.auth_active = False
+        self._enterprise_table_updating = False
+        self.enterprise_selected_case_id: int | None = None
+        self.enterprise_loaded_once = False
         self._theme()
         self._toolbar()
         self._ui()
         self.setStatusBar(QStatusBar())
+        self.live_refresh_timer = QTimer(self)
+        self.live_refresh_timer.setInterval(10000)
+        self.live_refresh_timer.timeout.connect(self._auto_refresh_active_tab)
+        self.live_refresh_timer.start()
         self.check_api_health()
 
     def _theme(self) -> None:
@@ -270,26 +278,27 @@ class ShadowLabDesktop(QMainWindow):
         layout.addWidget(top)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._dashboard_hub_tab(), "Dashboards")
-        self.tabs.addTab(self._overview_tab(), "Overview")
-        self.tabs.addTab(self._process_tab(), "Processes")
+        self.tabs.addTab(self._scrollable_tab(self._dashboard_hub_tab()), "Dashboards")
+        self.tabs.addTab(self._scrollable_tab(self._overview_tab()), "Overview")
+        self.tabs.addTab(self._scrollable_tab(self._process_tab(), allow_horizontal=True), "Processes")
         self.tabs.addTab(self._hunt_tab(), "Advanced Hunt")
         self.tabs.addTab(self._persistence_tab(), "Persistence")
         self.tabs.addTab(self._threat_tab(), "Threat Intel")
         self.tabs.addTab(self._deception_tab(), "Deception")
         self.tabs.addTab(self._network_tab(), "Network")
         self.tabs.addTab(self._hosts_tab(), "Hosts")
-        self.tabs.addTab(self._graph_tab(), "Graph")
+        self.tabs.addTab(self._scrollable_tab(self._graph_tab()), "Graph")
         self.tabs.addTab(self._timeline_tab(), "Timeline")
         self.tabs.addTab(self._quarantine_tab(), "Quarantine")
         self.tabs.addTab(self._history_tab(), "History")
         self.tabs.addTab(self._artifacts_tab(), "Artifacts")
-        self.tabs.addTab(self._enterprise_tab(), "Enterprise")
-        self.tabs.addTab(self._security_ops_tab(), "Security Ops")
+        self.tabs.addTab(self._scrollable_tab(self._enterprise_tab(), allow_horizontal=True), "Enterprise")
+        self.tabs.addTab(self._scrollable_tab(self._security_ops_tab()), "Security Ops")
         self.tabs.addTab(self._scenario_tab(), "Scenarios")
-        self.tabs.addTab(self._about_tab(), "About / FAQ")
+        self.tabs.addTab(self._scrollable_tab(self._about_tab()), "About / FAQ")
         self.tabs.setUsesScrollButtons(True)
         self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(content)
         self._load_settings()
@@ -303,7 +312,7 @@ class ShadowLabDesktop(QMainWindow):
 
         title = QLabel("Multi Dashboard Wall")
         title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
-        subtitle = QLabel("Compact panels for SOC triage. Use Expand to open any panel in a separate window.")
+        subtitle = QLabel("Compact panels for SOC triage. Use Open Panel to move any card into a separate window.")
         subtitle.setStyleSheet("color:#96a5b8;font-size:12px;")
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -357,17 +366,17 @@ class ShadowLabDesktop(QMainWindow):
         card.setProperty("card", True)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(6)
+        card_layout.setContentsMargins(12, 10, 12, 12)
+        card_layout.setSpacing(8)
         header = QWidget()
         header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         header_row = QHBoxLayout(header)
         header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(6)
+        header_row.setSpacing(8)
         label = QLabel(title)
-        label.setStyleSheet("font-size:12px;font-weight:700;color:#f4f7fb;")
-        expand_btn = QPushButton("Expand")
-        expand_btn.setMaximumWidth(82)
+        label.setStyleSheet("font-size:13px;font-weight:700;color:#f4f7fb;letter-spacing:0.2px;")
+        expand_btn = QPushButton("Open Panel")
+        expand_btn.setMaximumWidth(104)
         expand_btn.clicked.connect(expand_fn)
         header_row.addWidget(label)
         header_row.addStretch(1)
@@ -415,6 +424,32 @@ class ShadowLabDesktop(QMainWindow):
         elif isinstance(source, QLabel):
             clone.setText(source.text())
         return clone
+
+    def _enterprise_action_button(self, label: str, callback, capability: str | None = None) -> QPushButton:
+        button = QPushButton(label)
+        button.setMinimumHeight(32)
+        button.clicked.connect(callback)
+        if capability:
+            self._bind_capability(button, capability)
+        return button
+
+    def _enterprise_menu_button(self, label: str, actions: list[tuple[str, object, str | None]]) -> QToolButton:
+        button = QToolButton()
+        button.setText(label)
+        button.setPopupMode(QToolButton.InstantPopup)
+        button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        button.setMinimumHeight(32)
+        menu = QMenu(button)
+        capability_bound = False
+        for action_label, callback, capability in actions:
+            action = QAction(action_label, button)
+            action.triggered.connect(callback)
+            menu.addAction(action)
+            if capability and not capability_bound:
+                self._bind_capability(button, capability)
+                capability_bound = True
+        button.setMenu(menu)
+        return button
 
     def _copy_cpu_chart(self) -> QChartView:
         copied_series = QLineSeries()
@@ -974,27 +1009,104 @@ class ShadowLabDesktop(QMainWindow):
         controls_lbl = QLabel("Case &amp; Operations Controls")
         controls_lbl.setStyleSheet("font-size:12px;font-weight:700;color:#96a5b8;")
         controls_inner.addWidget(controls_lbl)
-        controls = QWidget(); cr = QHBoxLayout(controls)
+        controls_top = QWidget()
+        controls_top_row = QHBoxLayout(controls_top)
+        controls_top_row.setContentsMargins(0, 0, 0, 0)
+        controls_top_row.setSpacing(8)
+        self.enterprise_warning_banner = QLabel("Warnings will appear here when cases need attention.")
+        self.enterprise_warning_banner.setStyleSheet("color:#ffd166;background:#1a2230;border:1px solid #2c4260;border-radius:8px;padding:8px 10px;font-weight:600;")
+        self.enterprise_role_banner = QLabel("Role context will appear here.")
+        self.enterprise_role_banner.setStyleSheet("color:#9fd0ff;background:#121b27;border:1px solid #2c4260;border-radius:8px;padding:8px 10px;font-weight:600;")
+        self.enterprise_live_status = QLabel("Live sync idle")
+        self.enterprise_live_status.setStyleSheet("color:#96a5b8;font-size:11px;")
+        self.enterprise_auto_refresh = QCheckBox("Auto refresh")
+        self.enterprise_auto_refresh.setChecked(True)
+        self.enterprise_case_filter = QLineEdit()
+        self.enterprise_case_filter.setPlaceholderText("Filter cases")
+        self.enterprise_case_filter.textChanged.connect(self._apply_enterprise_filters)
+        self.enterprise_case_filter.textChanged.connect(self._persist_enterprise_ui_state)
+        self.enterprise_task_filter = QLineEdit()
+        self.enterprise_task_filter.setPlaceholderText("Filter tasks")
+        self.enterprise_task_filter.textChanged.connect(self._apply_enterprise_filters)
+        self.enterprise_task_filter.textChanged.connect(self._persist_enterprise_ui_state)
+        self.enterprise_activity_filter = QLineEdit()
+        self.enterprise_activity_filter.setPlaceholderText("Filter activity")
+        self.enterprise_activity_filter.textChanged.connect(self._apply_enterprise_filters)
+        self.enterprise_activity_filter.textChanged.connect(self._persist_enterprise_ui_state)
+        self.enterprise_auto_refresh.toggled.connect(self._persist_enterprise_ui_state)
+        controls_top_row.addWidget(self.enterprise_warning_banner, 2)
+        controls_top_row.addWidget(self.enterprise_role_banner, 1)
+        controls_top_row.addWidget(self.enterprise_live_status)
+        controls_top_row.addWidget(self.enterprise_auto_refresh)
+        controls_top_row.addWidget(self.enterprise_case_filter)
+        controls_top_row.addWidget(self.enterprise_task_filter)
+        controls_top_row.addWidget(self.enterprise_activity_filter)
+        controls_inner.addWidget(controls_top)
+        controls = QWidget()
+        cr = QVBoxLayout(controls)
         cr.setContentsMargins(0, 0, 0, 0)
         cr.setSpacing(8)
         self.enterprise_case_title = QLineEdit("Suspicious activity case")
+        self.enterprise_case_title.setPlaceholderText("Case title")
         self.enterprise_case_owner = QLineEdit()
+        self.enterprise_case_owner.setPlaceholderText("Owner")
         self.enterprise_case_priority = QComboBox(); self.enterprise_case_priority.addItems(["low", "medium", "high", "critical"])
         self.enterprise_replay_path = QLineEdit(str((Path(__file__).resolve().parent.parent / "shadowlab_out" / "incident_bundle.json")))
         self.enterprise_network_range = QLineEdit("127.0.0.1")
-        refresh_btn = QPushButton("Refresh Enterprise"); refresh_btn.clicked.connect(self.refresh_enterprise_workspace); self._bind_capability(refresh_btn, "can_run_hunt")
-        create_case_btn = QPushButton("Create Case"); create_case_btn.clicked.connect(self.create_enterprise_case); self._bind_capability(create_case_btn, "can_manage_incidents")
-        approval_btn = QPushButton("Request Approval"); approval_btn.clicked.connect(self.request_enterprise_approval); self._bind_capability(approval_btn, "can_manage_incidents")
-        web_btn = QPushButton("Inspect Web Surface"); web_btn.clicked.connect(self.run_web_inspection); self._bind_capability(web_btn, "can_run_hunt")
-        net_btn = QPushButton("Assess Network"); net_btn.clicked.connect(self.run_enterprise_network_assessment); self._bind_capability(net_btn, "can_run_hunt")
-        replay_btn = QPushButton("Replay Artifact"); replay_btn.clicked.connect(self.run_purple_replay); self._bind_capability(replay_btn, "can_run_hunt")
-        gaps_btn = QPushButton("Telemetry Gaps"); gaps_btn.clicked.connect(self.load_telemetry_gaps); self._bind_capability(gaps_btn, "can_run_hunt")
+        refresh_btn = self._enterprise_action_button("Refresh", self.refresh_enterprise_workspace, "can_run_hunt")
+        create_case_btn = self._enterprise_action_button("Create Case", self.create_enterprise_case, "can_manage_incidents")
+        assign_btn = self._enterprise_action_button("Assign", self.assign_enterprise_case, "can_manage_incidents")
+        update_task_btn = self._enterprise_action_button("Update Task", self.update_enterprise_task_status, "can_manage_incidents")
+        mark_done_btn = self._enterprise_action_button("Mark Done", lambda: self.update_enterprise_task_status("done"), "can_manage_incidents")
+        graph_btn = self._enterprise_action_button("Correlation", self.load_enterprise_case_graph, "can_run_hunt")
+        board_btn = self._enterprise_action_button("Case Board", self.load_selected_case_board, "can_manage_incidents")
+        export_case_btn = self._enterprise_action_button("Export Report", self.export_selected_case_report, "can_manage_integrations")
+        approval_btn = self._enterprise_action_button("Approval", self.request_enterprise_approval, "can_manage_incidents")
+        web_btn = self._enterprise_action_button("Web Surface", self.run_web_inspection, "can_run_hunt")
+        net_btn = self._enterprise_action_button("Network", self.run_enterprise_network_assessment, "can_run_hunt")
+        replay_btn = self._enterprise_action_button("Replay", self.run_purple_replay, "can_run_hunt")
+        gaps_btn = self._enterprise_action_button("Gaps", self.load_telemetry_gaps, "can_run_hunt")
+        add_btn = self._enterprise_menu_button(
+            "Add",
+            [
+                ("Task", self.create_enterprise_task, "can_manage_incidents"),
+                ("Note", self.add_enterprise_note, "can_manage_incidents"),
+                ("Story", self.add_enterprise_story, "can_manage_incidents"),
+                ("Pin Event", self.pin_enterprise_event, "can_manage_incidents"),
+            ],
+        )
+        fields_row = QWidget()
+        fields_layout = QHBoxLayout(fields_row)
+        fields_layout.setContentsMargins(0, 0, 0, 0)
+        fields_layout.setSpacing(8)
         for widget in [QLabel("Case"), self.enterprise_case_title, QLabel("Owner"), self.enterprise_case_owner, QLabel("Priority"), self.enterprise_case_priority]:
-            cr.addWidget(widget)
-        for widget in [refresh_btn, create_case_btn, approval_btn, web_btn, net_btn, replay_btn, gaps_btn]:
-            cr.addWidget(widget)
-        cr.addStretch(1)
-        controls_inner.addWidget(controls)
+            fields_layout.addWidget(widget)
+        fields_layout.addStretch(1)
+        primary_row = QWidget()
+        primary_layout = QHBoxLayout(primary_row)
+        primary_layout.setContentsMargins(0, 0, 0, 0)
+        primary_layout.setSpacing(8)
+        for widget in [refresh_btn, create_case_btn, add_btn, assign_btn, board_btn, graph_btn, export_case_btn]:
+            primary_layout.addWidget(widget)
+        primary_layout.addStretch(1)
+        secondary_row = QWidget()
+        secondary_layout = QHBoxLayout(secondary_row)
+        secondary_layout.setContentsMargins(0, 0, 0, 0)
+        secondary_layout.setSpacing(8)
+        for widget in [update_task_btn, mark_done_btn, approval_btn, web_btn, net_btn, replay_btn, gaps_btn]:
+            secondary_layout.addWidget(widget)
+        secondary_layout.addStretch(1)
+        cr.addWidget(fields_row)
+        cr.addWidget(primary_row)
+        cr.addWidget(secondary_row)
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setFixedHeight(120)
+        controls_scroll.setWidget(controls)
+        controls_inner.addWidget(controls_scroll)
         l.addWidget(controls_card)
 
         triage_card = QFrame(); triage_card.setProperty("card", True); triage_layout = QVBoxLayout(triage_card)
@@ -1004,18 +1116,93 @@ class ShadowLabDesktop(QMainWindow):
         triage_layout.addWidget(triage_title); triage_layout.addWidget(self.enterprise_summary)
         l.addWidget(triage_card)
 
+        metrics = QWidget()
+        mr = QHBoxLayout(metrics)
+        mr.setContentsMargins(0, 0, 0, 0)
+        mr.setSpacing(8)
+        open_cases_card, self.enterprise_open_cases_value = self._metric_card("Open Cases", "#8ec5ff")
+        overdue_card, self.enterprise_overdue_value = self._metric_card("Overdue Tasks", "#ff8b8b")
+        assignments_card, self.enterprise_assignments_value = self._metric_card("Assignments", "#ffd166")
+        high_risk_card, self.enterprise_high_risk_value = self._metric_card("High Risk Assets", "#7bd389")
+        for card in [open_cases_card, overdue_card, assignments_card, high_risk_card]:
+            mr.addWidget(card, 1)
+        l.addWidget(metrics)
+
+        self.enterprise_kpi_chart = QChartView()
+        self.enterprise_kpi_chart.setMinimumHeight(180)
+        self.enterprise_kpi_chart.setRenderHint(self.enterprise_kpi_chart.renderHints())
+        l.addWidget(self._panel_card("Operational Snapshot", self.enterprise_kpi_chart, lambda: self._open_panel_window("Operational Snapshot", QLabel("Use the main Enterprise tab for the live KPI chart."))))
+
+        enterprise_sections = QTabWidget()
+        enterprise_sections.setDocumentMode(True)
+        enterprise_sections.setUsesScrollButtons(True)
+
+        ops_page = QWidget()
+        ops_layout = QHBoxLayout(ops_page)
+        ops_layout.setContentsMargins(0, 0, 0, 0)
+        ops_layout.setSpacing(8)
         split = QSplitter(Qt.Horizontal)
         left = QWidget(); ll = QVBoxLayout(left)
-        self.enterprise_cases_table = QTableWidget(0, 6); self.enterprise_cases_table.setHorizontalHeaderLabels(["ID", "Title", "Priority", "Stage", "Owner", "Status"]); self._style_table(self.enterprise_cases_table)
+        self.enterprise_cases_table = QTableWidget(0, 6); self.enterprise_cases_table.setHorizontalHeaderLabels(["ID", "Title", "Priority", "Stage", "Owner", "Status"]); self._style_table(self.enterprise_cases_table); self.enterprise_cases_table.itemSelectionChanged.connect(self._on_enterprise_case_selection_changed)
         self.enterprise_assets_table = QTableWidget(0, 4); self.enterprise_assets_table.setHorizontalHeaderLabels(["PID", "Name", "Criticality", "Rationale"]); self._style_table(self.enterprise_assets_table)
         self.enterprise_detections_table = QTableWidget(0, 4); self.enterprise_detections_table.setHorizontalHeaderLabels(["Rule", "Version", "Status", "Notes"]); self._style_table(self.enterprise_detections_table)
-        ll.addWidget(self.enterprise_cases_table); ll.addWidget(self.enterprise_assets_table); ll.addWidget(self.enterprise_detections_table)
+        self.enterprise_notes_table = QTableWidget(0, 3); self.enterprise_notes_table.setHorizontalHeaderLabels(["Author", "Type", "Note"]); self._style_table(self.enterprise_notes_table); self.enterprise_notes_table.itemSelectionChanged.connect(self.show_selected_enterprise_note)
+        self.enterprise_stories_table = QTableWidget(0, 3); self.enterprise_stories_table.setHorizontalHeaderLabels(["Title", "Confidence", "Author"]); self._style_table(self.enterprise_stories_table); self.enterprise_stories_table.itemSelectionChanged.connect(self.show_selected_enterprise_story)
+        ll.addWidget(self._panel_card("Cases", self.enterprise_cases_table, lambda: self._open_panel_window("Enterprise Cases", self._clone_table(self.enterprise_cases_table))))
+        ll.addWidget(self._panel_card("Critical Assets", self.enterprise_assets_table, lambda: self._open_panel_window("Enterprise Assets", self._clone_table(self.enterprise_assets_table))))
+        ll.addWidget(self._panel_card("Detection Lifecycle", self.enterprise_detections_table, lambda: self._open_panel_window("Enterprise Detections", self._clone_table(self.enterprise_detections_table))))
+        ll.addWidget(self._panel_card("Investigation Notes", self.enterprise_notes_table, lambda: self._open_panel_window("Investigation Notes", self._clone_table(self.enterprise_notes_table))))
+        ll.addWidget(self._panel_card("Investigation Stories", self.enterprise_stories_table, lambda: self._open_panel_window("Investigation Stories", self._clone_table(self.enterprise_stories_table))))
         right = QWidget(); rl = QVBoxLayout(right)
         self.enterprise_narrative = QTextBrowser(); self.enterprise_narrative.setProperty("role", "brief"); self.enterprise_narrative.setMinimumHeight(180)
+        self.enterprise_case_board = QTextBrowser(); self.enterprise_case_board.setProperty("role", "brief"); self.enterprise_case_board.setMinimumHeight(160)
+        self.enterprise_case_timeline = QTableWidget(0, 4); self.enterprise_case_timeline.setHorizontalHeaderLabels(["Time", "Kind", "Severity", "Title"]); self._style_table(self.enterprise_case_timeline); self.enterprise_case_timeline.itemSelectionChanged.connect(self.show_selected_enterprise_timeline)
+        self.enterprise_entity_links = QTableWidget(0, 4); self.enterprise_entity_links.setHorizontalHeaderLabels(["Entity", "Kind", "Evidence", "Examples"]); self._style_table(self.enterprise_entity_links); self.enterprise_entity_links.itemSelectionChanged.connect(self.show_selected_enterprise_link)
+        self.enterprise_graph_summary = QTextBrowser(); self.enterprise_graph_summary.setProperty("role", "brief"); self.enterprise_graph_summary.setMinimumHeight(160)
+        self.enterprise_graph_focus = QTableWidget(0, 4); self.enterprise_graph_focus.setHorizontalHeaderLabels(["Process", "PID", "Risk", "Signature"]); self._style_table(self.enterprise_graph_focus)
+        self.enterprise_assignments_table = QTableWidget(0, 4); self.enterprise_assignments_table.setHorizontalHeaderLabels(["Analyst", "Role", "Status", "Assigned By"]); self._style_table(self.enterprise_assignments_table); self.enterprise_assignments_table.itemSelectionChanged.connect(self.show_selected_enterprise_assignment)
+        self.enterprise_tasks_table = QTableWidget(0, 4); self.enterprise_tasks_table.setHorizontalHeaderLabels(["Title", "Status", "Priority", "Assigned"]); self._style_table(self.enterprise_tasks_table); self.enterprise_tasks_table.itemSelectionChanged.connect(self.show_selected_enterprise_task); self.enterprise_tasks_table.itemChanged.connect(self._inline_update_enterprise_task)
+        self.enterprise_activity_table = QTableWidget(0, 4); self.enterprise_activity_table.setHorizontalHeaderLabels(["Time", "Event", "Actor", "Summary"]); self._style_table(self.enterprise_activity_table); self.enterprise_activity_table.itemSelectionChanged.connect(self.show_selected_enterprise_activity)
+        self.enterprise_notifications_table = QTableWidget(0, 4); self.enterprise_notifications_table.setHorizontalHeaderLabels(["Time", "Severity", "Category", "Message"]); self._style_table(self.enterprise_notifications_table); self.enterprise_notifications_table.itemSelectionChanged.connect(self.show_selected_enterprise_notification)
         self.enterprise_detail = QTextEdit(); self.enterprise_detail.setReadOnly(True)
-        rl.addWidget(self.enterprise_narrative); rl.addWidget(self.enterprise_detail)
+        rl.addWidget(self._panel_card("Narrative", self.enterprise_narrative, lambda: self._open_panel_window("Enterprise Narrative", self._clone_text_view(self.enterprise_narrative))))
+        rl.addWidget(self._panel_card("Case Board", self.enterprise_case_board, lambda: self._open_panel_window("Case Board", self._clone_text_view(self.enterprise_case_board))))
+        rl.addWidget(self._panel_card("Assignments", self.enterprise_assignments_table, lambda: self._open_panel_window("Assignments", self._clone_table(self.enterprise_assignments_table))))
+        rl.addWidget(self._panel_card("Tasks", self.enterprise_tasks_table, lambda: self._open_panel_window("Tasks", self._clone_table(self.enterprise_tasks_table))))
+        rl.addWidget(self._panel_card("Activity Feed", self.enterprise_activity_table, lambda: self._open_panel_window("Activity Feed", self._clone_table(self.enterprise_activity_table))))
+        rl.addWidget(self._panel_card("Notification Center", self.enterprise_notifications_table, lambda: self._open_panel_window("Notification Center", self._clone_table(self.enterprise_notifications_table))))
+        rl.addWidget(self._panel_card("Case JSON Detail", self.enterprise_detail, lambda: self._open_panel_window("Case JSON Detail", self._clone_text_view(self.enterprise_detail))))
         split.addWidget(left); split.addWidget(right); split.setStretchFactor(0, 2); split.setStretchFactor(1, 3)
-        l.addWidget(split, 1)
+        ops_layout.addWidget(split)
+
+        intel_page = QWidget()
+        intel_layout = QHBoxLayout(intel_page)
+        intel_layout.setContentsMargins(0, 0, 0, 0)
+        intel_layout.setSpacing(8)
+        intel_split = QSplitter(Qt.Horizontal)
+        intel_left = QWidget(); intel_left_layout = QVBoxLayout(intel_left)
+        intel_left_layout.setContentsMargins(0, 0, 0, 0)
+        intel_left_layout.setSpacing(8)
+        intel_left_layout.addWidget(self._panel_card("Critical Assets", self.enterprise_assets_table, lambda: self._open_panel_window("Enterprise Assets", self._clone_table(self.enterprise_assets_table))))
+        intel_left_layout.addWidget(self._panel_card("Detection Lifecycle", self.enterprise_detections_table, lambda: self._open_panel_window("Enterprise Detections", self._clone_table(self.enterprise_detections_table))))
+        intel_left_layout.addWidget(self._panel_card("Case Timeline", self.enterprise_case_timeline, lambda: self._open_panel_window("Case Timeline", self._clone_table(self.enterprise_case_timeline))))
+        intel_left_layout.addWidget(self._panel_card("Entity Links", self.enterprise_entity_links, lambda: self._open_panel_window("Entity Links", self._clone_table(self.enterprise_entity_links))))
+        intel_right = QWidget(); intel_right_layout = QVBoxLayout(intel_right)
+        intel_right_layout.setContentsMargins(0, 0, 0, 0)
+        intel_right_layout.setSpacing(8)
+        intel_right_layout.addWidget(self._panel_card("Graph Correlation", self.enterprise_graph_summary, lambda: self._open_panel_window("Graph Correlation", self._clone_text_view(self.enterprise_graph_summary))))
+        intel_right_layout.addWidget(self._panel_card("Graph Focus Processes", self.enterprise_graph_focus, lambda: self._open_panel_window("Graph Focus Processes", self._clone_table(self.enterprise_graph_focus))))
+        intel_right_layout.addWidget(self._panel_card("Investigation Notes", self.enterprise_notes_table, lambda: self._open_panel_window("Investigation Notes", self._clone_table(self.enterprise_notes_table))))
+        intel_right_layout.addWidget(self._panel_card("Investigation Stories", self.enterprise_stories_table, lambda: self._open_panel_window("Investigation Stories", self._clone_table(self.enterprise_stories_table))))
+        intel_split.addWidget(intel_left)
+        intel_split.addWidget(intel_right)
+        intel_split.setStretchFactor(0, 2)
+        intel_split.setStretchFactor(1, 3)
+        intel_layout.addWidget(intel_split)
+
+        enterprise_sections.addTab(ops_page, "Enterprise Ops")
+        enterprise_sections.addTab(intel_page, "Enterprise Intel")
+        l.addWidget(enterprise_sections, 1)
         return w
 
     def _security_ops_tab(self) -> QWidget:
@@ -1260,11 +1447,12 @@ class ShadowLabDesktop(QMainWindow):
         hdr = QWidget()
         hdr_layout = QVBoxLayout(hdr)
         hdr_layout.setContentsMargins(0, 0, 0, 4)
-        hdr_layout.setSpacing(2)
+        hdr_layout.setSpacing(3)
         t = QLabel(title)
-        t.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
+        t.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;letter-spacing:0.2px;")
         s = QLabel(subtitle)
-        s.setStyleSheet("color:#96a5b8;font-size:12px;")
+        s.setStyleSheet("color:#96a5b8;font-size:12px;line-height:1.2;")
+        s.setWordWrap(True)
         hdr_layout.addWidget(t)
         hdr_layout.addWidget(s)
         sep = QFrame()
@@ -1291,6 +1479,54 @@ class ShadowLabDesktop(QMainWindow):
         layout.addWidget(widget)
         return block
 
+    def _metric_card(self, label_text: str, accent: str) -> tuple[QFrame, QLabel]:
+        card = QFrame()
+        card.setProperty("card", True)
+        card.setMinimumHeight(88)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(2)
+        label = QLabel(label_text)
+        label.setStyleSheet("color:#96a5b8;font-size:10px;font-weight:700;letter-spacing:0.5px;")
+        value = QLabel("0")
+        value.setStyleSheet(f"color:{accent};font-size:24px;font-weight:800;")
+        layout.addWidget(label)
+        layout.addWidget(value)
+        layout.addStretch(1)
+        return card, value
+
+    def _set_metric_label(self, label: QLabel, value: str) -> None:
+        label.setText(str(value))
+
+    def _scrollable_tab(self, widget: QWidget, allow_horizontal: bool = False) -> QScrollArea:
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setWidget(widget)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if allow_horizontal else Qt.ScrollBarAlwaysOff)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        return area
+
+    def _on_tab_changed(self, index: int) -> None:
+        self.settings.setValue("current_tab_index", index)
+        try:
+            tab_name = self.tabs.tabText(index)
+        except Exception:
+            return
+        if tab_name == "Enterprise" and getattr(self, "enterprise_auto_refresh", None) and self.enterprise_auto_refresh.isChecked():
+            self.enterprise_live_status.setText("Preparing enterprise workspace...")
+            if not self.enterprise_loaded_once:
+                QTimer.singleShot(150, self.refresh_enterprise_workspace)
+
+    def _auto_refresh_active_tab(self) -> None:
+        current_index = self.tabs.currentIndex()
+        tab_name = self.tabs.tabText(current_index)
+        if tab_name == "Enterprise" and getattr(self, "enterprise_auto_refresh", None) and self.enterprise_auto_refresh.isChecked():
+            if self._selected_enterprise_case_id() is not None:
+                self.load_selected_case_board()
+            elif self.enterprise_loaded_once:
+                self.refresh_enterprise_workspace()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_controls_layout()
@@ -1302,12 +1538,14 @@ class ShadowLabDesktop(QMainWindow):
         self.controls_row.setSpacing(10 if stacked else 12)
         self.ops_card.setMinimumWidth(0 if stacked else 560)
         self.advanced_card.setMinimumWidth(0 if stacked else 560)
-        self.ops_card.setFixedHeight(self.ops_card.sizeHint().height())
-        self.advanced_card.setFixedHeight(self.advanced_card.sizeHint().height())
+        self.ops_card.setMaximumHeight(16777215)
+        self.advanced_card.setMaximumHeight(16777215)
+        self.ops_card.setMinimumHeight(self.ops_card.sizeHint().height())
+        self.advanced_card.setMinimumHeight(self.advanced_card.sizeHint().height())
         if not stacked and self.advanced_card.isVisible():
             equal_height = max(self.ops_card.height(), self.advanced_card.height())
-            self.ops_card.setFixedHeight(equal_height)
-            self.advanced_card.setFixedHeight(equal_height)
+            self.ops_card.setMinimumHeight(equal_height)
+            self.advanced_card.setMinimumHeight(equal_height)
 
     def _show_error(self, widget: QTextEdit, title: str, exc: Exception) -> None:
         widget.setPlainText(f"{title}:\n{exc}")
@@ -1409,7 +1647,16 @@ class ShadowLabDesktop(QMainWindow):
                 self.auth_mode_hint.setText("Analyst mode is active. Hunt, triage and investigation workflows are unlocked.")
             else:
                 self.auth_mode_hint.setText("Viewer mode is active. Read-only views stay visible and destructive actions stay hidden.")
+        if hasattr(self, "enterprise_role_banner"):
+            access_text = "Read-only workspace" if role == "viewer" else "Investigation workspace" if role == "analyst" else "Full response workspace"
+            self.enterprise_role_banner.setText(f"Enterprise role: {role} | {access_text}")
+            accent = "#f4c26b" if role == "viewer" else "#9fd0ff" if role == "analyst" else "#7fe39d"
+            self.enterprise_role_banner.setStyleSheet(f"color:{accent};background:#121b27;border:1px solid #2c4260;border-radius:8px;padding:8px 10px;font-weight:600;")
         self._apply_capabilities(capabilities)
+        if hasattr(self, "enterprise_tasks_table"):
+            can_edit_tasks = bool(capabilities.get("can_manage_incidents", False))
+            triggers = QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed if can_edit_tasks else QAbstractItemView.NoEditTriggers
+            self.enterprise_tasks_table.setEditTriggers(triggers)
         if hasattr(self, "dash_auth"):
             self._refresh_dashboard_panels()
 
@@ -1482,6 +1729,14 @@ class ShadowLabDesktop(QMainWindow):
         advanced_visible = str(self.settings.value("advanced_visible", "true")).lower() == "true"
         self.advanced_card.setVisible(advanced_visible)
         self.toggle_advanced_btn.setText("Hide Advanced Settings" if advanced_visible else "Show Advanced Settings")
+        self.enterprise_auto_refresh.setChecked(str(self.settings.value("enterprise_auto_refresh", "true")).lower() == "true")
+        self.enterprise_case_filter.setText(str(self.settings.value("enterprise_case_filter", "")))
+        self.enterprise_task_filter.setText(str(self.settings.value("enterprise_task_filter", "")))
+        self.enterprise_activity_filter.setText(str(self.settings.value("enterprise_activity_filter", "")))
+        self.enterprise_selected_case_id = self._safe_int(self.settings.value("enterprise_selected_case_id", ""))
+        current_tab = self._safe_int(self.settings.value("current_tab_index", 0))
+        if current_tab is not None and 0 <= current_tab < self.tabs.count():
+            self.tabs.setCurrentIndex(current_tab)
 
     def _save_settings(self) -> None:
         self.settings.setValue("custom_toolbar_buttons", json.dumps(self.custom_toolbar_buttons))
@@ -1516,10 +1771,32 @@ class ShadowLabDesktop(QMainWindow):
         self.settings.setValue("block_gateway", self.block_gateway.text())
         self.settings.setValue("approval_id", self.approval_id.text().strip())
         self.settings.setValue("advanced_visible", self.advanced_card.isVisible())
+        self.settings.setValue("current_tab_index", self.tabs.currentIndex())
+        self.settings.setValue("enterprise_auto_refresh", self.enterprise_auto_refresh.isChecked())
+        self.settings.setValue("enterprise_case_filter", self.enterprise_case_filter.text())
+        self.settings.setValue("enterprise_task_filter", self.enterprise_task_filter.text())
+        self.settings.setValue("enterprise_activity_filter", self.enterprise_activity_filter.text())
+        self.settings.setValue("enterprise_selected_case_id", "" if self.enterprise_selected_case_id is None else self.enterprise_selected_case_id)
 
     def closeEvent(self, event) -> None:
         self._save_settings()
         super().closeEvent(event)
+
+    def _safe_int(self, value) -> int | None:
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            return int(text)
+        except Exception:
+            return None
+
+    def _persist_enterprise_ui_state(self) -> None:
+        self.settings.setValue("enterprise_auto_refresh", self.enterprise_auto_refresh.isChecked())
+        self.settings.setValue("enterprise_case_filter", self.enterprise_case_filter.text())
+        self.settings.setValue("enterprise_task_filter", self.enterprise_task_filter.text())
+        self.settings.setValue("enterprise_activity_filter", self.enterprise_activity_filter.text())
+        self.settings.setValue("enterprise_selected_case_id", "" if self.enterprise_selected_case_id is None else self.enterprise_selected_case_id)
 
     def toggle_advanced_settings(self) -> None:
         visible = not self.advanced_card.isVisible()
@@ -1565,7 +1842,9 @@ class ShadowLabDesktop(QMainWindow):
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(30)
         table.horizontalHeader().setStretchLastSection(True)
+        table.setShowGrid(False)
 
     def _severity_color(self, severity: str) -> QColor:
         sev = (severity or "").lower()
@@ -1590,7 +1869,13 @@ class ShadowLabDesktop(QMainWindow):
                 return
             context_response = self._get("/auth/context", timeout=5, raise_for_status=False)
             if context_response.status_code == 200:
-                self._apply_auth_context(context_response.json())
+                payload = context_response.json()
+                if not bool(payload.get("auth_required", False)):
+                    self.auth_active = False
+                    self._apply_auth_context(self._viewer_mode_payload())
+                    self.statusBar().showMessage("Backend auth is disabled. Enable SHADOWLAB_REQUIRE_AUTH for real role-based API key mode.")
+                    return
+                self._apply_auth_context(payload)
                 role = str(self.auth_context.get("role", "unknown"))
                 self.statusBar().showMessage(f"Connected to backend. {role} mode active.")
                 self.refresh_overview()
@@ -2465,25 +2750,26 @@ class ShadowLabDesktop(QMainWindow):
         self._show_json(self.scenario_out, result)
 
     def refresh_enterprise_workspace(self) -> None:
+        preferred_case_id = self.enterprise_selected_case_id or self._safe_int(self.settings.value("enterprise_selected_case_id", ""))
+        self.enterprise_live_status.setText("Live sync loading enterprise workspace...")
         try:
-            triage = self._get("/enterprise/triage", timeout=30).json()
-            assets = self._get("/enterprise/assets", timeout=30).json()
-            cases = self._get("/enterprise/cases", timeout=30).json()
-            detections = self._get("/enterprise/detections/lifecycle", timeout=30).json()
+            triage = self._get("/enterprise/triage", timeout=10).json()
+            assets = self._get("/enterprise/assets", timeout=10).json()
+            cases = self._get("/enterprise/cases", timeout=10).json()
+            detections = self._get("/enterprise/detections/lifecycle", timeout=10).json()
         except Exception as exc:
             self._show_error(self.enterprise_detail, "Enterprise workspace failed", exc)
+            self.enterprise_live_status.setText("Live sync failed")
             return
         attention = "".join(f"<li>{html.escape(str(item))}</li>" for item in triage.get("what_needs_attention_now", []))
         self.enterprise_summary.setHtml(
-            f"<h3>Triage First</h3><ul>{attention}</ul>"
+            f"<h3>Triage First</h3><ul>{attention or '<li>No immediate triage items.</li>'}</ul>"
             f"<p><b>Open cases:</b> {len(cases)}<br><b>Top auth anomalies:</b> {len(triage.get('auth_anomalies', []))}</p>"
         )
-        self.enterprise_cases_table.setRowCount(len(cases))
-        for r, item in enumerate(cases):
-            values = [item.get("id", ""), item.get("title", ""), item.get("priority", ""), item.get("stage", ""), item.get("owner", ""), item.get("status", "")]
-            for c, value in enumerate(values):
-                self.enterprise_cases_table.setItem(r, c, QTableWidgetItem(str(value)))
-            self._paint_row(self.enterprise_cases_table, r, self._severity_color(item.get("priority", "")))
+        self._set_metric_label(self.enterprise_open_cases_value, str(len(cases)))
+        self._set_metric_label(self.enterprise_high_risk_value, str(len([item for item in assets.get('top_assets', []) if float(item.get('criticality_score', 0) or 0) >= 85])))
+        self.enterprise_cases_data = cases
+        self._populate_enterprise_cases_table(cases)
         top_assets = assets.get("top_assets", [])
         self.enterprise_assets_table.setRowCount(len(top_assets))
         for r, item in enumerate(top_assets):
@@ -2504,20 +2790,27 @@ class ShadowLabDesktop(QMainWindow):
             "attack_chain": ["prioritize", "investigate", "approve", "contain"],
         }
         try:
-            story = self._get("/incidents", timeout=20).json()[0]
+            story = self._get("/incidents", timeout=8).json()[0]
         except Exception:
             pass
-        try:
-            narrative = self._post("/enterprise/purple/replay", json={"artifact_path": self.enterprise_replay_path.text().strip()}, timeout=30).json()
-        except Exception:
-            narrative = {}
         self.enterprise_narrative.setHtml(
             "<h3>Progressive Disclosure</h3>"
-            "<p><b>Summary:</b> prioritize high-criticality assets and pending approvals.</p>"
-            f"<p><b>Evidence:</b> replay insight status: {html.escape(str(narrative.get('status', 'ready')))}</p>"
-            f"<p><b>Raw detail:</b> use tables on the left and JSON panel below for operational depth.</p>"
+            f"<p><b>Summary:</b> {html.escape(str(story.get('title', 'Prioritize high-criticality assets and pending approvals.')))}</p>"
+            f"<p><b>Severity:</b> {html.escape(str(story.get('severity', 'medium')))}"
+            f"<br><b>Attack chain:</b> {html.escape(', '.join(story.get('attack_chain', [])) if isinstance(story.get('attack_chain', []), list) else str(story.get('attack_chain', 'ready')))}</p>"
+            "<p><b>Raw detail:</b> use the left-side tables, case board, and notification inbox for operational depth. Run <b>Replay Artifact</b> only when you explicitly want replay analysis.</p>"
         )
-        self._show_json(self.enterprise_detail, {"triage": triage, "assets": assets, "detections": detections, "replay": narrative})
+        self._show_json(self.enterprise_detail, {"triage": triage, "assets": assets, "detections": detections, "story": story})
+        if cases:
+            selected_row = next((idx for idx, item in enumerate(cases) if int(item.get("id", 0) or 0) == preferred_case_id), 0)
+            self.enterprise_cases_table.selectRow(selected_row)
+            self.load_selected_case_board()
+            self.enterprise_loaded_once = True
+            self.enterprise_live_status.setText(f"Live sync updated {time.strftime('%H:%M:%S')}")
+        else:
+            self._clear_enterprise_case_views()
+            self.enterprise_warning_banner.setText("No enterprise cases yet. Create a case to start the investigation workflow.")
+            self.enterprise_live_status.setText("Live sync idle - no active cases")
 
     def create_enterprise_case(self) -> None:
         payload = {
@@ -2534,6 +2827,624 @@ class ShadowLabDesktop(QMainWindow):
             return
         self._show_json(self.enterprise_detail, result)
         self.refresh_enterprise_workspace()
+
+    def _selected_enterprise_case_id(self) -> int | None:
+        row = self.enterprise_cases_table.currentRow()
+        if row < 0:
+            return None
+        item = self.enterprise_cases_table.item(row, 0)
+        if item is None:
+            return None
+        try:
+            return int(item.text())
+        except Exception:
+            return None
+
+    def _on_enterprise_case_selection_changed(self) -> None:
+        self.enterprise_selected_case_id = self._selected_enterprise_case_id()
+        self._persist_enterprise_ui_state()
+        self.load_selected_case_board()
+
+    def _selected_enterprise_task_id(self) -> int | None:
+        case_id = self._selected_enterprise_case_id()
+        row = self.enterprise_tasks_table.currentRow()
+        if case_id is None or row < 0:
+            return None
+        tasks = getattr(self, "enterprise_filtered_tasks_data", getattr(self, "enterprise_tasks_data", []))
+        if row >= len(tasks):
+            return None
+        try:
+            return int(tasks[row].get("id", 0) or 0)
+        except Exception:
+            return None
+
+    def load_selected_case_board(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self._clear_enterprise_case_views()
+            return
+        self.enterprise_live_status.setText(f"Loading case {case_id}...")
+        try:
+            board = self._get(f"/enterprise/cases/{case_id}/board", timeout=20).json()
+            assignments = self._get(f"/enterprise/cases/{case_id}/assignments", timeout=20).json()
+            tasks = self._get(f"/enterprise/cases/{case_id}/tasks", timeout=20).json()
+            activity = self._get(f"/enterprise/cases/{case_id}/activity", timeout=20).json()
+            notes = self._get("/enterprise/investigations/notes", params={"case_id": case_id}, timeout=20).json()
+            stories = self._get("/enterprise/investigations/stories", params={"case_id": case_id}, timeout=20).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Case board load failed", exc)
+            self.enterprise_live_status.setText("Live sync failed")
+            return
+        self.enterprise_case_board_data = board
+        self.enterprise_assignments_data = assignments
+        self.enterprise_tasks_data = tasks
+        self.enterprise_activity_data = activity
+        self.enterprise_notes_data = notes
+        self.enterprise_stories_data = stories
+        queue = board.get("queue", {}) if isinstance(board, dict) else {}
+        kpis = board.get("kpis", {}) if isinstance(board, dict) else {}
+        self.enterprise_timeline_data = board.get("timeline", []) if isinstance(board.get("timeline", []), list) else []
+        entity_links = board.get("entity_links", {}) if isinstance(board.get("entity_links", {}), dict) else {}
+        self.enterprise_entity_links_data = entity_links.get("items", []) if isinstance(entity_links.get("items", []), list) else []
+        self.enterprise_notifications_data = self._build_enterprise_notifications(case_id, queue, kpis, tasks, activity)
+        next_steps = "".join(f"<li>{html.escape(str(step))}</li>" for step in board.get("recommended_next_steps", []))
+        self.enterprise_case_board.setHtml(
+            "<h3>Case Board</h3>"
+            f"<p><b>Open tasks:</b> {queue.get('open_tasks', 0)}"
+            f"<br><b>Overdue tasks:</b> {queue.get('overdue_tasks', 0)}"
+            f"<br><b>Pins:</b> {queue.get('pinned', 0)}"
+            f"<br><b>Stories:</b> {queue.get('stories', 0)}</p>"
+            f"<p><b>KPI summary:</b> {html.escape(json.dumps(kpis))}"
+            f"<br><b>Linked entities:</b> {len(self.enterprise_entity_links_data)}</p>"
+            f"<h4>Next Steps</h4><ul>{next_steps or '<li>No recommended next steps.</li>'}</ul>"
+        )
+        self._set_metric_label(self.enterprise_overdue_value, str(queue.get("overdue_tasks", 0)))
+        self._set_metric_label(self.enterprise_assignments_value, str(queue.get("assignments", 0)))
+        self._apply_enterprise_filters()
+        warnings: list[str] = []
+        if int(queue.get("overdue_tasks", 0) or 0) > 0:
+            warnings.append(f"{queue.get('overdue_tasks', 0)} overdue tasks")
+        if int(queue.get("open_tasks", 0) or 0) > 6:
+            warnings.append(f"{queue.get('open_tasks', 0)} open tasks")
+        if int(kpis.get("high_or_critical_events", 0) or 0) > 0:
+            warnings.append(f"{kpis.get('high_or_critical_events', 0)} high-risk events")
+        warning_text = " | ".join(warnings) if warnings else "No urgent warnings for the selected case."
+        if self.enterprise_notifications_data:
+            warning_text = f"{warning_text} | Inbox: {len(self.enterprise_notifications_data)} items"
+        self.enterprise_warning_banner.setText(warning_text)
+        self.load_enterprise_case_graph(board=board)
+        self._refresh_enterprise_kpi_chart(queue, kpis, len(notes), len(stories))
+        self._refresh_enterprise_timeline_table()
+        self._refresh_enterprise_entity_links_table()
+        self.enterprise_live_status.setText(f"Live sync updated {time.strftime('%H:%M:%S')}")
+        self._show_json(self.enterprise_detail, {"board": board, "assignments": assignments, "tasks": tasks, "activity": activity, "notes": notes, "stories": stories, "notifications": self.enterprise_notifications_data})
+
+    def _clear_enterprise_case_views(self) -> None:
+        self.enterprise_case_board.setHtml(
+            "<h3>Case Board</h3><p>No case selected yet. Pick a case on the left or create a new one.</p>"
+        )
+        self.enterprise_graph_summary.setHtml(
+            "<h3>Case Correlation View</h3><p>No active case context yet.</p>"
+        )
+        self.enterprise_narrative.setHtml(
+            "<h3>Progressive Disclosure</h3><p>No case narrative yet. Once a case is selected, the analyst story will appear here.</p>"
+        )
+        self.enterprise_detail.setPlainText("No case selected.")
+        self.enterprise_timeline_data = []
+        self.enterprise_entity_links_data = []
+        self.enterprise_notifications_data = []
+        self.enterprise_assignments_data = []
+        self.enterprise_tasks_data = []
+        self.enterprise_activity_data = []
+        self.enterprise_notes_data = []
+        self.enterprise_stories_data = []
+        self.enterprise_graph_focus.setRowCount(0)
+        self.enterprise_assignments_table.setRowCount(0)
+        self.enterprise_tasks_table.setRowCount(0)
+        self.enterprise_activity_table.setRowCount(0)
+        self.enterprise_notes_table.setRowCount(0)
+        self.enterprise_stories_table.setRowCount(0)
+        self.enterprise_notifications_table.setRowCount(0)
+        self.enterprise_case_timeline.setRowCount(0)
+        self.enterprise_entity_links.setRowCount(0)
+
+    def _refresh_enterprise_kpi_chart(self, queue: dict, kpis: dict, note_count: int, story_count: int) -> None:
+        load_set = QBarSet("Load")
+        load_set.setColor(QColor("#8ec5ff"))
+        load_values = [
+            float(queue.get("open_tasks", 0) or 0),
+            float(queue.get("overdue_tasks", 0) or 0),
+            float(note_count or 0),
+            float(story_count or 0),
+            float(kpis.get("high_or_critical_events", 0) or 0),
+        ]
+        for value in load_values:
+            load_set.append(value)
+        trend_series = QLineSeries()
+        trend_series.setColor(QColor("#ffd166"))
+        for idx, value in enumerate(load_values):
+            trend_series.append(idx, value)
+        bar_series = QBarSeries()
+        bar_series.append(load_set)
+        chart = QChart()
+        chart.setBackgroundVisible(False)
+        chart.legend().setLabelColor(QColor("#96a5b8"))
+        chart.addSeries(bar_series)
+        chart.addSeries(trend_series)
+        axis_x = QBarCategoryAxis()
+        axis_x.append(["Open", "Overdue", "Notes", "Stories", "HighRisk"])
+        axis_y = QValueAxis()
+        axis_y.setRange(0, max(5, max(load_values) + 1 if load_values else 5))
+        axis_y.setTickCount(6)
+        axis_y.setGridLineColor(QColor("#243446"))
+        axis_y.setLabelsColor(QColor("#96a5b8"))
+        chart.addAxis(axis_x, Qt.AlignBottom)
+        chart.addAxis(axis_y, Qt.AlignLeft)
+        bar_series.attachAxis(axis_x)
+        bar_series.attachAxis(axis_y)
+        trend_series.attachAxis(axis_x)
+        trend_series.attachAxis(axis_y)
+        chart.setTitle("Case Load and Evidence Snapshot")
+        chart.setTitleBrush(QBrush(QColor("#eef4fb")))
+        self.enterprise_kpi_chart.setChart(chart)
+
+    def _show_enterprise_cached_item(self, cache_name: str, table: QTableWidget) -> None:
+        row = table.currentRow()
+        if row < 0:
+            return
+        items = getattr(self, cache_name, [])
+        if row >= len(items):
+            return
+        self._show_json(self.enterprise_detail, items[row])
+
+    def show_selected_enterprise_assignment(self) -> None:
+        self._show_enterprise_cached_item("enterprise_assignments_data", self.enterprise_assignments_table)
+
+    def show_selected_enterprise_task(self) -> None:
+        self._show_enterprise_cached_item("enterprise_tasks_data", self.enterprise_tasks_table)
+
+    def show_selected_enterprise_activity(self) -> None:
+        self._show_enterprise_cached_item("enterprise_activity_data", self.enterprise_activity_table)
+
+    def show_selected_enterprise_notification(self) -> None:
+        self._show_enterprise_cached_item("enterprise_notifications_data", self.enterprise_notifications_table)
+
+    def show_selected_enterprise_timeline(self) -> None:
+        self._show_enterprise_cached_item("enterprise_timeline_data", self.enterprise_case_timeline)
+
+    def show_selected_enterprise_link(self) -> None:
+        self._show_enterprise_cached_item("enterprise_entity_links_data", self.enterprise_entity_links)
+
+    def show_selected_enterprise_note(self) -> None:
+        self._show_enterprise_cached_item("enterprise_notes_data", self.enterprise_notes_table)
+
+    def show_selected_enterprise_story(self) -> None:
+        self._show_enterprise_cached_item("enterprise_stories_data", self.enterprise_stories_table)
+
+    def _populate_enterprise_cases_table(self, cases: list[dict]) -> None:
+        self.enterprise_cases_table.blockSignals(True)
+        self.enterprise_cases_table.setRowCount(len(cases))
+        for r, item in enumerate(cases):
+            values = [item.get("id", ""), item.get("title", ""), item.get("priority", ""), item.get("stage", ""), item.get("owner", ""), item.get("status", "")]
+            for c, value in enumerate(values):
+                self.enterprise_cases_table.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.enterprise_cases_table, r, self._severity_color(item.get("priority", "")))
+        self.enterprise_cases_table.blockSignals(False)
+
+    def _apply_enterprise_filters(self) -> None:
+        self._enterprise_table_updating = True
+        case_filter = self.enterprise_case_filter.text().strip().lower() if hasattr(self, "enterprise_case_filter") else ""
+        task_filter = self.enterprise_task_filter.text().strip().lower() if hasattr(self, "enterprise_task_filter") else ""
+        activity_filter = self.enterprise_activity_filter.text().strip().lower() if hasattr(self, "enterprise_activity_filter") else ""
+
+        filtered_cases = [
+            item for item in getattr(self, "enterprise_cases_data", [])
+            if not case_filter or case_filter in json.dumps(item).lower()
+        ]
+        self._populate_enterprise_cases_table(filtered_cases)
+        self.enterprise_filtered_cases_data = filtered_cases
+
+        assignments = getattr(self, "enterprise_assignments_data", [])
+        self.enterprise_assignments_table.setRowCount(len(assignments))
+        for r, item in enumerate(assignments):
+            values = [item.get("analyst", ""), item.get("role", ""), item.get("status", ""), item.get("assigned_by", "")]
+            for c, value in enumerate(values):
+                self.enterprise_assignments_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+        notes = [
+            item for item in getattr(self, "enterprise_notes_data", [])
+            if not activity_filter or activity_filter in json.dumps(item).lower()
+        ]
+        self.enterprise_notes_table.setRowCount(len(notes))
+        for r, item in enumerate(notes):
+            values = [item.get("author", ""), item.get("item_type", ""), item.get("note_text", "")]
+            for c, value in enumerate(values):
+                self.enterprise_notes_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+        stories = [
+            item for item in getattr(self, "enterprise_stories_data", [])
+            if not activity_filter or activity_filter in json.dumps(item).lower()
+        ]
+        self.enterprise_stories_table.setRowCount(len(stories))
+        for r, item in enumerate(stories):
+            values = [item.get("title", ""), item.get("confidence", ""), item.get("created_by", "")]
+            for c, value in enumerate(values):
+                self.enterprise_stories_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+        tasks = [
+            item for item in getattr(self, "enterprise_tasks_data", [])
+            if not task_filter or task_filter in json.dumps(item).lower()
+        ]
+        self.enterprise_filtered_tasks_data = tasks
+        self.enterprise_tasks_table.blockSignals(True)
+        self.enterprise_tasks_table.setRowCount(len(tasks))
+        for r, item in enumerate(tasks):
+            values = [item.get("title", ""), item.get("status", ""), item.get("priority", ""), item.get("assigned_to", "")]
+            for c, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setData(Qt.UserRole, int(item.get("id", 0) or 0))
+                if c == 0:
+                    cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                self.enterprise_tasks_table.setItem(r, c, cell)
+            due_at = float(item.get("due_at", 0) or 0)
+            is_overdue = due_at > 0 and due_at < time.time() and str(item.get("status", "")).lower() not in {"done", "closed"}
+            sev = "high" if is_overdue else item.get("priority", "")
+            self._paint_row(self.enterprise_tasks_table, r, self._severity_color(str(sev)))
+        self.enterprise_tasks_table.blockSignals(False)
+
+        activity = [
+            item for item in getattr(self, "enterprise_activity_data", [])
+            if not activity_filter or activity_filter in json.dumps(item).lower()
+        ]
+        self.enterprise_activity_table.setRowCount(len(activity))
+        for r, item in enumerate(activity):
+            values = [item.get("created_at", ""), item.get("event_type", ""), item.get("actor", ""), item.get("summary", "")]
+            for c, value in enumerate(values):
+                self.enterprise_activity_table.setItem(r, c, QTableWidgetItem(str(value)))
+        notifications = [
+            item for item in getattr(self, "enterprise_notifications_data", [])
+            if not activity_filter or activity_filter in json.dumps(item).lower()
+        ]
+        self.enterprise_notifications_table.setRowCount(len(notifications))
+        for r, item in enumerate(notifications):
+            values = [item.get("created_at", ""), item.get("severity", ""), item.get("category", ""), item.get("message", "")]
+            for c, value in enumerate(values):
+                self.enterprise_notifications_table.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.enterprise_notifications_table, r, self._severity_color(str(item.get("severity", "low"))))
+        self._enterprise_table_updating = False
+        self._persist_enterprise_ui_state()
+
+    def _refresh_enterprise_timeline_table(self) -> None:
+        timeline = getattr(self, "enterprise_timeline_data", [])
+        self.enterprise_case_timeline.setRowCount(len(timeline))
+        for r, item in enumerate(timeline):
+            values = [item.get("time", ""), item.get("kind", ""), item.get("severity", ""), item.get("title", "")]
+            for c, value in enumerate(values):
+                self.enterprise_case_timeline.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.enterprise_case_timeline, r, self._severity_color(str(item.get("severity", "low"))))
+
+    def _refresh_enterprise_entity_links_table(self) -> None:
+        links = getattr(self, "enterprise_entity_links_data", [])
+        self.enterprise_entity_links.setRowCount(len(links))
+        for r, item in enumerate(links):
+            values = [item.get("entity", ""), item.get("kind", ""), item.get("evidence_count", ""), ", ".join(item.get("examples", [])[:2])]
+            for c, value in enumerate(values):
+                self.enterprise_entity_links.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def _build_enterprise_notifications(self, case_id: int, queue: dict, kpis: dict, tasks: list[dict], activity: list[dict]) -> list[dict]:
+        notifications: list[dict] = []
+        now = time.time()
+        if int(queue.get("overdue_tasks", 0) or 0) > 0:
+            notifications.append(
+                {
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+                    "severity": "high",
+                    "category": "task",
+                    "message": f"{queue.get('overdue_tasks', 0)} overdue tasks require action.",
+                    "case_id": case_id,
+                }
+            )
+        if int(kpis.get("high_or_critical_events", 0) or 0) > 0:
+            notifications.append(
+                {
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+                    "severity": "high",
+                    "category": "risk",
+                    "message": f"{kpis.get('high_or_critical_events', 0)} high-risk events are tied to this case.",
+                    "case_id": case_id,
+                }
+            )
+        for task in tasks[:8]:
+            due_at = float(task.get("due_at", 0) or 0)
+            status = str(task.get("status", "")).lower()
+            if due_at > 0 and due_at < now and status not in {"done", "closed", "resolved"}:
+                notifications.append(
+                    {
+                        "created_at": task.get("updated_at", "") or task.get("created_at", ""),
+                        "severity": "medium",
+                        "category": "task",
+                        "message": f"Task overdue: {task.get('title', 'task')}",
+                        "task_id": task.get("id", ""),
+                        "case_id": case_id,
+                    }
+                )
+        for item in activity[:12]:
+            event_type = str(item.get("event_type", "")).lower()
+            severity = "low"
+            if "approval" in event_type:
+                severity = "medium"
+            if event_type in {"task_updated", "task_created"}:
+                severity = "medium"
+            if event_type in {"case_created"}:
+                severity = "low"
+            notifications.append(
+                {
+                    "created_at": item.get("created_at", ""),
+                    "severity": severity,
+                    "category": event_type or "activity",
+                    "message": str(item.get("summary", "") or event_type),
+                    "actor": item.get("actor", ""),
+                    "case_id": case_id,
+                }
+            )
+        notifications.sort(key=lambda entry: str(entry.get("created_at", "")), reverse=True)
+        return notifications[:20]
+
+    def _inline_update_enterprise_task(self, item: QTableWidgetItem) -> None:
+        if self._enterprise_table_updating or item is None:
+            return
+        row = item.row()
+        column = item.column()
+        if row < 0 or column not in {1, 2, 3}:
+            return
+        case_id = self._selected_enterprise_case_id()
+        task_id = self._safe_int(item.data(Qt.UserRole))
+        tasks = getattr(self, "enterprise_filtered_tasks_data", getattr(self, "enterprise_tasks_data", []))
+        if case_id is None or task_id is None or row >= len(tasks):
+            return
+        original = tasks[row]
+        payload: dict[str, object] = {}
+        value = item.text().strip()
+        if column == 1 and value and value != str(original.get("status", "")):
+            payload["status"] = value
+        elif column == 2 and value and value != str(original.get("priority", "")):
+            payload["priority"] = value
+        elif column == 3 and value != str(original.get("assigned_to", "")):
+            payload["assigned_to"] = value
+        if not payload:
+            return
+        try:
+            result = self._patch(f"/enterprise/cases/{case_id}/tasks/{task_id}", json=payload, timeout=20).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Inline task update failed", exc)
+            self._enterprise_table_updating = True
+            self.enterprise_tasks_table.blockSignals(True)
+            self.enterprise_tasks_table.item(row, column).setText(str(original.get({1: 'status', 2: 'priority', 3: 'assigned_to'}[column], "")))
+            self.enterprise_tasks_table.blockSignals(False)
+            self._enterprise_table_updating = False
+            return
+        self.statusBar().showMessage(f"Task {task_id} updated inline.")
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def load_enterprise_case_graph(self, checked: bool = False, board: dict | None = None) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            return
+        board_data = board or getattr(self, "enterprise_case_board_data", {})
+        try:
+            graph = self._get(f"/enterprise/cases/{case_id}/graph", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Graph correlation load failed", exc)
+            return
+        summary = graph.get("summary", {}) if isinstance(graph, dict) else {}
+        findings = graph.get("priority_findings", []) if isinstance(graph.get("priority_findings", []), list) else []
+        case_scope = graph.get("case_context", {}) if isinstance(graph.get("case_context", {}), dict) else {}
+        top_processes = summary.get("top_processes", []) if isinstance(summary.get("top_processes", []), list) else []
+        focus_items = board_data.get("focus_items", []) if isinstance(board_data, dict) else []
+        focus_titles = [str(item.get("title", "")).lower() for item in focus_items if isinstance(item, dict)]
+        matched_processes = [
+            proc for proc in top_processes
+            if any(token and token in str(proc.get("name", "")).lower() for token in focus_titles)
+        ]
+        display_processes = matched_processes or top_processes[:8]
+        exposure = summary.get("remote_exposure", {}) if isinstance(summary.get("remote_exposure", {}), dict) else {}
+        self.enterprise_graph_summary.setHtml(
+            "<h3>Case Correlation View</h3>"
+            f"<p><b>Case ID:</b> {case_id}"
+            f"<br><b>Overall Graph Risk:</b> {html.escape(str(summary.get('overall_risk', 0)))}"
+            f"<br><b>Exposure:</b> {html.escape(json.dumps(exposure))}"
+            f"<br><b>Matched Focus Processes:</b> {len(matched_processes)}"
+            f"<br><b>Focus PID Count:</b> {html.escape(str(case_scope.get('focus_pid_count', 0)))}"
+            f"<br><b>Scoped Notes / Pins:</b> {html.escape(str(case_scope.get('notes', 0)))} / {html.escape(str(case_scope.get('pins', 0)))}</p>"
+            f"<p><b>Priority Findings:</b></p><ul>{''.join(f'<li>{html.escape(str(item))}</li>' for item in findings[:5]) or '<li>No graph findings.</li>'}</ul>"
+        )
+        self.enterprise_graph_focus.setRowCount(len(display_processes))
+        for r, item in enumerate(display_processes):
+            values = [item.get("name", ""), item.get("pid", ""), item.get("risk_score", ""), item.get("signature_status", "")]
+            for c, value in enumerate(values):
+                self.enterprise_graph_focus.setItem(r, c, QTableWidgetItem(str(value)))
+            risk_value = float(item.get("risk_score", 0) or 0)
+            self._paint_row(self.enterprise_graph_focus, r, self._severity_color("high" if risk_value >= 75 else "medium" if risk_value >= 45 else "low"))
+
+    def assign_enterprise_case(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        analyst, ok = QInputDialog.getText(self, "Assign Analyst", "Analyst:")
+        if not ok or not analyst.strip():
+            return
+        try:
+            result = self._post(
+                f"/enterprise/cases/{case_id}/assignments",
+                json={"analyst": analyst.strip(), "role": "owner", "assigned_by": self.enterprise_case_owner.text().strip() or "desktop"},
+                timeout=20,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Assign analyst failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def create_enterprise_task(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        title, ok = QInputDialog.getText(self, "Create Task", "Task title:")
+        if not ok or not title.strip():
+            return
+        try:
+            result = self._post(
+                f"/enterprise/cases/{case_id}/tasks",
+                json={"title": title.strip(), "assigned_to": self.enterprise_case_owner.text().strip(), "created_by": "desktop"},
+                timeout=20,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Create task failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def update_enterprise_task_status(self, forced_status: str | None = None) -> None:
+        case_id = self._selected_enterprise_case_id()
+        task_id = self._selected_enterprise_task_id()
+        if case_id is None or task_id is None:
+            self.statusBar().showMessage("Select a case and a task first")
+            return
+        status = forced_status
+        if not status:
+            status, ok = QInputDialog.getItem(self, "Update Task Status", "Status:", ["todo", "in_progress", "blocked", "done"], 1, False)
+            if not ok or not status:
+                return
+        try:
+            result = self._patch(
+                f"/enterprise/cases/{case_id}/tasks/{task_id}",
+                json={"status": status},
+                timeout=20,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Task update failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def add_enterprise_note(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        note_text, ok = QInputDialog.getMultiLineText(self, "Add Note", "Analyst note:")
+        if not ok or not note_text.strip():
+            return
+        try:
+            result = self._post(
+                "/enterprise/investigations/notes",
+                json={
+                    "case_id": case_id,
+                    "note_text": note_text.strip(),
+                    "item_type": "case",
+                    "item_title": self.enterprise_case_title.text().strip() or "case note",
+                    "author": self.enterprise_case_owner.text().strip() or "desktop",
+                },
+                timeout=20,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Add note failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def add_enterprise_story(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        title, ok = QInputDialog.getText(self, "Add Story", "Story title:")
+        if not ok or not title.strip():
+            return
+        hypothesis, ok = QInputDialog.getMultiLineText(self, "Add Story", "Hypothesis:")
+        if not ok:
+            return
+        try:
+            result = self._post(
+                "/enterprise/investigations/stories",
+                json={
+                    "case_id": case_id,
+                    "title": title.strip(),
+                    "hypothesis": hypothesis.strip(),
+                    "summary": "Created from desktop enterprise workflow.",
+                    "confidence": "medium",
+                    "created_by": self.enterprise_case_owner.text().strip() or "desktop",
+                },
+                timeout=20,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Add story failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def pin_enterprise_event(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        title = ""
+        item_type = "case"
+        severity = "medium"
+        timeline_row = self.timeline_table.currentRow() if hasattr(self, "timeline_table") else -1
+        timeline_items = getattr(self, "timeline_items", [])
+        if timeline_row >= 0 and timeline_row < len(timeline_items):
+            item = timeline_items[timeline_row]
+            title = str(item.get("title", "") or "")
+            item_type = str(item.get("type", "timeline") or "timeline")
+            severity = str(item.get("severity", "medium") or "medium")
+            item_time = float(item.get("time", 0) or 0)
+            payload = item
+        else:
+            title = self.enterprise_case_title.text().strip() or "Pinned case event"
+            item_time = time.time()
+            payload = {"source": "desktop"}
+        rationale, ok = QInputDialog.getText(self, "Pin Event", "Rationale:")
+        if not ok or not rationale.strip():
+            return
+        try:
+            result = self._post(
+                "/enterprise/investigations/pins",
+                json={
+                    "case_id": case_id,
+                    "item_time": item_time,
+                    "item_type": item_type,
+                    "item_title": title,
+                    "item_severity": severity,
+                    "item_payload": payload,
+                    "rationale": rationale.strip(),
+                    "pinned_by": self.enterprise_case_owner.text().strip() or "desktop",
+                },
+                timeout=20,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Pin event failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.load_selected_case_board()
+
+    def export_selected_case_report(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        try:
+            result = self._post(f"/enterprise/cases/{case_id}/investigation-report/export", timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Case report export failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        pdf_path = str(result.get("pdf_path", "") or "")
+        if pdf_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(pdf_path))
 
     def request_enterprise_approval(self) -> None:
         row = self.enterprise_cases_table.currentRow()

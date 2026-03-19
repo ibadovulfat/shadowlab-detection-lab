@@ -1,71 +1,86 @@
-# ShadowLab Top 10 Roadmap
+# ShadowLab Roadmap
 
-This is the highest-value next-step backlog for turning ShadowLab into a stronger defensive security product.
+This roadmap is updated for the current product state. A large part of the original core build is already in place, so the next wave is more about depth, resilience, and operator polish than basic capability coverage.
 
-## 1. Fleet & Agent Mode
+## Completed Foundation
 
-- Add a lightweight endpoint agent
-- Support multiple hosts in one console
-- Show host inventory, health, and incident count per endpoint
+These are already present in the project:
 
-## 2. Incident Lifecycle
+- FastAPI backend with RBAC and feature gating
+- PySide6 desktop client
+- process investigation and auto triage
+- persistence review and remediation workflow
+- graph, timeline, host, artifact, and history surfaces
+- deception, evidence, and quarantine workflows
+- enterprise case workflow with assignments, tasks, notes, stories, pins, timeline, notifications, and report export
+- security-ops workspace with integrity, observability, readiness, secrets, and reporting
 
-- Add full incident detail pages
-- Support owner, status, notes, tags, and closure workflow
-- Export incident reports with findings, evidence, and actions
+## Next 10 Priorities
 
-## 3. Detection Correlation
+## 1. Real-Time Event Delivery
 
-- Move from single events to multi-step behavior chains
-- Add ATT&CK mapping and confidence scoring
-- Deduplicate related alerts into one incident
+- move from timed refresh to event-driven updates where practical
+- reduce full workspace reloads
+- improve operator awareness during active investigations
 
-## 4. Persistence Remediation
+## 2. Stronger Entity Relationship Modeling
 
-- Disable suspicious scheduled tasks
-- Remove suspicious Run / RunOnce keys
-- Stop or disable malicious services
+- formalize links between case, incident, task, note, story, pin, host, process, IP, and hash
+- make linked-entity views more precise
+- improve case-scoped graph quality
 
-## 5. Real Timeline View
+## 3. Richer Executive Reporting
 
-- Build a visual process, network, persistence, and response timeline
-- Show investigation flow in chronological order
-- Link artifacts and evidence to the same timeline
+- improve PDF and HTML layout quality
+- add clearer management summary sections
+- tighten language for handoff and review use cases
 
-## 6. Memory Forensics Upgrade
+## 4. Advanced Search And Filter UX
 
-- Integrate real Volatility 3 execution
-- Parse plugin output into structured findings
-- Store dumps and analysis results in the evidence workflow
+- deepen enterprise filtering beyond simple text matches
+- add safer structured query options
+- improve fast drill-down on large case/task/activity datasets
 
-## 7. Quarantine Center
+## 5. Notification Routing
 
-- Track quarantined files and metadata
-- Restore or purge quarantined items
-- Add hash reputation and chain-of-custody notes
+- extend local notification center into alert routing and escalation paths
+- support richer connector-aware notifications
+- distinguish informational, warning, and urgent items more clearly
 
-## 8. Threat Intel Expansion
+## 6. State Persistence And Workspace Recall
 
-- Add domain and URL reputation
-- Cache verdicts locally
-- Enrich IPs with ASN, hosting, and context labels
+- remember more desktop context between sessions
+- preserve preferred layouts and filters
+- shorten resume time for repeat operators
 
-## 9. Operator Safety & Hardening
+## 7. Performance Hardening
 
-- Add guarded response flows for dangerous actions
-- Improve audit logging and tamper visibility
-- Introduce safer defaults for lab-only offensive workflows
+- reduce expensive UI refresh paths
+- optimize large table population and graph rendering
+- make enterprise-heavy workflows smoother on lower-end systems
 
-## 10. Release Engineering
+## 8. Database Maturity
 
-- Finalize EXE packaging
-- Add installer, icon, version metadata, and code signing path
-- Add diagnostics and startup self-checks
+- deepen PostgreSQL runtime validation
+- tighten migration tooling and data consistency checks
+- prepare for larger investigation datasets
+
+## 9. Packaging And Release Hardening
+
+- finalize cleaner EXE shipping path
+- improve packaging diagnostics and version metadata
+- document safer local installation and update flows
+
+## 10. Test Coverage Expansion
+
+- add more regression coverage around enterprise workflows
+- broaden auth and approval tests
+- add UI smoke coverage where practical
 
 ## Recommended Build Order
 
-1. Incident Lifecycle
-2. Persistence Remediation
-3. Real Timeline View
-4. Memory Forensics Upgrade
-5. Fleet & Agent Mode
+1. Real-Time Event Delivery
+2. Stronger Entity Relationship Modeling
+3. Performance Hardening
+4. Richer Executive Reporting
+5. Test Coverage Expansion

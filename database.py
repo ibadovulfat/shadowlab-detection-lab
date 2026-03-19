@@ -362,6 +362,120 @@ def create_table(conn):
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS investigation_views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                query_text TEXT DEFAULT '',
+                filters_json TEXT DEFAULT '{}',
+                case_id INTEGER DEFAULT NULL,
+                created_by TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                updated_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investigation_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER DEFAULT NULL,
+                view_id INTEGER DEFAULT NULL,
+                item_time REAL DEFAULT 0,
+                item_type TEXT DEFAULT '',
+                item_title TEXT DEFAULT '',
+                note_text TEXT NOT NULL,
+                tags_json TEXT DEFAULT '[]',
+                author TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investigation_stories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER DEFAULT NULL,
+                title TEXT NOT NULL,
+                hypothesis TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                confidence TEXT DEFAULT 'medium',
+                tags_json TEXT DEFAULT '[]',
+                created_by TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                updated_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investigation_pins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER DEFAULT NULL,
+                view_id INTEGER DEFAULT NULL,
+                item_time REAL DEFAULT 0,
+                item_type TEXT DEFAULT '',
+                item_title TEXT DEFAULT '',
+                item_severity TEXT DEFAULT '',
+                item_payload_json TEXT DEFAULT '{}',
+                rationale TEXT DEFAULT '',
+                pinned_by TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS case_assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL,
+                analyst TEXT NOT NULL,
+                role TEXT DEFAULT 'owner',
+                status TEXT DEFAULT 'active',
+                assigned_by TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS case_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT DEFAULT 'todo',
+                priority TEXT DEFAULT 'medium',
+                assigned_to TEXT DEFAULT '',
+                due_at REAL DEFAULT 0,
+                created_by TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                updated_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS case_activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                detail_json TEXT DEFAULT '{}',
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS evidence_chain_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 case_id INTEGER NOT NULL,
@@ -671,6 +785,99 @@ def _create_table_postgres(conn) -> None:
             status TEXT DEFAULT 'open',
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
             updated_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS investigation_views (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            query_text TEXT DEFAULT '',
+            filters_json TEXT DEFAULT '{}',
+            case_id BIGINT DEFAULT NULL,
+            created_by TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            updated_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS investigation_notes (
+            id BIGSERIAL PRIMARY KEY,
+            case_id BIGINT DEFAULT NULL,
+            view_id BIGINT DEFAULT NULL,
+            item_time DOUBLE PRECISION DEFAULT 0,
+            item_type TEXT DEFAULT '',
+            item_title TEXT DEFAULT '',
+            note_text TEXT NOT NULL,
+            tags_json TEXT DEFAULT '[]',
+            author TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS investigation_stories (
+            id BIGSERIAL PRIMARY KEY,
+            case_id BIGINT DEFAULT NULL,
+            title TEXT NOT NULL,
+            hypothesis TEXT DEFAULT '',
+            summary TEXT DEFAULT '',
+            confidence TEXT DEFAULT 'medium',
+            tags_json TEXT DEFAULT '[]',
+            created_by TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            updated_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS investigation_pins (
+            id BIGSERIAL PRIMARY KEY,
+            case_id BIGINT DEFAULT NULL,
+            view_id BIGINT DEFAULT NULL,
+            item_time DOUBLE PRECISION DEFAULT 0,
+            item_type TEXT DEFAULT '',
+            item_title TEXT DEFAULT '',
+            item_severity TEXT DEFAULT '',
+            item_payload_json TEXT DEFAULT '{}',
+            rationale TEXT DEFAULT '',
+            pinned_by TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS case_assignments (
+            id BIGSERIAL PRIMARY KEY,
+            case_id BIGINT NOT NULL,
+            analyst TEXT NOT NULL,
+            role TEXT DEFAULT 'owner',
+            status TEXT DEFAULT 'active',
+            assigned_by TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS case_tasks (
+            id BIGSERIAL PRIMARY KEY,
+            case_id BIGINT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT DEFAULT 'todo',
+            priority TEXT DEFAULT 'medium',
+            assigned_to TEXT DEFAULT '',
+            due_at DOUBLE PRECISION DEFAULT 0,
+            created_by TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            updated_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS case_activity_log (
+            id BIGSERIAL PRIMARY KEY,
+            case_id BIGINT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT DEFAULT '',
+            summary TEXT DEFAULT '',
+            detail_json TEXT DEFAULT '{}',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
         )
         """,
         """
@@ -1187,6 +1394,255 @@ def get_evidence_chain(conn, case_id: int) -> pd.DataFrame:
     return _read_sql_query(conn, "SELECT * FROM evidence_chain_log WHERE case_id = ? ORDER BY created_at ASC", (case_id,))
 
 
+def create_investigation_view(
+    conn,
+    *,
+    name: str,
+    description: str = "",
+    query_text: str = "",
+    filters_json: str = "{}",
+    case_id: int | None = None,
+    created_by: str = "",
+) -> int:
+    backend = getattr(conn, "backend", "sqlite")
+    now_sql = _epoch_now_sql(backend)
+    return _insert_returning_id(
+        conn,
+        f"""
+        INSERT INTO investigation_views (
+            name, description, query_text, filters_json, case_id, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, {now_sql}, {now_sql})
+        """,
+        (name, description, query_text, filters_json, case_id, created_by),
+    )
+
+
+def get_investigation_views(conn, case_id: int | None = None) -> pd.DataFrame:
+    if case_id is None:
+        return _read_sql_query(conn, "SELECT * FROM investigation_views ORDER BY updated_at DESC, created_at DESC")
+    return _read_sql_query(
+        conn,
+        "SELECT * FROM investigation_views WHERE case_id = ? ORDER BY updated_at DESC, created_at DESC",
+        (case_id,),
+    )
+
+
+def create_investigation_note(
+    conn,
+    *,
+    note_text: str,
+    case_id: int | None = None,
+    view_id: int | None = None,
+    item_time: float = 0,
+    item_type: str = "",
+    item_title: str = "",
+    tags_json: str = "[]",
+    author: str = "",
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO investigation_notes (
+            case_id, view_id, item_time, item_type, item_title, note_text, tags_json, author
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (case_id, view_id, item_time, item_type, item_title, note_text, tags_json, author),
+    )
+
+
+def get_investigation_notes(conn, case_id: int | None = None, view_id: int | None = None) -> pd.DataFrame:
+    sql = "SELECT * FROM investigation_notes"
+    clauses: list[str] = []
+    params: list[Any] = []
+    if case_id is not None:
+        clauses.append("case_id = ?")
+        params.append(case_id)
+    if view_id is not None:
+        clauses.append("view_id = ?")
+        params.append(view_id)
+    if clauses:
+        sql = f"{sql} WHERE {' AND '.join(clauses)}"
+    sql = f"{sql} ORDER BY created_at DESC"
+    return _read_sql_query(conn, sql, tuple(params) if params else None)
+
+
+def create_investigation_story(
+    conn,
+    *,
+    title: str,
+    hypothesis: str = "",
+    summary: str = "",
+    confidence: str = "medium",
+    tags_json: str = "[]",
+    case_id: int | None = None,
+    created_by: str = "",
+) -> int:
+    backend = getattr(conn, "backend", "sqlite")
+    now_sql = _epoch_now_sql(backend)
+    return _insert_returning_id(
+        conn,
+        f"""
+        INSERT INTO investigation_stories (
+            case_id, title, hypothesis, summary, confidence, tags_json, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, {now_sql}, {now_sql})
+        """,
+        (case_id, title, hypothesis, summary, confidence, tags_json, created_by),
+    )
+
+
+def get_investigation_stories(conn, case_id: int | None = None) -> pd.DataFrame:
+    if case_id is None:
+        return _read_sql_query(conn, "SELECT * FROM investigation_stories ORDER BY updated_at DESC, created_at DESC")
+    return _read_sql_query(
+        conn,
+        "SELECT * FROM investigation_stories WHERE case_id = ? ORDER BY updated_at DESC, created_at DESC",
+        (case_id,),
+    )
+
+
+def create_investigation_pin(
+    conn,
+    *,
+    case_id: int | None = None,
+    view_id: int | None = None,
+    item_time: float = 0,
+    item_type: str = "",
+    item_title: str = "",
+    item_severity: str = "",
+    item_payload_json: str = "{}",
+    rationale: str = "",
+    pinned_by: str = "",
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO investigation_pins (
+            case_id, view_id, item_time, item_type, item_title, item_severity, item_payload_json, rationale, pinned_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (case_id, view_id, item_time, item_type, item_title, item_severity, item_payload_json, rationale, pinned_by),
+    )
+
+
+def get_investigation_pins(conn, case_id: int | None = None, view_id: int | None = None) -> pd.DataFrame:
+    sql = "SELECT * FROM investigation_pins"
+    clauses: list[str] = []
+    params: list[Any] = []
+    if case_id is not None:
+        clauses.append("case_id = ?")
+        params.append(case_id)
+    if view_id is not None:
+        clauses.append("view_id = ?")
+        params.append(view_id)
+    if clauses:
+        sql = f"{sql} WHERE {' AND '.join(clauses)}"
+    sql = f"{sql} ORDER BY created_at DESC"
+    return _read_sql_query(conn, sql, tuple(params) if params else None)
+
+
+def create_case_assignment(
+    conn,
+    *,
+    case_id: int,
+    analyst: str,
+    role: str = "owner",
+    status: str = "active",
+    assigned_by: str = "",
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO case_assignments (case_id, analyst, role, status, assigned_by)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (case_id, analyst, role, status, assigned_by),
+    )
+
+
+def get_case_assignments(conn, case_id: int) -> pd.DataFrame:
+    return _read_sql_query(conn, "SELECT * FROM case_assignments WHERE case_id = ? ORDER BY created_at DESC", (case_id,))
+
+
+def create_case_task(
+    conn,
+    *,
+    case_id: int,
+    title: str,
+    description: str = "",
+    status: str = "todo",
+    priority: str = "medium",
+    assigned_to: str = "",
+    due_at: float = 0,
+    created_by: str = "",
+) -> int:
+    backend = getattr(conn, "backend", "sqlite")
+    now_sql = _epoch_now_sql(backend)
+    return _insert_returning_id(
+        conn,
+        f"""
+        INSERT INTO case_tasks (
+            case_id, title, description, status, priority, assigned_to, due_at, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, {now_sql}, {now_sql})
+        """,
+        (case_id, title, description, status, priority, assigned_to, due_at, created_by),
+    )
+
+
+def get_case_tasks(conn, case_id: int) -> pd.DataFrame:
+    return _read_sql_query(conn, "SELECT * FROM case_tasks WHERE case_id = ? ORDER BY updated_at DESC, created_at DESC", (case_id,))
+
+
+def update_case_task(
+    conn,
+    task_id: int,
+    *,
+    status: str | None = None,
+    priority: str | None = None,
+    assigned_to: str | None = None,
+    due_at: float | None = None,
+) -> None:
+    updates = [f"updated_at = ({_epoch_now_sql(getattr(conn, 'backend', 'sqlite'))})"]
+    values: list[Any] = []
+    if status is not None:
+        updates.append("status = ?")
+        values.append(status)
+    if priority is not None:
+        updates.append("priority = ?")
+        values.append(priority)
+    if assigned_to is not None:
+        updates.append("assigned_to = ?")
+        values.append(assigned_to)
+    if due_at is not None:
+        updates.append("due_at = ?")
+        values.append(float(due_at))
+    values.append(int(task_id))
+    conn.execute(f"UPDATE case_tasks SET {', '.join(updates)} WHERE id = ?", values)
+    conn.commit()
+
+
+def log_case_activity(
+    conn,
+    *,
+    case_id: int,
+    event_type: str,
+    actor: str = "",
+    summary: str = "",
+    detail_json: str = "{}",
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO case_activity_log (case_id, event_type, actor, summary, detail_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (case_id, event_type, actor, summary, detail_json),
+    )
+
+
+def get_case_activity(conn, case_id: int) -> pd.DataFrame:
+    return _read_sql_query(conn, "SELECT * FROM case_activity_log WHERE case_id = ? ORDER BY created_at DESC", (case_id,))
+
+
 def create_approval_request(
     conn,
     case_id: int,
@@ -1232,6 +1688,49 @@ def mark_approval_used(conn, approval_id: int, used_at: float) -> None:
         (float(used_at), int(approval_id)),
     )
     conn.commit()
+
+
+def reserve_approval_request(conn, approval_id: int, action: str, now_value: float) -> bool:
+    cursor = conn.execute(
+        """
+        UPDATE approval_requests
+        SET used_at = -1
+        WHERE id = ?
+          AND LOWER(TRIM(action)) = LOWER(TRIM(?))
+          AND LOWER(TRIM(status)) IN ('approved', 'allow', 'granted')
+          AND COALESCE(used_at, 0) = 0
+          AND (COALESCE(expires_at, 0) = 0 OR expires_at >= ?)
+        """,
+        (int(approval_id), str(action or ""), float(now_value)),
+    )
+    conn.commit()
+    return bool(getattr(cursor, "rowcount", 0))
+
+
+def finalize_approval_request(conn, approval_id: int, used_at: float) -> bool:
+    cursor = conn.execute(
+        """
+        UPDATE approval_requests
+        SET used_at = ?
+        WHERE id = ? AND used_at = -1
+        """,
+        (float(used_at), int(approval_id)),
+    )
+    conn.commit()
+    return bool(getattr(cursor, "rowcount", 0))
+
+
+def release_approval_request(conn, approval_id: int) -> bool:
+    cursor = conn.execute(
+        """
+        UPDATE approval_requests
+        SET used_at = 0
+        WHERE id = ? AND used_at = -1
+        """,
+        (int(approval_id),),
+    )
+    conn.commit()
+    return bool(getattr(cursor, "rowcount", 0))
 
 
 def upsert_detection_rule(

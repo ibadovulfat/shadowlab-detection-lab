@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -266,6 +267,99 @@ class GraphService:
             "priority_findings": finding_signals[:8],
         }
 
+    def build_case_graph(
+        self,
+        *,
+        case_record: dict[str, Any],
+        assignments: list[dict[str, Any]] | None = None,
+        tasks: list[dict[str, Any]] | None = None,
+        activity: list[dict[str, Any]] | None = None,
+        pins: list[dict[str, Any]] | None = None,
+        notes: list[dict[str, Any]] | None = None,
+        stories: list[dict[str, Any]] | None = None,
+        hosts: list[dict[str, Any]] | None = None,
+        processes: list[dict[str, Any]] | None = None,
+        connections: list[dict[str, Any]] | None = None,
+        incidents: list[dict[str, Any]] | None = None,
+        persistence_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        assignments = assignments or []
+        tasks = tasks or []
+        activity = activity or []
+        pins = pins or []
+        notes = notes or []
+        stories = stories or []
+        hosts = hosts or []
+        processes = processes or []
+        connections = connections or []
+        incidents = incidents or []
+        persistence_items = persistence_items or []
+
+        focus_terms = self._case_focus_terms(case_record, tasks, activity, pins, notes, stories)
+        focus_pids = self._case_focus_pids(case_record, tasks, activity, pins, notes, stories)
+        incident_id = str(case_record.get("incident_id") or "").strip().lower()
+
+        filtered_processes = [
+            proc for proc in processes
+            if self._process_matches_case(proc, focus_terms, focus_pids)
+        ]
+        if not filtered_processes and focus_pids:
+            filtered_processes = [proc for proc in processes if int(proc.get("pid", -1) or -1) in focus_pids]
+        if not filtered_processes:
+            filtered_processes = processes
+
+        filtered_proc_ids = {int(proc.get("pid", -1) or -1) for proc in filtered_processes}
+        filtered_connections = [
+            conn for conn in connections
+            if int(conn.get("pid", -1) or -1) in filtered_proc_ids or self._text_matches_case(conn, focus_terms)
+        ]
+        if not filtered_connections:
+            filtered_connections = [conn for conn in connections if int(conn.get("pid", -1) or -1) in filtered_proc_ids]
+
+        filtered_incidents = [
+            incident for incident in incidents
+            if self._incident_matches_case(incident, incident_id, focus_terms)
+        ]
+        if not filtered_incidents and incident_id:
+            filtered_incidents = [incident for incident in incidents if str(incident.get("incident_id", "")).strip().lower() == incident_id]
+
+        filtered_persistence = [
+            item for item in persistence_items
+            if self._text_matches_case(item, focus_terms)
+        ]
+
+        graph = self.build_entity_graph(
+            hosts=hosts,
+            processes=filtered_processes,
+            connections=filtered_connections,
+            incidents=filtered_incidents,
+            persistence_items=filtered_persistence,
+            pid=next(iter(focus_pids)) if len(focus_pids) == 1 else None,
+        )
+        summary = dict(graph.get("summary", {}))
+        summary["case_scope"] = {
+            "case_id": int(case_record.get("id", 0) or 0),
+            "title": str(case_record.get("title") or ""),
+            "incident_id": str(case_record.get("incident_id") or ""),
+            "focus_pid_count": len(focus_pids),
+            "focus_terms": focus_terms[:12],
+            "assignments": len(assignments),
+            "open_tasks": sum(1 for task in tasks if str(task.get("status", "todo")).lower() not in {"done", "closed", "resolved"}),
+            "pins": len(pins),
+            "notes": len(notes),
+            "stories": len(stories),
+            "activity_events": len(activity),
+        }
+        priority_findings = list(graph.get("priority_findings", []))
+        if focus_pids:
+            priority_findings.insert(0, f"Case scope narrowed around {len(focus_pids)} explicit PID indicators.")
+        if filtered_incidents:
+            priority_findings.insert(0, f"{len(filtered_incidents)} incidents matched the selected case context.")
+        graph["summary"] = summary
+        graph["case_context"] = summary["case_scope"]
+        graph["priority_findings"] = priority_findings[:8]
+        return graph
+
     def _render_graph(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], pid: int | None = None) -> Path:
         html_path = self.out_dir / ("ShadowLab_EntityGraph.html" if pid is None else f"ShadowLab_EntityGraph_PID_{pid}.html")
         net = Network(height="760px", width="100%", bgcolor="#0f1723", font_color="#eef4fb", directed=True)
@@ -407,6 +501,135 @@ window.addEventListener('load', function () {
             "remote_exposure": dict(remote_exposure),
             "priority_findings": priority_findings[:6],
         }
+
+    def _case_focus_terms(
+        self,
+        case_record: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        activity: list[dict[str, Any]],
+        pins: list[dict[str, Any]],
+        notes: list[dict[str, Any]],
+        stories: list[dict[str, Any]],
+    ) -> list[str]:
+        raw_terms: set[str] = set()
+        sources: list[Any] = [
+            case_record.get("title", ""),
+            case_record.get("incident_id", ""),
+            case_record.get("narrative", ""),
+            case_record.get("tags_json", ""),
+        ]
+        for item in tasks:
+            sources.extend([item.get("title", ""), item.get("description", ""), item.get("assigned_to", "")])
+        for item in activity:
+            sources.extend([item.get("summary", ""), item.get("detail_json", "")])
+        for item in pins:
+            sources.extend([item.get("item_title", ""), item.get("item_payload_json", ""), item.get("rationale", "")])
+        for item in notes:
+            sources.extend([item.get("item_title", ""), item.get("note_text", ""), item.get("tags_json", "")])
+        for item in stories:
+            sources.extend([item.get("title", ""), item.get("hypothesis", ""), item.get("summary", ""), item.get("tags_json", "")])
+
+        ignore = {
+            "case", "open", "task", "story", "note", "review", "validate", "analysis", "analyst", "desktop",
+            "high", "medium", "low", "triage", "owner", "unit", "test", "investigation", "added", "updated",
+            "created", "event", "process", "network", "report", "board", "json", "html", "pdf", "risk",
+        }
+        for source in sources:
+            text = self._normalize_text(source)
+            for token in re.findall(r"[a-z0-9_.-]{4,}", text):
+                if token.isdigit() or token in ignore:
+                    continue
+                raw_terms.add(token)
+        return sorted(raw_terms)
+
+    def _case_focus_pids(
+        self,
+        case_record: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        activity: list[dict[str, Any]],
+        pins: list[dict[str, Any]],
+        notes: list[dict[str, Any]],
+        stories: list[dict[str, Any]],
+    ) -> set[int]:
+        pid_candidates: set[int] = set()
+        sources: list[Any] = [case_record]
+        sources.extend(tasks)
+        sources.extend(activity)
+        sources.extend(pins)
+        sources.extend(notes)
+        sources.extend(stories)
+        for source in sources:
+            pid_candidates.update(self._extract_pids(source))
+        return {pid for pid in pid_candidates if 1 <= pid <= 999999}
+
+    def _extract_pids(self, value: Any) -> set[int]:
+        found: set[int] = set()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).lower() == "pid":
+                    try:
+                        found.add(int(item))
+                    except Exception:
+                        pass
+                found.update(self._extract_pids(item))
+            return found
+        if isinstance(value, list):
+            for item in value:
+                found.update(self._extract_pids(item))
+            return found
+        text = self._normalize_text(value)
+        for match in re.findall(r"\bpid(?:\s*[:#-]?\s*)(\d{1,6})\b", text):
+            found.add(int(match))
+        return found
+
+    def _normalize_text(self, value: Any) -> str:
+        if isinstance(value, dict):
+            return " ".join(self._normalize_text(item) for item in value.values())
+        if isinstance(value, list):
+            return " ".join(self._normalize_text(item) for item in value)
+        if value is None:
+            return ""
+        text = str(value)
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return text.lower()
+        return self._normalize_text(parsed).lower()
+
+    def _text_matches_case(self, item: Any, focus_terms: list[str]) -> bool:
+        if not focus_terms:
+            return False
+        text = self._normalize_text(item)
+        return any(term in text for term in focus_terms)
+
+    def _process_matches_case(self, process: dict[str, Any], focus_terms: list[str], focus_pids: set[int]) -> bool:
+        proc_pid = int(process.get("pid", -1) or -1)
+        if proc_pid in focus_pids:
+            return True
+        searchable = " ".join(
+            [
+                str(process.get("name", "")),
+                str(process.get("exe", "")),
+                str(process.get("cmdline", "")),
+                str(process.get("signature_status", "")),
+            ]
+        ).lower()
+        return any(term in searchable for term in focus_terms)
+
+    def _incident_matches_case(self, incident: dict[str, Any], incident_id: str, focus_terms: list[str]) -> bool:
+        if incident_id and str(incident.get("incident_id", "")).strip().lower() == incident_id:
+            return True
+        searchable = " ".join(
+            [
+                str(incident.get("incident_id", "")),
+                str(incident.get("title", "")),
+                str(incident.get("summary", "")),
+                str(incident.get("notes", "")),
+                str(incident.get("correlation_story", "")),
+                str(incident.get("recommended_actions", "")),
+            ]
+        ).lower()
+        return any(term in searchable for term in focus_terms)
 
     def _add_node(
         self,

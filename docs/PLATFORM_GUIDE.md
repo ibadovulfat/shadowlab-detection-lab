@@ -1,199 +1,199 @@
 # ShadowLab Platform Guide
 
-ShadowLab yerli isleyen, API-first yanasmasi ile qurulmus, amma gundelik istifade terefi esasen desktop uzerinden verilen bir cybersecurity operations platformasidir. Layihe yalniz sade monitorinq aleti deyil. Hazir veziyyetde o, host telemetry toplamaq, subheli prosesleri arasdirmaq, persistence izlerini gormek, threat-intel enrichment etmek, case acmaq, investigation aparmaq, report cixarmaq ve security-ops nezaretini saxlamaq ucun vahid is muhiti verir.
+ShadowLab is a locally operated, API-first cybersecurity operations platform whose day-to-day experience is centered around the desktop client. The project is no longer just a simple monitoring tool. In its current state, it provides a unified workspace for collecting host telemetry, investigating suspicious processes, reviewing persistence artifacts, enriching findings with threat intelligence, creating cases, running investigations, exporting reports, and maintaining security-operations oversight.
 
-Bu senedin meqsedi layihenin ne oldugunu, bu gun hansi seviyyeye geldiyini, icinde hansi bolmelerin oldugunu ve bir operatorun onu nece istifade edeceyini bir yerde, daha teqdimatliq formada gostermekdir.
+The goal of this document is to present the project in a more product-oriented way. It explains what ShadowLab is today, which major areas already exist, and how an operator can use the platform in practice.
 
-## ShadowLab bu gun nedir
+## What ShadowLab Is Today
 
-Layihenin merkezinde FastAPI backend dayanir. Butun esas emeliyyatlar burada idare olunur. PySide6 ile yazilmis desktop client ise hemin backend-in operator uzudur. Neticede hem lokal lab seraitinde rahat islemek olur, hem de arxitektura gelecekde basqa client-ler ve ya automation ucun aciq qalir.
+At the center of the platform is a FastAPI backend. All core operations are managed there. The PySide6 desktop client acts as the operator-facing surface for that backend. This gives the project a comfortable local lab workflow while still keeping the architecture open for future clients and automation.
 
-Hazir mehsul bir nece istiqameti birlesdirir. Bir terefde telemetry, process investigation, response, persistence ve threat-intel hisseleri var. Diger terefde ise artiq enterprise seviyyeye yaxin investigation layer qurulub. Bu hissede case board, assignment, task, note, story, activity feed, notification center, scoped graph correlation, executive export ve security-ops nezareti movcuddur.
+The current product combines multiple layers. On one side, it includes telemetry, process investigation, response, persistence review, and threat-intelligence workflows. On the other side, it now includes an enterprise-style investigation layer with case boards, assignments, tasks, notes, stories, activity feeds, notification handling, scoped graph correlation, executive export, and security-operations controls.
 
-## Layihede neler edilib
+## What Has Already Been Built
 
-Bu repository artiq ilkin prototip merhelesini kecib. Hazirda esas tebeqeler qurulub.
+This repository has moved beyond the prototype stage. The main layers are already in place.
 
-Evvelce backend tebeqesi formalasdirilib. Burada process investigation, triage, threat enrichment, persistence review, incidents, graph, timeline, artifacts, deception, telemetry fabric ve enterprise workflow ucun route-lar var.
+The backend layer has been established with routes for process investigation, triage, threat enrichment, persistence review, incidents, graph views, timeline views, artifacts, deception workflows, telemetry-fabric integration, and enterprise operations.
 
-Sonra desktop tebeqesi genislendirilib. Bu hisse artiq yalniz sade process viewer deyil. Burada coxsayli tab-lar, role-aware controls, auth-enabled giris, lokal scroll davranisi ve enterprise operator workflow-u var.
+The desktop layer has also been expanded significantly. It is no longer only a simple process viewer. It now includes many tabs, role-aware controls, auth-enabled access, improved scrolling behavior, and a broader enterprise operator workflow.
 
-Daha sonra enterprise investigation hissesi sifirdan ShadowLab-a uygun sekilde qurulub. Buraya case board, assignments, checklist-style tasks, notes, stories, pins, saved views, case activity, scoped graph correlation, timeline, notification center ve investigation report export daxildir.
+The enterprise investigation layer was built specifically around the ShadowLab workflow. It includes case boards, assignments, checklist-style tasks, notes, stories, pins, saved views, case activity, scoped graph correlation, timeline support, a notification center, and investigation report export.
 
-Security terefde de vacib duzelisler edilib. Role-based API key axini duzeldilib. Desktop auth disabled olduqda ozunu saxta admin kimi aparmir. Approval one-time-use axini reserve ve finalize modeli ile sertlesdirilib. Agir enterprise refresh davranisi da UI freeze yaratmamaq ucun yumsaldilib.
+Important security improvements were also added. The role-based API key flow was corrected. The desktop no longer behaves like a fake admin when backend auth is disabled. Approval handling was hardened with a reserve-and-finalize model to protect one-time-use actions. Heavy enterprise refresh behavior was also softened to avoid UI freezes.
 
-## Arxitektura nece qurulub
+## How The Architecture Is Organized
 
-`api/` qovlugu butun esas route-lari saxlayir. `services/` qovlugunda investigation, graph, response, telemetry, incident ve enterprise mentiqi yasayir. `database.py` hem lokal SQLite, hem de PostgreSQL kecidine uygun persistence qatini idare edir. `desktop/` operator UI-ni saxlayir. `docs/` istifadeye ve emeliyyatlara aid senedleri toplayir. `scripts/` ise auth startup, packaging, migration ve verification helper-lerini saxlayir.
+The `api/` directory contains the main routes. The `services/` directory holds the investigation, graph, response, telemetry, incident, and enterprise logic. `database.py` manages the persistence layer in a way that supports both local SQLite and PostgreSQL migration paths. `desktop/` contains the operator UI. `docs/` stores usage and operational documentation. `scripts/` contains auth startup, packaging, migration, and verification helpers.
 
-Bu dizaynin ustunluyu odur ki, UI ve backend bir-birinden ayri qalir. Yeni senin mehsulun sadece bir interface yox, arxitektura baximindan genislenebilen platformadir.
+The strength of this design is that the UI and backend remain separate. That means the product is not just a single interface, but a platform that can be extended over time.
 
-## Desktop daxilinde hansi bolmeler var
+## Desktop Sections
 
-`Dashboards` ve `Overview` operatora umumi veziyyeti gosterir. Burada monitor output, telemetry hissi ve umumi veziyyet oxunur.
+`Dashboards` and `Overview` give the operator a broad picture of current platform state. These areas are intended for quick visibility into monitoring output, telemetry posture, and overall system condition.
 
-`Processes` esas investigation giris noqtelerinden biridir. Burada process profiline baxmaq, process tree gormek, strings cixarmaq, internals, YARAify, sandbox trace, AI analysis ve one-click triage isletmek mumkundur.
+`Processes` is one of the main investigation entry points. It allows the operator to inspect process profiles, process trees, extracted strings, internals, YARAify enrichment, sandbox traces, AI analysis, and one-click triage.
 
-`Advanced Hunt` daha derin axtaris ve operator yonumlu arasdirma hissesidir.
+`Advanced Hunt` is designed for deeper, operator-driven investigation work.
 
-`Persistence` bolmesi autorun, scheduled task, service ve uygun persistence izlerini gormek ve lazim geldikde remediation etmek ucun nezerde tutulub.
+`Persistence` is used to review autoruns, scheduled tasks, services, and other persistence artifacts, and to trigger remediation when needed.
 
-`Threat Intel` hash ve IP enrichment axinini idare edir. Bu hisse VirusTotal, MalwareBazaar, AbuseIPDB ve YARAify tipli provider-lerle isleyen enrichment modellerine baglanir.
+`Threat Intel` manages hash and IP enrichment flows. It connects local findings to providers such as VirusTotal, MalwareBazaar, AbuseIPDB, and YARAify-backed intelligence workflows.
 
-`Deception` honeypot ve canary kimi lab-oriented detection ve bait workflow-larini idare edir.
+`Deception` handles lab-oriented baiting and detection workflows such as honeypots and canaries.
 
-`Network`, `Hosts`, `Graph` ve `Timeline` bolmeleri hadiseleri daha genis kontekstde gormek ucundur. Burada elaqeler, host inventory, graph correlation ve zaman xetti kimi baxislar formalasir.
+`Network`, `Hosts`, `Graph`, and `Timeline` help the operator understand events in a wider context. These sections expose relationships, host inventory, graph correlation, and chronological event views.
 
-`Quarantine`, `History` ve `Artifacts` arasdirmanin ve response-un neticelerini saxlamaq ucun vacib hisselerdir. Buradan ne bas verdiyini, ne tutuldugunu ve hansi materiallarin toplandigini izlemek olur.
+`Quarantine`, `History`, and `Artifacts` are key sections for storing the outcome of investigation and response work. They make it possible to track what happened, what was contained, and which materials were collected.
 
-`Enterprise` artiq ayrica investigation suite kimi davranir. Bu hisse iki daxili bolmeye ayrilib. `Enterprise Ops` case-centric is axinini idare edir. `Enterprise Intel` ise case-in intelligence ve correlation terefini gosterir.
+`Enterprise` behaves as a separate investigation suite. It is split into two internal workspaces. `Enterprise Ops` manages case-centric workflow, while `Enterprise Intel` focuses on the intelligence and correlation side of case work.
 
-`Security Ops` integrity, observability, readiness, secret rotation ve report kimi operational tehlukesizlik nezaretlerini saxlayir.
+`Security Ops` holds operational security controls such as integrity, observability, readiness, secret rotation, and reporting.
 
-`Scenarios` ve `About / FAQ` ise test ve mehsul teqdimati terefini tamamlayir.
+`Scenarios` and `About / FAQ` complete the platform with testing and presentation-oriented surfaces.
 
-## Enterprise hissesi konkret ne verir
+## What The Enterprise Layer Adds
 
-`Enterprise Ops` bolmesinde operator case secir ve ya yaradir. Sonra board uzerinden case-in umumi veziyyetini gorur. Kim bu case uzerinde isleyir, hansi task-lar aciqdir, hansilar gecikib, ne activity bas verib, hansi notification-lar vacibdir, bunlarin hamisi eyni yerde toplanir. Report export da buradan idare olunur.
+Inside `Enterprise Ops`, the operator selects or creates a case and then sees the overall state of that case through the board. It becomes easy to understand who is working on it, which tasks remain open, which ones are overdue, what activity has taken place, and which notifications matter. Report export is also managed from here.
 
-`Enterprise Intel` daha analitik baxis verir. Burada critical asset gorunusu, detection lifecycle hissesi, notes, stories, case timeline, entity links ve scoped graph correlation toplanir. Yeni case yalniz "ticket" kimi deyil, arasdirma obyektine cevrilir.
+`Enterprise Intel` provides a more analytical view. It brings together critical asset visibility, detection lifecycle data, notes, stories, case timeline, entity links, and scoped graph correlation. This turns the case from a simple ticket into an actual investigation object.
 
-Bu, ShadowLab-i sade defensive lab aletinden cixarib mini SOC investigation platformasina yaxinlasdirir.
+This shift moves ShadowLab closer to a compact SOC-style investigation platform rather than just a defensive lab utility.
 
-## Birbasa nece istifade olunur
+## How It Is Used In Practice
 
-En sade yol evvelce backend-i qaldirmaqdir. Eger yalniz lokal test isteyirsense `python app.py` kifayetdir. Eger real role-based davranisi yoxlamaq isteyirsense `scripts/start_shadowlab_auth.ps1` ile baslatmaq daha dogrudur.
+The simplest path is to start the backend first. If the goal is only local testing, `python app.py` is enough. If role-based behavior should be tested properly, then `scripts/start_shadowlab_auth.ps1` is the better entry point.
 
-Sonra `python desktop/main.py` ile desktop acilir. Desktop acildiqdan sonra auth aktivdirse uygun API key daxil edilir. Oradan operator evvelce `Overview` ve `Dashboards` bolmelerine baxa biler. Subheli activity gorende `Processes` ve `Advanced Hunt` uzerine kecib daha derin yoxlama aparir.
+After that, the desktop is started with `python desktop/main.py`. If auth is enabled, the correct API key is entered into the client. From there, the operator can first review `Overview` and `Dashboards`. If suspicious activity appears, the operator can move into `Processes` and `Advanced Hunt` for deeper inspection.
 
-Eger hadise incident ve ya case seviyyesine qalxirsa, `Enterprise` daxilinde case yaradilir. Daha sonra task-lar verilir, note ve story yazilir, evidence pin edilir, graph correlation baxilir ve sonda report export olunur.
+If an event grows into an incident or case-level workflow, a case is created under `Enterprise`. Then tasks are assigned, notes and stories are written, evidence is pinned, graph correlation is reviewed, and the final report is exported.
 
-Eger operational hardening ve ya platform health maraqlidirsa, `Security Ops` bolmesine kecilir. Burada integrity, observability, secrets ve readiness hisseleri yoxlanilir.
+If the focus is platform hardening or platform health, the operator moves into `Security Ops`, where integrity, observability, secrets, and readiness can be reviewed.
 
-## Tovsiye olunan operator axini
+## Recommended Operator Flow
 
-Birinci merhelede overview ve dashboards ile umumi veziyyeti yoxlamaq mentiqlidir. Ikinci merhelede process investigation aparilir. Ucuncu merhelede lazim gelse persistence, threat intel, graph ve timeline ile context genislendirilir. Dorduncu merhelede case acilir ve enterprise workflow baslayir. Besinci merhelede report ve artifacts cixarilir. Altinci merhelede security-ops terefinden platforma ve evidence butovluyu yoxlanir.
+The most practical flow starts with `Overview` and `Dashboards` for general awareness. The second stage is process investigation. The third stage expands context using persistence review, threat intelligence, graph, and timeline. The fourth stage opens a case and starts enterprise workflow. The fifth stage exports reports and artifacts. The sixth stage uses security-operations controls to verify platform health and evidence integrity.
 
-Bu axin platformanin bugunku guclu terefini gosterir. ShadowLab tekce data gostermir, operatora nece islemek lazim oldugunu da strukturlasdirir.
+This flow shows one of ShadowLab's main strengths. It does not only display data, it also gives the operator a structured way to work through that data.
 
-## Vizual bolme
+## Visual Tour
 
-Asagidaki sekiller desktop daxilindeki bolmeleri section sirasina yaxin axinda gosterir. Her sekilden sonra hemin bolmenin ne ucun istifade olundugu qisa formada izah edilir.
+The screenshots below follow the desktop surface in a section-oriented order. Each screenshot is followed by a short explanation of what that workspace is used for.
 
 ### Dashboards Workspace
 
 ![Dashboards Workspace](../images/dashboards-workspace.png)
 
-Bu ekran operatora platformanin umumi veziyyetini ilk baxisda gosterir. Burada live metrics, auth ve policy statusu, threat snapshot ve timeline xulaseleri bir yerde toplanir. Dashboards bolmesi adeten ilkin yoxlama noqtesi kimi isleyir. Operator burada hansı istiqamete kecmeli oldugunu tez mueyyenlesdirir.
+This screen gives the operator an immediate summary of the platform's current state. Live metrics, auth and policy posture, threat snapshots, and timeline summaries are visible in one place. The dashboards area works well as an initial checkpoint before deeper investigation begins. It helps the operator quickly decide where attention should go next.
 
 ### Overview Telemetry Dashboard
 
 ![Overview Telemetry Dashboard](../images/overview-telemetry-dashboard.png)
 
-Overview hissesi telemetry axinini daha konkret sekilde oxumaq ucundur. CPU trendi, incident xulaseleri ve cari monitor neticeleri burada daha aydin gorunur. Bu ekran anomaliya ve ya davranis deyisikliyini erkenden gormek ucun rahatdir. Operator ekser hallarda buradan prosese ve ya hadise seviyyesine kecid edir.
+The overview section is meant for reading telemetry in a more focused way. CPU trends, incident summaries, and current monitoring results are displayed more clearly here. This screen is especially useful for noticing anomalies or changes in behavior early. Operators often move from this view into process- or incident-level investigation.
 
 ### Process Intelligence Workspace
 
 ![Process Intelligence Workspace](../images/process-intelligence-workspace.png)
 
-Bu bolme subheli proseslerin esas arasdirma merkezidir. Sol terefde process siyahisi, sag terefde ise secilen prosese aid derin melumat gosterilir. Buradan triage, strings, YARA, sandbox, memory analysis ve diger investigation emeliyyatlari basladila biler. Yani proses seviyyesinde real analiz isi en cox burada gorulur.
+This workspace is the core area for suspicious-process analysis. The process list sits on the left, while detailed context for the selected process appears on the right. From here the operator can launch triage, strings extraction, YARA workflows, sandbox traces, memory analysis, and other investigation actions. In practice, much of the hands-on analytical work happens here.
 
 ### Advanced Hunt Workspace
 
 ![Advanced Hunt Workspace](../images/advanced-hunt-workspace.png)
 
-Advanced Hunt daha derin operator axtarislari ucun qurulub. Bu section panel esasli ish muhiti kimi davranir ve internals, strings, YARA, process tree ve AI analyst neticelerini birlesdirir. Operator burada xam telemetry-ni daha analitik baxisla oxuya bilir. Bu hisse sadə baxisdan cixib aktif hunt senarilerine kecmek ucun istifade olunur.
+Advanced Hunt is built for deeper operator-driven searches. It behaves like a panel-based workspace that combines internals, strings, YARA, process tree, and AI analyst output. This lets the operator review raw telemetry with a more analytical workflow. It is the section that moves the user from observation into active hunting.
 
 ### Persistence Workspace
 
 ![Persistence Workspace](../images/persistence-workspace.png)
 
-Persistence bolmesi sistemde qaliciliq mexanizmlerini izlemege komek edir. Autorun, service, scheduled task ve benzeri izler burada gosterilir. Eger riskli bir persistence elementi tapilarsa, remediation axini da bu hisseden basladila biler. Bu section post-exploitation izlerini tutmaq ucun vacibdir.
+The persistence workspace helps track how software may be attempting to remain on the system. Autoruns, services, scheduled tasks, and related mechanisms are reviewed here. If a risky persistence artifact is found, remediation can be triggered from the same section. This makes it an important post-exploitation review surface.
 
 ### Threat Intel Workspace
 
 ![Threat Intel Workspace](../images/threat-intel-workspace.png)
 
-Threat Intel ekrani hash, IP ve process context-i xarici enrichment ile birlesdirir. Operator bir obyekt secib onu VirusTotal, MalwareBazaar ve YARAify tipli menbelerle yoxlaya bilir. Bu bolme lokal siqnali daha genis threat konteksti ile tamamlamaq ucundur. Belece araşdırma daha inamli qerar vermeye yaxinlasir.
+The threat-intelligence screen connects hashes, IPs, and process context to external enrichment. The operator can select an object and check it against providers such as VirusTotal, MalwareBazaar, and YARAify-backed sources. This enriches local telemetry with broader threat context. As a result, investigation decisions can be made with more confidence.
 
 ### Deception And Evidence Workspace
 
 ![Deception And Evidence Workspace](../images/deception-evidence-workspace.png)
 
-Bu ekran deception workflow-larini ve evidence capture prosesini bir yerde saxlayir. Honeypot ve canary emeliyyatlari, evidence siyahisi ve output pencereleri operatora eyni panelde verilir. Lab muhitinde aldadici obyektler qurmaq ve neticeleri toplamaq ucun bu section rahatdir. Xususen test ve demonstration senarilerinde boyuk rol oynayir.
+This screen keeps deception workflows and evidence capture in one place. Honeypot actions, canary actions, evidence lists, and output panels are all presented together. It is a convenient area for building bait-based workflows and collecting the resulting material in lab environments. It is especially useful in testing and demonstration scenarios.
 
 ### Network Workspace
 
 ![Network Workspace](../images/network-workspace.png)
 
-Network section paket ve elaqe kontekstini gormek ucun nezerde tutulub. Burada connection table, discovered devices ve network output hisseleri secilmis trafiki daha aydin edir. Operator hostdaki hereketi sadece proses yox, sebeke baximindan da qiymetlendire bilir. Bu da lateral hereket ve ya xarice cixis kimi hallari gormeye komek edir.
+The network section is meant for packet and connection context. Connection tables, discovered devices, and network output help the operator understand traffic more clearly. This allows host behavior to be evaluated from a network perspective rather than only a process perspective. It is useful for spotting lateral movement or suspicious outbound activity.
 
 ### Hosts Inventory Workspace
 
 ![Hosts Inventory Workspace](../images/hosts-inventory-workspace.png)
 
-Hosts bolmesi qeydiyyatdan kecmis hostlari ve agent veziyyetini toplu sekilde gosterir. Platform, IP, role, API status ve version kimi melumatlar burada cox rahat oxunur. Birden cox host olan lab ve ya mini fleet senarisinde bu ekran vacibdir. Operator hansI hostun online oldugunu ve hansinin diqqet istediyini tez anlaya bilir.
+The hosts workspace presents registered hosts and agent state in a compact inventory view. Platform, IP, role, API status, and version information are easy to read here. This is valuable in a lab or mini-fleet setup with more than one monitored host. Operators can quickly understand which systems are online and which ones need attention.
 
 ### Graph Workspace
 
 ![Graph Workspace](../images/graph-workspace.png)
 
-Graph hissesi hadise ve obyektler arasindaki elaqeleri vizual sekilde gosterir. Entity nodes, entity edges ve operator findings birlikde baxildigina gore correlation daha asan olur. Bu section tek obyekt yox, butov hadise modelini gormek ucundur. Xususen case seviyyesinde araşdırmada boyuk deyer verir.
+The graph workspace visualizes relationships between events and entities. Entity nodes, entity edges, and operator findings make correlation easier to understand at a glance. This section is not about a single object but about the shape of the investigation as a whole. It becomes especially valuable during case-level analysis.
 
 ### Timeline Event Story Workspace
 
 ![Timeline Event Story Workspace](../images/timeline-event-story-workspace.png)
 
-Timeline bolmesi hadiseleri zaman ardicilligi ile oxumaq ucundur. Burada event summary, timeline story ve detail paneli araşdırmaya xronoloji baxis verir. Operator hansı hadisenin hansindan once bas verdiyini bu section-da daha rahat izləyir. Bu da incident narrativi qurmaq ucun cox faydalidir.
+The timeline workspace is used to read events in chronological order. Event summaries, timeline stories, and detail panels together provide a narrative view of what happened and when. The operator can more easily trace which action came before another. That makes this section very useful for incident reconstruction.
 
 ### Quarantine Alert Workspace
 
 ![Quarantine Alert Workspace](../images/quarantine-alert-workspace.png)
 
-Quarantine bolmesi izolasiya olunmus obyektleri ve alert neticelerini idare edir. Restore, delete ve webhook kimi emeliyyatlar burada birbasa operatorun ixtiyarina verilir. Response terefini daha nizamli saxlamaq ucun bu ekran vacibdir. Xususen artıq hereket edilmis obyektlerin son taleyini izlemek ucun yararlidir.
+The quarantine workspace is used to manage isolated items and related alerts. Restore, delete, and webhook actions are available directly to the operator. It helps keep the response side of the platform organized. It is especially helpful for tracking the final state of already-handled objects.
 
 ### History And Incident Log
 
 ![History And Incident Log](../images/history-incident-log.png)
 
-History section platformada bas veren incident, audit ve telemetry izlerini toplu sekilde gosterir. Burada action cədvelleri, severity, owner ve event detallari birlikde gorunur. Operator geriye donub hadisenin izini surmek isteyende bu hisseden istifade edir. Bu ekran cavablandirma ve retrospektiv analiz ucun cox deyerlidir.
+The history section collects incident, audit, and telemetry traces in one place. Action tables, severity, ownership, and event details are all visible together. Operators use this section when they need to look backward and trace what happened. It is highly valuable for both response review and retrospective analysis.
 
 ### Artifacts And Evidence Store
 
 ![Artifacts And Evidence Store](../images/artifacts-evidence-store.png)
 
-Artifacts bolmesi toplanmis fayllari, report-lari ve forensic cixislarini saxlamaq ucundur. Artifact preview ve detail pencereleri operatora secilen obyektin ne oldugunu aydin gosterir. Investigation sonunda toplanan materiallarin mərkəzi deposu kimi isleyir. Bu da export ve sonradan baxis prosesini asanlasdirir.
+The artifacts workspace stores collected files, reports, and forensic outputs. The preview and detail panels help the operator understand what the selected item contains. In effect, it serves as a central repository for investigation materials. That makes export and later review much easier.
 
 ### Enterprise Case Ops Workspace
 
 ![Enterprise Case Ops Workspace](../images/enterprise-case-ops-workspace.png)
 
-Enterprise Ops case-centric is axininin esas panelidir. Burada case controls, assignment, task, note, story, approval ve export kimi emeliyyatlar bir araya gelir. SOC tipli araşdırma nizamini qurmaq ucun bu section merkez rol oynayir. Operator ferdI tapşiriqlardan cixib komanda esasli case idaresine burada kecir.
+Enterprise Ops is the main panel for case-centric work. Case controls, assignments, tasks, notes, stories, approvals, and export actions come together here. This section is central to organizing SOC-style investigations. It is where individual findings turn into structured team workflow.
 
 ### Security Ops Platform Readiness
 
 ![Security Ops Platform Readiness](../images/security-ops-platform-readiness.png)
 
-Security Ops hissesi platformanin oz saglamligini ve idarə olunan security controls-u gosterir. Integrity, observability, migrations, secret rotation ve readiness kimi emeliyyatlar bu section-da cemlenir. Bu ekran mehsulun sadece detection deyil, eyni zamanda operational maturity terefini de vurğulayir. Administrator ucun burada vacib nezaret noqteleri var.
+The Security Ops workspace shows the health of the platform itself and the state of operational controls. Integrity, observability, migrations, secret rotation, and readiness tasks are gathered here. This emphasizes that the product is not only about detection but also about operational maturity. It gives administrators a dedicated place for platform oversight.
 
 ### Attack Scenario Simulator
 
 ![Attack Scenario Simulator](../images/attack-scenario-simulator.png)
 
-Scenarios bolmesi test ve demonstrasiya ucun qurulub. Buradan secilmis adversary profile ve muddet ile senari run etmek mumkundur. Bu section telemetriyanin, detection-larin ve workflow-larin kontrollu sekilde yoxlanmasina imkan verir. Xususen demo, lab ve regression test senarilerinde faydalidir.
+The scenarios section is designed for testing and demonstration. From here, the operator can run a chosen adversary-style scenario for a defined duration. This makes it possible to validate telemetry, detections, and workflows in a controlled way. It is particularly useful for demos, labs, and regression-style checks.
 
 ### Enterprise Ops Snapshot
 
 ![Enterprise Ops Snapshot](../images/enterprise-ops-snapshot.png)
 
-Bu ekran enterprise daxilinde daha yuxari seviyyeli operativ gorunusu temsil edir. Open cases, assignments, high-risk assets ve operational snapshot kimi bloklar case workload-u xulaselendirir. Menecer ve ya lead analyst ucun bu section daha umumi yönlendirme vasitesidir. Buradan komanda diqqetini hara vermeli oldugu daha tez belli olur.
+This screen provides a higher-level enterprise operations summary. Open cases, assignments, high-risk assets, and operational snapshots help summarize current workload. It is useful for managers or lead analysts who need a broader directional view. It helps the team quickly understand where focus is needed most.
 
 ### About Creator Profile
 
 ![About Creator Profile](../images/about-creator-profile.png)
 
-About / FAQ bolmesi mehsulun kim terefinden yaradildigini ve ne meqsedle quruldugunu izah edir. Burada creator profile, portfolyo ve qisa FAQ birlikde verilir. Bu section daha cox teqdimat, onboarding ve repo tanitimi ucun lazim olur. Teknik hisseden sonra mehsula insan merkezi kontekst verir.
+The About / FAQ section explains who created the product and what it is intended to be. Creator profile details, portfolio links, and a concise FAQ are shown together here. This section is especially useful for presentation, onboarding, and repository context. It gives the product a clear human and project identity after the technical sections.
 
-## Bu senedi ne ucun istifade etmek olar
+## What This Guide Is Useful For
 
-Bu guide hem mehsul teqdimati ucun, hem onboarding ucun, hem de GitHub-da "layihe tam olaraq ne edir" sualina cavab vermek ucun uygundur. README daha qisa giris rolunda qala biler. Bu sened ise daha genis ve mehsul yonumlu izah rolunu oynayar.
+This guide works well for product presentation, onboarding, and answering the question of what the project really does on GitHub. The README can remain a shorter project entry point. This guide serves as the broader, more product-oriented explanation.
