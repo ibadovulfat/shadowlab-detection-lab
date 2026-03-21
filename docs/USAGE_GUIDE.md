@@ -31,11 +31,53 @@ Typical desktop flow:
 
 1. confirm backend health
 2. enter an API key when auth is enabled
-3. inspect overview and dashboards
+3. inspect dashboards, `WHIDS`, `HIDS`, and overview
 4. investigate suspicious processes
 5. triage, enrich, and review graph or timeline context
 6. open or work an enterprise case if needed
 7. export findings or reports
+
+## WHIDS And HIDS Workflow
+
+Key integration routes:
+
+- `POST /integrations/whids/import/file`
+- `POST /integrations/whids/import/manager`
+- `POST /integrations/whids/reports`
+- `POST /integrations/whids/artifacts`
+- `POST /integrations/whids/config`
+- `POST /integrations/whids/report-archive`
+- `POST /integrations/whids/iocs/query`
+- `POST /integrations/whids/iocs/add`
+- `POST /integrations/whids/iocs/delete`
+- `POST /integrations/whids/rules/query`
+- `POST /integrations/whids/rules/add`
+- `POST /integrations/whids/rules/delete`
+- `POST /integrations/whids/scheduler/start`
+- `POST /integrations/whids/scheduler/stop`
+- `GET /integrations/whids/scheduler/status`
+- `POST /integrations/ossec/import/file`
+- `POST /integrations/ossec/live/start`
+- `POST /integrations/ossec/live/stop`
+- `GET /integrations/ossec/live/status`
+- `POST /integrations/incidents/{incident_id}/response`
+
+Recommended `WHIDS` workflow:
+
+1. verify manager URL, API key, and endpoint UUID
+2. import manager detections or file exports
+3. sync reports and archive data
+4. pull artifacts only when needed
+5. use scheduler for repeated polling
+6. manage rules and IoCs from the dedicated workspace
+
+Recommended `HIDS/OSSEC` workflow:
+
+1. import alert exports or `alerts.log`
+2. enable live ingest when monitoring an active stream
+3. review normalized incidents and enterprise linkage
+4. plan response first
+5. apply response only after review or explicit policy decision
 
 ## Process Investigation
 
@@ -139,6 +181,31 @@ Typical enterprise workflow:
 7. review activity, notifications, entity links, and scoped graph context
 8. export an investigation report when ready
 
+## MITRE ATT&CK
+
+MITRE routes:
+
+- `GET /enterprise/mitre/status`
+- `GET /enterprise/mitre/discover`
+- `POST /enterprise/mitre/load-bundle`
+- `POST /enterprise/mitre/compare`
+- `POST /enterprise/mitre/changelog`
+- `GET /enterprise/mitre/summary`
+- `GET /enterprise/mitre/techniques/{attack_id}`
+- `GET /enterprise/mitre/incidents/{incident_id}/coverage`
+- `GET /enterprise/cases/{case_id}/mitre`
+- `POST /enterprise/mitre/navigator/export`
+- `POST /enterprise/mitre/workbench/export`
+
+Typical ATT&CK workflow:
+
+1. load a STIX bundle from the desktop `Load ATT&CK` action or the load-bundle API
+2. review discovered bundles and compare the currently selected bundle
+3. inspect enterprise ATT&CK coverage and case ATT&CK rollup
+4. review tactic heat, sub-technique counts, parent rollup, and telemetry cues
+5. export Navigator coverage
+6. export Workbench coverage when annotation or relationship work should continue outside ShadowLab
+
 ## Security Ops
 
 Security-ops routes:
@@ -155,6 +222,19 @@ Security-ops routes:
 - `POST /enterprise/maintenance/retention`
 
 Use the `Security Ops` desktop tab for a safer operational entry point to these features.
+
+## Verification Helpers
+
+Useful validation commands:
+
+- `python scripts/validate_deployment_runtime.py`
+- `python scripts/rbac_smoke_matrix.py`
+- `python scripts/perf_stability_probe.py`
+- `python scripts/smoke_test_live_integrations.py --base-url http://127.0.0.1:8000 --api-key <raw_admin_key>`
+
+Native `OSSEC` validation still requires an elevated shell:
+
+- `powershell -ExecutionPolicy Bypass -File scripts\validate_ossec_active_response.ps1 -OssecHome C:\Users\ulfat\Documents\ossec-hids-main`
 
 ## Telemetry Fabric
 

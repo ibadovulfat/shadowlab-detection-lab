@@ -21,6 +21,8 @@ shadowlab_out/   ->  generated artifacts, reports, and runtime outputs
 
 - process investigation endpoints
 - incident and history endpoints
+- WHIDS and HIDS integration endpoints
+- MITRE ATT&CK lifecycle, coverage, and export endpoints
 - enterprise case and investigation endpoints
 - integrity, observability, secrets, and retention controls
 - auth context and RBAC enforcement
@@ -34,6 +36,8 @@ Key services include:
 - telemetry and incident orchestration
 - response and persistence handling
 - process intelligence
+- WHIDS and HIDS integration orchestration
+- MITRE ATT&CK dataset lifecycle, inference, and export orchestration
 - graph correlation
 - enterprise case management
 - investigation workspace assembly
@@ -46,6 +50,7 @@ This layer keeps desktop concerns separate from backend behavior so the same API
 `database.py` backs:
 
 - incidents
+- integration export history
 - case workflow
 - approvals
 - tasks and assignments
@@ -64,6 +69,7 @@ The desktop is the operator-facing control plane. It exposes:
 - threat-intel and persistence review
 - graph, timeline, and artifacts
 - enterprise investigation workflows
+- ATT&CK lifecycle, coverage, Navigator export, and Workbench export flows
 - security-ops controls
 
 Recent UI design choices:
@@ -72,6 +78,24 @@ Recent UI design choices:
 - `Enterprise` is split into `Enterprise Ops` and `Enterprise Intel`
 - heavy enterprise refresh behavior is deferred to avoid UI freezes
 - role-aware controls respect server capability flags
+
+## MITRE ATT&CK Layer
+
+The current architecture now includes a dedicated ATT&CK intelligence layer.
+
+That layer is responsible for:
+
+- loading STIX ATT&CK bundles from approved local paths
+- caching and discovering known ATT&CK bundle candidates
+- comparing current and candidate bundles
+- parsing ATT&CK tactic, technique, mitigation, software, and relationship data
+- enriching incidents and cases with explicit and inferred ATT&CK mappings
+- calculating tactic heat, progression, sub-technique counts, and parent rollups
+- exporting ATT&CK Navigator layers
+- exporting Workbench-oriented coverage bundles
+- feeding mapped techniques into response-policy decisions
+
+This keeps ATT&CK logic centralized in the backend instead of scattering mapping and export logic across the UI.
 
 ## Enterprise Investigation Model
 
@@ -113,6 +137,11 @@ Notable hardening points:
 - auth-disabled mode no longer causes the desktop to present fake admin state
 - approval one-time use is reserved and finalized atomically to avoid duplicate use races
 - dangerous endpoints remain gated server-side even if a client is modified
+- signed mutations are enforced for authenticated write operations
+- WHIDS scheduler runtime secrets are stored encrypted instead of plaintext
+- OSSEC native response execution validates IP input and avoids shell-style command composition
+- MITRE bundle access is limited to approved ATT&CK roots instead of arbitrary local JSON paths
+- ATT&CK bundle discovery uses caching to avoid repeated recursive scans during enterprise refresh
 
 ## Strategic Direction
 
@@ -125,3 +154,16 @@ The strongest direction remains a Windows-first security workstation with:
 - desktop-first workflows
 
 Fleet or remote management can be layered later, but the current product is intentionally optimized for local or lab-controlled operations first.
+
+## Integration Runtime Layer
+
+The current platform also includes a provider-oriented runtime layer above the core API:
+
+- `WHIDS` manager and file ingest
+- `WHIDS` reports, report archive, artifacts, rules, IoCs, and scheduler
+- `OSSEC/HIDS` file ingest and live ingest
+- normalized incident storage and dedupe logging
+- enterprise auto-case, note, pin, and chain-of-custody correlation
+- orchestration planning and policy-driven response execution
+
+This is the layer that turns ShadowLab from a purely local telemetry console into a unifying investigation surface for multiple detection sources.

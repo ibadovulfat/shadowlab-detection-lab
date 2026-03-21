@@ -10,6 +10,7 @@ import re
 import socket
 import threading
 import time
+import requests
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -45,10 +46,12 @@ from services.detection_service import DetectionOrchestrator
 from services.enterprise_service import EnterpriseService
 from services.fleet_service import FleetService
 from services.graph_service import GraphService
+from services.hids_integration_service import HidsIntegrationService
 from services.incident_service import IncidentArtifactService
 from services.integrity_service import IntegrityService
 from services.investigation_service import InvestigationService
 from services.migration_service import MigrationService
+from services.mitre_service import MitreAttackService
 from services.observability_service import ObservabilityService
 from services.outbound_security import normalize_outbound_url
 from services.process_intelligence_service import ProcessIntelligenceService
@@ -124,6 +127,14 @@ investigation_service = InvestigationService(timeline_service)
 graph_service = GraphService(OUT_DIR)
 collector_bridge = CollectorTelemetryBridge(config, OUT_DIR)
 enterprise_service = EnterpriseService(BASE_DIR, process_intel_service, fleet_service)
+mitre_service = MitreAttackService(BASE_DIR, db)
+hids_integration_service = HidsIntegrationService(
+    db,
+    enterprise_service=enterprise_service,
+    investigation_service=investigation_service,
+    response_service=response_service,
+    mitre_service=mitre_service,
+)
 integrity_service = IntegrityService(BASE_DIR, OUT_DIR)
 observability_service = ObservabilityService(OUT_DIR)
 migration_service = MigrationService(BASE_DIR)
@@ -331,6 +342,206 @@ class AgentRegistrationRequest(BaseModel):
         if not value:
             return ""
         return _validated_ip_address(value)
+
+
+class IntegrationFileImportRequest(BaseModel):
+    file_path: str
+    limit: int = Field(default=200, ge=1, le=2000)
+
+    @field_validator("file_path")
+    @classmethod
+    def _validate_file_path(cls, value: str) -> str:
+        path = Path(value).expanduser()
+        if not str(path).strip():
+            raise ValueError("File path is required")
+        return str(path)
+
+
+class WhidsManagerImportRequest(BaseModel):
+    manager_url: str
+    api_key: str
+    limit: int = Field(default=200, ge=1, le=2000)
+    endpoint_uuid: str = ""
+    verify_tls: bool = True
+
+    @field_validator("manager_url", "api_key")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Required field is missing")
+        return trimmed
+
+
+class WhidsArtifactsRequest(BaseModel):
+    manager_url: str
+    api_key: str
+    endpoint_uuid: str
+    since: str = ""
+    max_files: int = Field(default=25, ge=1, le=250)
+    verify_tls: bool = True
+
+    @field_validator("manager_url", "api_key", "endpoint_uuid")
+    @classmethod
+    def _validate_required_artifact_text(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Required field is missing")
+        return trimmed
+
+
+class OssecLiveIngestRequest(BaseModel):
+    file_path: str
+    poll_interval: float = Field(default=2.0, ge=0.5, le=60.0)
+    limit: int = Field(default=200, ge=1, le=2000)
+    start_at_end: bool = True
+
+    @field_validator("file_path")
+    @classmethod
+    def _validate_live_file_path(cls, value: str) -> str:
+        path = Path(value).expanduser()
+        if not str(path).strip():
+            raise ValueError("File path is required")
+        return str(path)
+
+
+class IncidentResponseOrchestrationRequest(BaseModel):
+    apply_actions: bool = False
+
+
+class IntegrationResponsePolicyRequest(BaseModel):
+    policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class WhidsSchedulerRequest(BaseModel):
+    manager_url: str
+    api_key: str
+    endpoint_uuid: str = ""
+    poll_interval: float = Field(default=300.0, ge=30.0, le=86400.0)
+    verify_tls: bool = True
+
+    @field_validator("manager_url", "api_key")
+    @classmethod
+    def _validate_scheduler_text(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Required field is missing")
+        return trimmed
+
+
+class WhidsIoCRequest(BaseModel):
+    manager_url: str
+    api_key: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    filters: dict[str, str] = Field(default_factory=dict)
+    verify_tls: bool = True
+
+    @field_validator("manager_url", "api_key")
+    @classmethod
+    def _validate_whids_ioc_text(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Required field is missing")
+        return trimmed
+
+
+class WhidsRulesRequest(BaseModel):
+    manager_url: str
+    api_key: str
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+    rule_name: str = ""
+    name_filter: str = ""
+    filters_only: bool = False
+    update_existing: bool = True
+    verify_tls: bool = True
+
+    @field_validator("manager_url", "api_key")
+    @classmethod
+    def _validate_whids_rules_text(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Required field is missing")
+        return trimmed
+
+
+class WhidsConfigRequest(BaseModel):
+    manager_url: str
+    api_key: str
+    endpoint_uuid: str
+    config_format: str = "json"
+    since: str = ""
+    until: str = ""
+    verify_tls: bool = True
+
+    @field_validator("manager_url", "api_key", "endpoint_uuid")
+    @classmethod
+    def _validate_whids_config_text(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Required field is missing")
+        return trimmed
+
+
+class MitreBundleLoadRequest(BaseModel):
+    file_path: str
+    source: str = "manual"
+
+    @field_validator("file_path")
+    @classmethod
+    def _validate_bundle_path(cls, value: str) -> str:
+        path = Path(value).expanduser()
+        if not str(path).strip():
+            raise ValueError("Bundle path is required")
+        return str(path)
+
+    @field_validator("source")
+    @classmethod
+    def _validate_bundle_source(cls, value: str) -> str:
+        trimmed = value.strip() or "manual"
+        if len(trimmed) > 40:
+            raise ValueError("source must be 40 characters or fewer")
+        return trimmed
+
+
+class NavigatorExportRequest(BaseModel):
+    incident_ids: list[str] = Field(default_factory=list)
+    case_id: int | None = None
+    layer_name: str = ""
+    description: str = ""
+    include_subtechniques: bool = True
+
+    @field_validator("incident_ids")
+    @classmethod
+    def _validate_incident_ids(cls, value: list[str]) -> list[str]:
+        return [_validated_incident_id(item) for item in value if _validated_incident_id(item)]
+
+    @field_validator("layer_name")
+    @classmethod
+    def _validate_layer_name(cls, value: str) -> str:
+        trimmed = value.strip()
+        if len(trimmed) > 120:
+            raise ValueError("layer_name must be 120 characters or fewer")
+        return trimmed
+
+    @field_validator("description")
+    @classmethod
+    def _validate_layer_description(cls, value: str) -> str:
+        trimmed = value.strip()
+        if len(trimmed) > 600:
+            raise ValueError("description must be 600 characters or fewer")
+        return trimmed
+
+
+class MitrePathRequest(BaseModel):
+    file_path: str
+
+    @field_validator("file_path")
+    @classmethod
+    def _validate_mitre_path(cls, value: str) -> str:
+        path = Path(value).expanduser()
+        if not str(path).strip():
+            raise ValueError("File path is required")
+        return str(path)
 
 
 class CaseCreateRequest(BaseModel):
@@ -697,6 +908,106 @@ def enterprise_policy() -> dict[str, Any]:
 @app.get("/enterprise/assets", dependencies=[Depends(require_analyst_or_admin)])
 def enterprise_assets() -> dict[str, Any]:
     return enterprise_service.assess_asset_criticality()
+
+
+@app.get("/enterprise/mitre/status", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_status() -> dict[str, Any]:
+    return mitre_service.status()
+
+
+@app.post("/enterprise/mitre/load-bundle", dependencies=[Depends(require_admin)])
+def enterprise_mitre_load_bundle(payload: MitreBundleLoadRequest) -> dict[str, Any]:
+    try:
+        return mitre_service.load_bundle(payload.file_path, source=payload.source)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/enterprise/mitre/summary", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_summary(limit: int = 50) -> dict[str, Any]:
+    try:
+        return mitre_service.enterprise_summary(limit=max(1, min(limit, 500)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/enterprise/mitre/discover", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_discover() -> list[dict[str, Any]]:
+    return mitre_service.discover_bundle_sources()
+
+
+@app.post("/enterprise/mitre/compare", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_compare(payload: MitrePathRequest) -> dict[str, Any]:
+    try:
+        return mitre_service.compare_bundle(payload.file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/enterprise/mitre/changelog", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_changelog(payload: MitrePathRequest) -> dict[str, Any]:
+    try:
+        return mitre_service.changelog_summary(payload.file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/enterprise/mitre/techniques/{attack_id}", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_technique(attack_id: str) -> dict[str, Any]:
+    try:
+        return mitre_service.technique_details(attack_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/enterprise/mitre/incidents/{incident_id}/coverage", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_incident_coverage(incident_id: str) -> dict[str, Any]:
+    try:
+        return mitre_service.incident_coverage(_validated_incident_id(incident_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/enterprise/cases/{case_id}/mitre", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_case_coverage(case_id: int) -> dict[str, Any]:
+    try:
+        return mitre_service.case_coverage(case_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/enterprise/mitre/navigator/export", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_export_navigator(payload: NavigatorExportRequest) -> dict[str, Any]:
+    try:
+        return mitre_service.export_navigator_layer(
+            incident_ids=payload.incident_ids,
+            case_id=payload.case_id,
+            layer_name=payload.layer_name,
+            description=payload.description,
+            include_subtechniques=payload.include_subtechniques,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/enterprise/mitre/workbench/export", dependencies=[Depends(require_analyst_or_admin)])
+def enterprise_mitre_export_workbench(payload: NavigatorExportRequest) -> dict[str, Any]:
+    try:
+        return mitre_service.workbench_export(incident_ids=payload.incident_ids, case_id=payload.case_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/enterprise/triage", dependencies=[Depends(require_analyst_or_admin)])
@@ -1943,6 +2254,252 @@ def list_telemetry_fabric_exports() -> list[dict[str, Any]]:
     finally:
         conn.close()
     return frame.fillna("").to_dict(orient="records")
+
+
+@app.post("/integrations/whids/import/file", dependencies=[Depends(require_admin)])
+def import_whids_file(payload: IntegrationFileImportRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.import_whids_file(payload.file_path, limit=payload.limit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/whids/import/manager", dependencies=[Depends(require_admin)])
+def import_whids_manager(payload: WhidsManagerImportRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.import_whids_manager(
+            payload.manager_url,
+            payload.api_key,
+            limit=payload.limit,
+            endpoint_uuid=payload.endpoint_uuid,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS manager request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/whids/reports", dependencies=[Depends(require_admin)])
+def sync_whids_reports(payload: WhidsManagerImportRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.sync_whids_reports(
+            payload.manager_url,
+            payload.api_key,
+            endpoint_uuid=payload.endpoint_uuid,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS reports request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/whids/artifacts", dependencies=[Depends(require_admin)])
+def download_whids_artifacts(payload: WhidsArtifactsRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.download_whids_artifacts(
+            payload.manager_url,
+            payload.api_key,
+            endpoint_uuid=payload.endpoint_uuid,
+            since=payload.since,
+            max_files=payload.max_files,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS artifacts request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/ossec/import/file", dependencies=[Depends(require_admin)])
+def import_ossec_file(payload: IntegrationFileImportRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.import_ossec_file(payload.file_path, limit=payload.limit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/ossec/live/start", dependencies=[Depends(require_admin)])
+def start_ossec_live_ingest(payload: OssecLiveIngestRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.start_ossec_live_ingest(
+            payload.file_path,
+            poll_interval=payload.poll_interval,
+            limit=payload.limit,
+            start_at_end=payload.start_at_end,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/ossec/live/stop", dependencies=[Depends(require_admin)])
+def stop_ossec_live_ingest() -> dict[str, Any]:
+    return hids_integration_service.stop_ossec_live_ingest()
+
+
+@app.get("/integrations/ossec/live/status", dependencies=[Depends(require_admin)])
+def ossec_live_status() -> dict[str, Any]:
+    return hids_integration_service.ossec_live_status()
+
+
+@app.get("/integrations/response-policy", dependencies=[Depends(require_admin)])
+def get_integration_response_policy() -> dict[str, Any]:
+    return hids_integration_service.get_response_policy()
+
+
+@app.post("/integrations/response-policy", dependencies=[Depends(require_admin)])
+def update_integration_response_policy(payload: IntegrationResponsePolicyRequest) -> dict[str, Any]:
+    return hids_integration_service.update_response_policy(payload.policy)
+
+
+@app.post("/integrations/incidents/{incident_id}/response", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
+def orchestrate_integration_incident_response(request: Request, incident_id: str, payload: IncidentResponseOrchestrationRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:incident:response")
+    try:
+        return hids_integration_service.orchestrate_incident_response(incident_id, apply_actions=payload.apply_actions)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/integrations/whids/iocs/query", dependencies=[Depends(require_admin)])
+def query_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.list_whids_iocs(
+            payload.manager_url,
+            payload.api_key,
+            filters=payload.filters,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS IoC query failed: {exc}") from exc
+
+
+@app.post("/integrations/whids/iocs/add", dependencies=[Depends(require_admin)])
+def add_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.add_whids_iocs(
+            payload.manager_url,
+            payload.api_key,
+            payload.items,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS IoC add failed: {exc}") from exc
+
+
+@app.post("/integrations/whids/iocs/delete", dependencies=[Depends(require_admin)])
+def delete_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.delete_whids_iocs(
+            payload.manager_url,
+            payload.api_key,
+            filters=payload.filters,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS IoC delete failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/whids/rules/query", dependencies=[Depends(require_admin)])
+def query_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.list_whids_rules(
+            payload.manager_url,
+            payload.api_key,
+            name=payload.name_filter,
+            filters_only=payload.filters_only,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS rules query failed: {exc}") from exc
+
+
+@app.post("/integrations/whids/rules/add", dependencies=[Depends(require_admin)])
+def add_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.add_whids_rules(
+            payload.manager_url,
+            payload.api_key,
+            payload.rules,
+            update_existing=payload.update_existing,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS rules add failed: {exc}") from exc
+
+
+@app.post("/integrations/whids/rules/delete", dependencies=[Depends(require_admin)])
+def delete_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.delete_whids_rules(
+            payload.manager_url,
+            payload.api_key,
+            rule_name=payload.rule_name,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS rules delete failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/integrations/whids/config", dependencies=[Depends(require_admin)])
+def get_whids_config(payload: WhidsConfigRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.get_whids_endpoint_config(
+            payload.manager_url,
+            payload.api_key,
+            endpoint_uuid=payload.endpoint_uuid,
+            config_format=payload.config_format,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS config query failed: {exc}") from exc
+
+
+@app.post("/integrations/whids/report-archive", dependencies=[Depends(require_admin)])
+def get_whids_report_archive(payload: WhidsConfigRequest) -> dict[str, Any]:
+    try:
+        return hids_integration_service.get_whids_report_archive(
+            payload.manager_url,
+            payload.api_key,
+            endpoint_uuid=payload.endpoint_uuid,
+            since=payload.since,
+            until=payload.until,
+            verify_tls=payload.verify_tls,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WHIDS report archive query failed: {exc}") from exc
+
+
+@app.post("/integrations/whids/scheduler/start", dependencies=[Depends(require_admin)])
+def start_whids_scheduler(payload: WhidsSchedulerRequest) -> dict[str, Any]:
+    return hids_integration_service.start_whids_scheduler(
+        payload.manager_url,
+        payload.api_key,
+        endpoint_uuid=payload.endpoint_uuid,
+        poll_interval=payload.poll_interval,
+        verify_tls=payload.verify_tls,
+    )
+
+
+@app.post("/integrations/whids/scheduler/stop", dependencies=[Depends(require_admin)])
+def stop_whids_scheduler() -> dict[str, Any]:
+    return hids_integration_service.stop_whids_scheduler()
+
+
+@app.get("/integrations/whids/scheduler/status", dependencies=[Depends(require_admin)])
+def whids_scheduler_status() -> dict[str, Any]:
+    return hids_integration_service.whids_scheduler_status()
 
 
 @app.get("/artifacts/{filename}")

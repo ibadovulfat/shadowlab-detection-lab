@@ -7,12 +7,14 @@ This folder contains the PySide6 desktop client for the local ShadowLab API.
 The desktop is the main operator console and currently exposes:
 
 - dashboards and overview telemetry views
+- WHIDS and HIDS integration workspaces
 - process investigation, deep hunt, and response workflows
 - persistence review and remediation controls
 - threat-intel lookups
 - network, hosts, graph, timeline, quarantine, history, and artifact views
 - deception and scenario workflows
 - enterprise case operations and investigation intelligence views
+- enterprise ATT&CK lifecycle, ATT&CK coverage, Navigator export, and Workbench export views
 - security-ops posture and reporting controls
 
 ## Enterprise Layout
@@ -30,11 +32,29 @@ The `Enterprise` tab is split into:
 - `Enterprise Intel`
   - critical assets
   - detection lifecycle
+  - ATT&CK coverage and bundle lifecycle
+  - case ATT&CK rollup
   - notes
   - stories
   - timeline
   - entity links
   - graph correlation
+
+ATT&CK-specific desktop actions now include:
+
+- `Load ATT&CK`
+- `ATT&CK Layer`
+- `Workbench`
+
+The enterprise ATT&CK panels show:
+
+- discovered bundle candidates
+- loaded bundle metadata
+- bundle diff summary
+- tactic heat and tactic progression
+- parent and sub-technique rollup
+- telemetry cue hotspots
+- case-level ATT&CK enrichment
 
 Large tabs use local scrolling instead of forcing the full window to grow beyond the screen.
 
@@ -53,6 +73,8 @@ The client:
 - shows role-aware actions
 - hides or disables unavailable controls
 - does not treat auth-disabled backends as implicit admin anymore
+- keeps `WHIDS` and `HIDS` controls locked for non-admin roles
+- still allows analysts to move into enterprise case work where capability policy permits it
 
 For local role-based testing, use:
 
@@ -93,3 +115,4 @@ Packaging assets:
 - [README.md](../README.md)
 - [docs/USAGE_GUIDE.md](../docs/USAGE_GUIDE.md)
 - [docs/PRODUCTION_RUNBOOK.md](../docs/PRODUCTION_RUNBOOK.md)
+- [docs/PLATFORM_GUIDE.md](../docs/PLATFORM_GUIDE.md)

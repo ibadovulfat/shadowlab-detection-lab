@@ -4,7 +4,7 @@
 
 **Created by [Ulfat Ibadov](https://www.linkedin.com/in/ibadovulfat/)**
 
-ShadowLab is an API-first Windows security operations and research platform. It combines host telemetry, process investigation, response controls, persistence review, threat-intelligence enrichment, deception tooling, and an enterprise investigation workspace in one local stack.
+ShadowLab is an API-first Windows security operations and research platform. It combines host telemetry, process investigation, response controls, persistence review, threat-intelligence enrichment, deception tooling, MITRE ATT&CK intelligence, and an enterprise investigation workspace in one local stack.
 
 ## What It Does
 
@@ -14,12 +14,16 @@ ShadowLab is an API-first Windows security operations and research platform. It 
 - supports role-based access with viewer, analyst, and admin scopes
 - provides a PySide6 desktop client for day-to-day operator workflows
 - adds enterprise case handling, assignments, tasks, notes, stories, approvals, reporting, graph correlation, and security-ops controls
+- integrates `WHIDS` and `OSSEC/HIDS` ingest, live validation, enterprise correlation, and policy-driven response workflows
+- adds enterprise-grade `MITRE ATT&CK` lifecycle, coverage, Navigator export, Workbench export, and technique-aware response mapping
 
 ## Current Desktop Surface
 
 Main desktop tabs:
 
 - `Dashboards`
+- `WHIDS`
+- `HIDS`
 - `Overview`
 - `Processes`
 - `Advanced Hunt`
@@ -75,6 +79,8 @@ Inside `Enterprise`, the workspace is split into:
 - graph and timeline correlation views
 - enterprise case workflow with boards, activity feed, assignments, tasks, notes, stories, saved views, pinning, scoped case graphs, executive investigation exports, and notification center
 - security-ops controls for integrity, observability, secrets, database readiness, retention, and telemetry-fabric operations
+- `WHIDS` manager/file ingest, reports, artifacts, scheduler, rule lifecycle, and IoC lifecycle
+- `OSSEC/HIDS` file ingest, live ingest, orchestration planning, and active-response validation support
 
 ## Architecture
 
@@ -171,10 +177,39 @@ Desktop behavior:
 
 - critical assets
 - detection lifecycle view
+- ATT&CK coverage, tactic heat, bundle lifecycle diff, and case ATT&CK rollup
 - notes and stories
 - case timeline
 - entity links
 - graph correlation
+
+## MITRE ATT&CK Workflow
+
+ShadowLab now treats ATT&CK as an enterprise workflow rather than a simple saved field.
+
+- load an ATT&CK STIX bundle from the desktop or API
+- review discovered bundles, version metadata, and bundle diff
+- enrich incidents with explicit and inferred ATT&CK techniques
+- review case-level tactic heat, sub-technique rollup, mitigations, and software overlap
+- export ATT&CK Navigator layers
+- export Workbench-oriented coverage bundles
+- feed mapped techniques into integration response policy
+
+Key MITRE routes:
+
+```text
+GET  /enterprise/mitre/status
+GET  /enterprise/mitre/discover
+POST /enterprise/mitre/load-bundle
+POST /enterprise/mitre/compare
+POST /enterprise/mitre/changelog
+GET  /enterprise/mitre/summary
+GET  /enterprise/mitre/techniques/{attack_id}
+GET  /enterprise/mitre/incidents/{incident_id}/coverage
+GET  /enterprise/cases/{case_id}/mitre
+POST /enterprise/mitre/navigator/export
+POST /enterprise/mitre/workbench/export
+```
 
 Current investigation APIs include:
 
@@ -207,6 +242,28 @@ Core endpoints:
 GET  /health
 GET  /auth/context
 POST /monitor/run
+POST /integrations/whids/import/file
+POST /integrations/whids/import/manager
+POST /integrations/whids/reports
+POST /integrations/whids/artifacts
+POST /integrations/ossec/import/file
+POST /integrations/ossec/live/start
+POST /integrations/ossec/live/stop
+GET  /integrations/ossec/live/status
+POST /integrations/incidents/{incident_id}/response
+POST /integrations/whids/iocs/query
+POST /integrations/whids/iocs/add
+POST /integrations/whids/iocs/delete
+POST /integrations/whids/rules/query
+POST /integrations/whids/rules/add
+POST /integrations/whids/rules/delete
+GET  /integrations/response-policy
+POST /integrations/response-policy
+POST /integrations/whids/config
+POST /integrations/whids/report-archive
+POST /integrations/whids/scheduler/start
+POST /integrations/whids/scheduler/stop
+GET  /integrations/whids/scheduler/status
 GET  /processes
 GET  /processes/{pid}
 GET  /processes/{pid}/tree
@@ -289,6 +346,20 @@ GET  /integrations/telemetry-fabric/exports
 - `admin` can perform protected operational actions when policy flags allow it
 - dangerous and destructive operations are additionally gated by feature flags and, in stricter policy modes, approvals
 - approval consumption is handled with a reserve/finalize flow to avoid one-time-use races
+- `WHIDS` scheduler runtime secrets are stored encrypted
+- `OSSEC` native active-response input is validated and executed without shell-style command composition
+
+## Validation
+
+Operational verification helpers shipped in the repository:
+
+- `python scripts/validate_deployment_runtime.py`
+- `python scripts/rbac_smoke_matrix.py`
+- `python scripts/perf_stability_probe.py`
+- `python scripts/smoke_test_live_integrations.py --base-url http://127.0.0.1:8000 --api-key <raw_admin_key>`
+- `powershell -ExecutionPolicy Bypass -File scripts\validate_ossec_active_response.ps1 -OssecHome C:\Users\ulfat\Documents\ossec-hids-main`
+
+These exist so the platform can be re-validated after changes instead of relying on ad hoc manual checking.
 
 ## Desktop Packaging
 

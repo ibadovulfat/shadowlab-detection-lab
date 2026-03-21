@@ -210,3 +210,4 @@ __marimo__/
 .DS_Store
 shadowlab.db
 shadowlab_out/
+shadowlab_quarantine/

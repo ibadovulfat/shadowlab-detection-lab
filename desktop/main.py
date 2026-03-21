@@ -166,6 +166,34 @@ class ShadowLabDesktop(QMainWindow):
         self.block_target = QLineEdit()
         self.block_gateway = QLineEdit()
         self.webhook_url = QLineEdit()
+        self.whids_manager_url = QLineEdit("https://localhost:1520")
+        self.whids_manager_api_key = QLineEdit()
+        self.whids_manager_api_key.setEchoMode(QLineEdit.Password)
+        self.whids_endpoint_uuid = QLineEdit()
+        self.whids_artifact_since = QLineEdit()
+        self.whids_artifact_limit = QSpinBox()
+        self.whids_artifact_limit.setRange(1, 250)
+        self.whids_artifact_limit.setValue(25)
+        self.whids_scheduler_interval = QDoubleSpinBox()
+        self.whids_scheduler_interval.setRange(30.0, 86400.0)
+        self.whids_scheduler_interval.setValue(300.0)
+        self.whids_ioc_payload = QTextEdit()
+        self.whids_ioc_payload.setPlaceholderText('[{"uuid":"...","guuid":"...","source":"ShadowLab","value":"bad.example","type":"domain"}]')
+        self.whids_rule_payload = QTextEdit()
+        self.whids_rule_payload.setPlaceholderText('[{"Name":"ShadowLabRule","Condition":"$a","Matches":["$a: Image ~= C:/Temp/evil.exe"],"Actions":["kill"]}]')
+        self.whids_rule_name = QLineEdit()
+        self.integration_policy_payload = QTextEdit()
+        self.integration_policy_payload.setPlaceholderText('{"providers":{"ossec":{"enabled":true}}}')
+        self.hids_incident_id = QLineEdit()
+        self.whids_verify_tls = QCheckBox("Verify TLS")
+        self.whids_verify_tls.setChecked(True)
+        self.whids_file_path = QLineEdit(str((Path(__file__).resolve().parent.parent / "shadowlab_out" / "whids-alerts.json")))
+        self.hids_file_path = QLineEdit(str((Path(__file__).resolve().parent.parent / "shadowlab_out" / "ossec-alerts.log")))
+        self.hids_live_interval = QDoubleSpinBox()
+        self.hids_live_interval.setRange(0.5, 60.0)
+        self.hids_live_interval.setValue(2.0)
+        self.hids_live_start_at_end = QCheckBox("Start At End")
+        self.hids_live_start_at_end.setChecked(True)
 
         ops_card = QFrame(); ops_card.setProperty("card", True); ops_card.setMinimumWidth(500)
         ops_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -279,6 +307,8 @@ class ShadowLabDesktop(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._scrollable_tab(self._dashboard_hub_tab()), "Dashboards")
+        self.tabs.addTab(self._scrollable_tab(self._whids_tab()), "WHIDS")
+        self.tabs.addTab(self._scrollable_tab(self._hids_tab()), "HIDS")
         self.tabs.addTab(self._scrollable_tab(self._overview_tab()), "Overview")
         self.tabs.addTab(self._scrollable_tab(self._process_tab(), allow_horizontal=True), "Processes")
         self.tabs.addTab(self._hunt_tab(), "Advanced Hunt")
@@ -359,6 +389,247 @@ class ShadowLabDesktop(QMainWindow):
         grid.setColumnStretch(1, 1)
 
         root.addLayout(grid)
+        return w
+
+    def _whids_tab(self) -> QWidget:
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(8, 8, 8, 8)
+        l.setSpacing(8)
+        self._tab_header(l, "WHIDS Integration", "Use WHIDS manager API or exported detection files to ingest official WHIDS detections into ShadowLab.")
+
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        manager_row = QWidget()
+        manager_layout = QHBoxLayout(manager_row)
+        manager_layout.setContentsMargins(0, 0, 0, 0)
+        manager_layout.setSpacing(8)
+        manager_import_btn = QPushButton("Pull WHIDS Manager")
+        manager_import_btn.clicked.connect(self.import_whids_manager)
+        self._bind_capability(manager_import_btn, "can_manage_integrations")
+        report_import_btn = QPushButton("Pull WHIDS Reports")
+        report_import_btn.clicked.connect(self.import_whids_reports)
+        self._bind_capability(report_import_btn, "can_manage_integrations")
+        artifact_import_btn = QPushButton("Pull WHIDS Artifacts")
+        artifact_import_btn.clicked.connect(self.import_whids_artifacts)
+        self._bind_capability(artifact_import_btn, "can_manage_integrations")
+        manager_refresh_btn = QPushButton("Refresh WHIDS")
+        manager_refresh_btn.clicked.connect(self.refresh_whids_workspace)
+        self._bind_capability(manager_refresh_btn, "can_manage_integrations")
+        query_iocs_btn = QPushButton("Query IoCs")
+        query_iocs_btn.clicked.connect(self.query_whids_iocs)
+        self._bind_capability(query_iocs_btn, "can_manage_integrations")
+        add_iocs_btn = QPushButton("Add IoCs")
+        add_iocs_btn.clicked.connect(self.add_whids_iocs)
+        self._bind_capability(add_iocs_btn, "can_manage_integrations")
+        delete_iocs_btn = QPushButton("Delete IoCs")
+        delete_iocs_btn.clicked.connect(self.delete_whids_iocs)
+        self._bind_capability(delete_iocs_btn, "can_manage_integrations")
+        query_rules_btn = QPushButton("Query Rules")
+        query_rules_btn.clicked.connect(self.query_whids_rules)
+        self._bind_capability(query_rules_btn, "can_manage_integrations")
+        add_rules_btn = QPushButton("Add Rules")
+        add_rules_btn.clicked.connect(self.add_whids_rules)
+        self._bind_capability(add_rules_btn, "can_manage_integrations")
+        delete_rules_btn = QPushButton("Delete Rule")
+        delete_rules_btn.clicked.connect(self.delete_whids_rules)
+        self._bind_capability(delete_rules_btn, "can_manage_integrations")
+        scheduler_start_btn = QPushButton("Start Scheduler")
+        scheduler_start_btn.clicked.connect(self.start_whids_scheduler)
+        self._bind_capability(scheduler_start_btn, "can_manage_integrations")
+        scheduler_stop_btn = QPushButton("Stop Scheduler")
+        scheduler_stop_btn.clicked.connect(self.stop_whids_scheduler)
+        self._bind_capability(scheduler_stop_btn, "can_manage_integrations")
+        scheduler_status_btn = QPushButton("Scheduler Status")
+        scheduler_status_btn.clicked.connect(self.refresh_whids_scheduler_status)
+        self._bind_capability(scheduler_status_btn, "can_manage_integrations")
+        load_policy_btn = QPushButton("Load Policy")
+        load_policy_btn.clicked.connect(self.load_integration_policy)
+        self._bind_capability(load_policy_btn, "can_manage_integrations")
+        save_policy_btn = QPushButton("Save Policy")
+        save_policy_btn.clicked.connect(self.save_integration_policy)
+        self._bind_capability(save_policy_btn, "can_manage_integrations")
+        manager_layout.addWidget(self._field_block("WHIDS Manager URL", self.whids_manager_url), 1)
+        manager_layout.addWidget(self._field_block("X-Api-Key", self.whids_manager_api_key), 1)
+        manager_layout.addWidget(self._field_block("Endpoint UUID (optional)", self.whids_endpoint_uuid), 1)
+        manager_layout.addWidget(self.whids_verify_tls)
+        manager_layout.addWidget(manager_import_btn)
+        manager_layout.addWidget(report_import_btn)
+        manager_layout.addWidget(artifact_import_btn)
+        manager_layout.addWidget(manager_refresh_btn)
+
+        file_row = QWidget()
+        top_row = QHBoxLayout(file_row)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+        import_btn = QPushButton("Import WHIDS File")
+        import_btn.clicked.connect(self.import_whids_file)
+        self._bind_capability(import_btn, "can_manage_integrations")
+        top_row.addWidget(self._field_block("WHIDS Export File", self.whids_file_path), 1)
+        top_row.addWidget(self._field_block("Artifacts Since (RFC3339)", self.whids_artifact_since), 1)
+        top_row.addWidget(self._field_block("Artifact Limit", self.whids_artifact_limit))
+        top_row.addWidget(self._field_block("Scheduler Poll (s)", self.whids_scheduler_interval))
+        top_row.addWidget(import_btn)
+        top_layout.addWidget(manager_row)
+        top_layout.addWidget(file_row)
+
+        lifecycle_row = QWidget()
+        lifecycle_layout = QHBoxLayout(lifecycle_row)
+        lifecycle_layout.setContentsMargins(0, 0, 0, 0)
+        lifecycle_layout.setSpacing(8)
+        lifecycle_layout.addWidget(self._field_block("WHIDS IoC JSON", self.whids_ioc_payload), 1)
+        lifecycle_layout.addWidget(self._field_block("WHIDS Rule JSON", self.whids_rule_payload), 1)
+        action_col = QWidget()
+        action_layout = QVBoxLayout(action_col)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(6)
+        action_layout.addWidget(self._field_block("Rule Name / Filter", self.whids_rule_name))
+        for btn in [query_iocs_btn, add_iocs_btn, delete_iocs_btn, query_rules_btn, add_rules_btn, delete_rules_btn]:
+            action_layout.addWidget(btn)
+        for btn in [scheduler_start_btn, scheduler_stop_btn, scheduler_status_btn]:
+            action_layout.addWidget(btn)
+        action_layout.addStretch(1)
+        lifecycle_layout.addWidget(action_col)
+        top_layout.addWidget(lifecycle_row)
+
+        policy_row = QWidget()
+        policy_layout = QHBoxLayout(policy_row)
+        policy_layout.setContentsMargins(0, 0, 0, 0)
+        policy_layout.setSpacing(8)
+        policy_layout.addWidget(self._field_block("Response Policy JSON", self.integration_policy_payload), 1)
+        policy_btn_col = QWidget()
+        policy_btn_layout = QVBoxLayout(policy_btn_col)
+        policy_btn_layout.setContentsMargins(0, 0, 0, 0)
+        policy_btn_layout.setSpacing(6)
+        policy_btn_layout.addWidget(load_policy_btn)
+        policy_btn_layout.addWidget(save_policy_btn)
+        policy_btn_layout.addStretch(1)
+        policy_layout.addWidget(policy_btn_col)
+        top_layout.addWidget(policy_row)
+
+        self.whids_summary = QTextBrowser()
+        self.whids_summary.setProperty("role", "brief")
+        self.whids_summary.setMinimumHeight(120)
+        self.whids_health_badge = QLabel("WHIDS: unknown")
+        self.whids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+        self.whids_table = QTableWidget(0, 5)
+        self.whids_table.setHorizontalHeaderLabels(["Created", "Type", "Target", "Status", "Detail"])
+        self.whids_table.itemSelectionChanged.connect(self.show_selected_whids_export)
+        self._style_table(self.whids_table)
+        self.whids_detail = QTextEdit()
+        self.whids_detail.setReadOnly(True)
+        self.whids_detail.setProperty("role", "brief")
+
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(self._panel_card("WHIDS Export History", self.whids_table, lambda: self._open_panel_window("WHIDS Export History", self._clone_table(self.whids_table))))
+        split.addWidget(self._panel_card("WHIDS Detail", self.whids_detail, lambda: self._open_panel_window("WHIDS Detail", self._clone_text_view(self.whids_detail))))
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+
+        whids_actions = QWidget()
+        whids_actions_row = QHBoxLayout(whids_actions)
+        whids_actions_row.setContentsMargins(0, 0, 0, 0)
+        whids_actions_row.setSpacing(8)
+        open_whids_target_btn = QPushButton("Open Selected Target")
+        open_whids_target_btn.clicked.connect(self.open_selected_whids_target)
+        self._bind_capability(open_whids_target_btn, "can_manage_integrations")
+        open_whids_case_btn = QPushButton("Open Enterprise Case")
+        open_whids_case_btn.clicked.connect(lambda: self.open_enterprise_case_for_incident(prefix="WHIDS-"))
+        self._bind_capability(open_whids_case_btn, "can_manage_incidents")
+        whids_actions_row.addWidget(self.whids_health_badge)
+        whids_actions_row.addWidget(open_whids_target_btn)
+        whids_actions_row.addWidget(open_whids_case_btn)
+        whids_actions_row.addStretch(1)
+        l.addWidget(self._panel_card("WHIDS Summary", self.whids_summary, lambda: self._open_panel_window("WHIDS Summary", self._clone_text_view(self.whids_summary))))
+        l.addWidget(self._panel_card("WHIDS Status", whids_actions, lambda: self._open_panel_window("WHIDS Status", QLabel("Use WHIDS status controls in the main workspace."))))
+        l.addWidget(self._panel_card("WHIDS Controls", top, lambda: self._open_panel_window("WHIDS Controls", QLabel("Use the main WHIDS tab to import detections."))))
+        l.addWidget(split, 1)
+        return w
+
+    def _hids_tab(self) -> QWidget:
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(8, 8, 8, 8)
+        l.setSpacing(8)
+        self._tab_header(l, "HIDS Integration", "Import OSSEC or other HIDS alert files and inspect the normalized ShadowLab ingest history.")
+
+        top = QWidget()
+        top_row = QHBoxLayout(top)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+        import_btn = QPushButton("Import HIDS File")
+        import_btn.clicked.connect(self.import_hids_file)
+        self._bind_capability(import_btn, "can_manage_integrations")
+        plan_response_btn = QPushButton("Plan Response")
+        plan_response_btn.clicked.connect(lambda: self.orchestrate_hids_response(False))
+        self._bind_capability(plan_response_btn, "can_manage_integrations")
+        apply_response_btn = QPushButton("Apply Response")
+        apply_response_btn.clicked.connect(lambda: self.orchestrate_hids_response(True))
+        self._bind_capability(apply_response_btn, "can_manage_integrations")
+        live_start_btn = QPushButton("Start Live Ingest")
+        live_start_btn.clicked.connect(self.start_hids_live_ingest)
+        self._bind_capability(live_start_btn, "can_manage_integrations")
+        live_stop_btn = QPushButton("Stop Live Ingest")
+        live_stop_btn.clicked.connect(self.stop_hids_live_ingest)
+        self._bind_capability(live_stop_btn, "can_manage_integrations")
+        live_status_btn = QPushButton("Live Status")
+        live_status_btn.clicked.connect(self.refresh_hids_live_status)
+        self._bind_capability(live_status_btn, "can_manage_integrations")
+        refresh_btn = QPushButton("Refresh HIDS")
+        refresh_btn.clicked.connect(self.refresh_hids_workspace)
+        self._bind_capability(refresh_btn, "can_manage_integrations")
+        top_row.addWidget(self._field_block("OSSEC / HIDS Alert File", self.hids_file_path), 1)
+        top_row.addWidget(self._field_block("Incident ID", self.hids_incident_id), 1)
+        top_row.addWidget(self._field_block("Live Poll (s)", self.hids_live_interval))
+        top_row.addWidget(self.hids_live_start_at_end)
+        top_row.addWidget(import_btn)
+        top_row.addWidget(plan_response_btn)
+        top_row.addWidget(apply_response_btn)
+        top_row.addWidget(live_start_btn)
+        top_row.addWidget(live_stop_btn)
+        top_row.addWidget(live_status_btn)
+        top_row.addWidget(refresh_btn)
+
+        self.hids_summary = QTextBrowser()
+        self.hids_summary.setProperty("role", "brief")
+        self.hids_summary.setMinimumHeight(120)
+        self.hids_health_badge = QLabel("HIDS: unknown")
+        self.hids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+        self.hids_table = QTableWidget(0, 5)
+        self.hids_table.setHorizontalHeaderLabels(["Created", "Type", "Target", "Status", "Detail"])
+        self.hids_table.itemSelectionChanged.connect(self.show_selected_hids_export)
+        self._style_table(self.hids_table)
+        self.hids_detail = QTextEdit()
+        self.hids_detail.setReadOnly(True)
+        self.hids_detail.setProperty("role", "brief")
+
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(self._panel_card("HIDS Export History", self.hids_table, lambda: self._open_panel_window("HIDS Export History", self._clone_table(self.hids_table))))
+        split.addWidget(self._panel_card("HIDS Detail", self.hids_detail, lambda: self._open_panel_window("HIDS Detail", self._clone_text_view(self.hids_detail))))
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+
+        hids_actions = QWidget()
+        hids_actions_row = QHBoxLayout(hids_actions)
+        hids_actions_row.setContentsMargins(0, 0, 0, 0)
+        hids_actions_row.setSpacing(8)
+        open_hids_target_btn = QPushButton("Open Selected Target")
+        open_hids_target_btn.clicked.connect(self.open_selected_hids_target)
+        self._bind_capability(open_hids_target_btn, "can_manage_integrations")
+        open_hids_case_btn = QPushButton("Open Enterprise Case")
+        open_hids_case_btn.clicked.connect(lambda: self.open_enterprise_case_for_incident(prefix="OSSEC-"))
+        self._bind_capability(open_hids_case_btn, "can_manage_incidents")
+        hids_actions_row.addWidget(self.hids_health_badge)
+        hids_actions_row.addWidget(open_hids_target_btn)
+        hids_actions_row.addWidget(open_hids_case_btn)
+        hids_actions_row.addStretch(1)
+        l.addWidget(self._panel_card("HIDS Summary", self.hids_summary, lambda: self._open_panel_window("HIDS Summary", self._clone_text_view(self.hids_summary))))
+        l.addWidget(self._panel_card("HIDS Status", hids_actions, lambda: self._open_panel_window("HIDS Status", QLabel("Use HIDS status controls in the main workspace."))))
+        l.addWidget(self._panel_card("HIDS Controls", top, lambda: self._open_panel_window("HIDS Controls", QLabel("Use the main HIDS tab to import detections."))))
+        l.addWidget(split, 1)
         return w
 
     def _panel_card(self, title: str, content: QWidget, expand_fn) -> QWidget:
@@ -1051,6 +1322,8 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_case_owner = QLineEdit()
         self.enterprise_case_owner.setPlaceholderText("Owner")
         self.enterprise_case_priority = QComboBox(); self.enterprise_case_priority.addItems(["low", "medium", "high", "critical"])
+        self.enterprise_mitre_bundle_path = QLineEdit(str(Path("C:/Users/ulfat/Documents/mitreattack-python-main/tests/resources/enterprise-bundle.json")))
+        self.enterprise_mitre_bundle_path.setPlaceholderText("ATT&CK STIX bundle path")
         self.enterprise_replay_path = QLineEdit(str((Path(__file__).resolve().parent.parent / "shadowlab_out" / "incident_bundle.json")))
         self.enterprise_network_range = QLineEdit("127.0.0.1")
         refresh_btn = self._enterprise_action_button("Refresh", self.refresh_enterprise_workspace, "can_run_hunt")
@@ -1061,11 +1334,14 @@ class ShadowLabDesktop(QMainWindow):
         graph_btn = self._enterprise_action_button("Correlation", self.load_enterprise_case_graph, "can_run_hunt")
         board_btn = self._enterprise_action_button("Case Board", self.load_selected_case_board, "can_manage_incidents")
         export_case_btn = self._enterprise_action_button("Export Report", self.export_selected_case_report, "can_manage_integrations")
+        export_mitre_btn = self._enterprise_action_button("ATT&CK Layer", self.export_enterprise_mitre_layer, "can_run_hunt")
+        export_workbench_btn = self._enterprise_action_button("Workbench", self.export_enterprise_mitre_workbench, "can_run_hunt")
         approval_btn = self._enterprise_action_button("Approval", self.request_enterprise_approval, "can_manage_incidents")
         web_btn = self._enterprise_action_button("Web Surface", self.run_web_inspection, "can_run_hunt")
         net_btn = self._enterprise_action_button("Network", self.run_enterprise_network_assessment, "can_run_hunt")
         replay_btn = self._enterprise_action_button("Replay", self.run_purple_replay, "can_run_hunt")
         gaps_btn = self._enterprise_action_button("Gaps", self.load_telemetry_gaps, "can_run_hunt")
+        load_mitre_btn = self._enterprise_action_button("Load ATT&CK", self.load_enterprise_mitre_bundle, "can_manage_integrations")
         add_btn = self._enterprise_menu_button(
             "Add",
             [
@@ -1086,14 +1362,14 @@ class ShadowLabDesktop(QMainWindow):
         primary_layout = QHBoxLayout(primary_row)
         primary_layout.setContentsMargins(0, 0, 0, 0)
         primary_layout.setSpacing(8)
-        for widget in [refresh_btn, create_case_btn, add_btn, assign_btn, board_btn, graph_btn, export_case_btn]:
+        for widget in [refresh_btn, create_case_btn, add_btn, assign_btn, board_btn, graph_btn, export_case_btn, export_mitre_btn, export_workbench_btn]:
             primary_layout.addWidget(widget)
         primary_layout.addStretch(1)
         secondary_row = QWidget()
         secondary_layout = QHBoxLayout(secondary_row)
         secondary_layout.setContentsMargins(0, 0, 0, 0)
         secondary_layout.setSpacing(8)
-        for widget in [update_task_btn, mark_done_btn, approval_btn, web_btn, net_btn, replay_btn, gaps_btn]:
+        for widget in [update_task_btn, mark_done_btn, approval_btn, web_btn, net_btn, replay_btn, gaps_btn, load_mitre_btn, self.enterprise_mitre_bundle_path]:
             secondary_layout.addWidget(widget)
         secondary_layout.addStretch(1)
         cr.addWidget(fields_row)
@@ -1159,6 +1435,8 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_case_timeline = QTableWidget(0, 4); self.enterprise_case_timeline.setHorizontalHeaderLabels(["Time", "Kind", "Severity", "Title"]); self._style_table(self.enterprise_case_timeline); self.enterprise_case_timeline.itemSelectionChanged.connect(self.show_selected_enterprise_timeline)
         self.enterprise_entity_links = QTableWidget(0, 4); self.enterprise_entity_links.setHorizontalHeaderLabels(["Entity", "Kind", "Evidence", "Examples"]); self._style_table(self.enterprise_entity_links); self.enterprise_entity_links.itemSelectionChanged.connect(self.show_selected_enterprise_link)
         self.enterprise_graph_summary = QTextBrowser(); self.enterprise_graph_summary.setProperty("role", "brief"); self.enterprise_graph_summary.setMinimumHeight(160)
+        self.enterprise_mitre_summary = QTextBrowser(); self.enterprise_mitre_summary.setProperty("role", "brief"); self.enterprise_mitre_summary.setMinimumHeight(160)
+        self.enterprise_case_mitre = QTextBrowser(); self.enterprise_case_mitre.setProperty("role", "brief"); self.enterprise_case_mitre.setMinimumHeight(160)
         self.enterprise_graph_focus = QTableWidget(0, 4); self.enterprise_graph_focus.setHorizontalHeaderLabels(["Process", "PID", "Risk", "Signature"]); self._style_table(self.enterprise_graph_focus)
         self.enterprise_assignments_table = QTableWidget(0, 4); self.enterprise_assignments_table.setHorizontalHeaderLabels(["Analyst", "Role", "Status", "Assigned By"]); self._style_table(self.enterprise_assignments_table); self.enterprise_assignments_table.itemSelectionChanged.connect(self.show_selected_enterprise_assignment)
         self.enterprise_tasks_table = QTableWidget(0, 4); self.enterprise_tasks_table.setHorizontalHeaderLabels(["Title", "Status", "Priority", "Assigned"]); self._style_table(self.enterprise_tasks_table); self.enterprise_tasks_table.itemSelectionChanged.connect(self.show_selected_enterprise_task); self.enterprise_tasks_table.itemChanged.connect(self._inline_update_enterprise_task)
@@ -1185,11 +1463,13 @@ class ShadowLabDesktop(QMainWindow):
         intel_left_layout.setSpacing(8)
         intel_left_layout.addWidget(self._panel_card("Critical Assets", self.enterprise_assets_table, lambda: self._open_panel_window("Enterprise Assets", self._clone_table(self.enterprise_assets_table))))
         intel_left_layout.addWidget(self._panel_card("Detection Lifecycle", self.enterprise_detections_table, lambda: self._open_panel_window("Enterprise Detections", self._clone_table(self.enterprise_detections_table))))
+        intel_left_layout.addWidget(self._panel_card("ATT&CK Coverage", self.enterprise_mitre_summary, lambda: self._open_panel_window("ATT&CK Coverage", self._clone_text_view(self.enterprise_mitre_summary))))
         intel_left_layout.addWidget(self._panel_card("Case Timeline", self.enterprise_case_timeline, lambda: self._open_panel_window("Case Timeline", self._clone_table(self.enterprise_case_timeline))))
         intel_left_layout.addWidget(self._panel_card("Entity Links", self.enterprise_entity_links, lambda: self._open_panel_window("Entity Links", self._clone_table(self.enterprise_entity_links))))
         intel_right = QWidget(); intel_right_layout = QVBoxLayout(intel_right)
         intel_right_layout.setContentsMargins(0, 0, 0, 0)
         intel_right_layout.setSpacing(8)
+        intel_right_layout.addWidget(self._panel_card("Case ATT&CK", self.enterprise_case_mitre, lambda: self._open_panel_window("Case ATT&CK", self._clone_text_view(self.enterprise_case_mitre))))
         intel_right_layout.addWidget(self._panel_card("Graph Correlation", self.enterprise_graph_summary, lambda: self._open_panel_window("Graph Correlation", self._clone_text_view(self.enterprise_graph_summary))))
         intel_right_layout.addWidget(self._panel_card("Graph Focus Processes", self.enterprise_graph_focus, lambda: self._open_panel_window("Graph Focus Processes", self._clone_table(self.enterprise_graph_focus))))
         intel_right_layout.addWidget(self._panel_card("Investigation Notes", self.enterprise_notes_table, lambda: self._open_panel_window("Investigation Notes", self._clone_table(self.enterprise_notes_table))))
@@ -1526,6 +1806,10 @@ class ShadowLabDesktop(QMainWindow):
                 self.load_selected_case_board()
             elif self.enterprise_loaded_once:
                 self.refresh_enterprise_workspace()
+        elif tab_name == "WHIDS" and self.auth_context.get("capabilities", {}).get("can_manage_integrations", False):
+            self.refresh_whids_workspace()
+        elif tab_name == "HIDS" and self.auth_context.get("capabilities", {}).get("can_manage_integrations", False):
+            self.refresh_hids_workspace()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1553,6 +1837,534 @@ class ShadowLabDesktop(QMainWindow):
 
     def _show_json(self, widget: QTextEdit, payload) -> None:
         widget.setPlainText(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    def _switch_to_tab(self, tab_name: str) -> None:
+        wanted = tab_name.strip().lower()
+        for idx in range(self.tabs.count()):
+            if self.tabs.tabText(idx).strip().lower() == wanted:
+                self.tabs.setCurrentIndex(idx)
+                return
+
+    def _integration_rows(self, integration_name: str) -> list[dict]:
+        exports = self._get("/integrations/telemetry-fabric/exports", timeout=30).json()
+        return [
+            item for item in exports
+            if str(item.get("integration_name", "")).strip().lower() == integration_name.strip().lower()
+        ]
+
+    def _incident_rows_for_prefix(self, prefix: str) -> list[dict]:
+        incidents = self._get("/history/incidents", timeout=30).json()
+        normalized_prefix = prefix.strip().upper()
+        return [
+            item for item in incidents
+            if str(item.get("incident_id", "")).strip().upper().startswith(normalized_prefix)
+        ]
+
+    def refresh_whids_workspace(self) -> None:
+        if not self.auth_context.get("capabilities", {}).get("can_manage_integrations", False):
+            self.whids_table.setRowCount(0)
+            self.whids_summary.setHtml(
+                "<h3>WHIDS Integration</h3>"
+                "<p>Admin access is required for manager sync, reports, artifacts, rules, IoCs, and scheduler controls.</p>"
+            )
+            self.whids_health_badge.setText("WHIDS: locked")
+            self.whids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+            self.whids_detail.setPlainText("WHIDS integration workspace is locked for the current role.")
+            return
+        try:
+            exports = self._integration_rows("whids")
+            incidents = self._incident_rows_for_prefix("WHIDS-")
+            scheduler = self._get("/integrations/whids/scheduler/status", timeout=15).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS refresh failed", exc)
+            return
+        dedupe_skips = len([item for item in exports if str(item.get("export_type", "")) == "dedupe_skip"])
+        self.whids_table.setRowCount(len(exports))
+        for r, item in enumerate(exports):
+            values = [item.get("created_at", ""), item.get("export_type", ""), item.get("target", ""), item.get("status", ""), item.get("detail", "")]
+            for c, value in enumerate(values):
+                self.whids_table.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.whids_table, r, self._severity_color("high" if str(item.get("status", "")).lower() not in {"success", "ok"} else "low"))
+        self.whids_summary.setHtml(
+            "<h3>WHIDS Import Status</h3>"
+            f"<p><b>Imports logged:</b> {len(exports)}<br>"
+            f"<b>WHIDS incidents:</b> {len(incidents)}<br>"
+            f"<b>Manager:</b> {html.escape(self.whids_manager_url.text().strip())}<br>"
+            f"<b>Current file:</b> {html.escape(self.whids_file_path.text().strip())}<br>"
+            f"<b>Endpoint UUID:</b> {html.escape(self.whids_endpoint_uuid.text().strip() or 'all endpoints')}<br>"
+            f"<b>Artifacts since:</b> {html.escape(self.whids_artifact_since.text().strip() or 'not set')}<br>"
+            f"<b>Scheduler:</b> {html.escape('running' if scheduler.get('running') else 'stopped')}<br>"
+            f"<b>Dedupe skips:</b> {dedupe_skips}</p>"
+        )
+        latest_status = str(exports[0].get("status", "")) if exports else "idle"
+        scheduler_running = bool(scheduler.get("running"))
+        latest_color = "#2f9e67" if latest_status.lower() in {"success", "ok"} and not scheduler.get("last_error") else "#d64550" if exports and latest_status.lower() not in {"success", "ok"} or scheduler.get("last_error") else "#4a5568"
+        self.whids_health_badge.setText(f"WHIDS: {latest_status or 'idle'} | scheduler={'on' if scheduler_running else 'off'}")
+        self.whids_health_badge.setStyleSheet(f"background:{latest_color};color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+        if exports:
+            self.whids_detail.setPlainText(json.dumps(exports[0], indent=2, ensure_ascii=False))
+        else:
+            self.whids_detail.setPlainText("No WHIDS integration exports yet.")
+
+    def refresh_hids_workspace(self) -> None:
+        if not self.auth_context.get("capabilities", {}).get("can_manage_integrations", False):
+            self.hids_table.setRowCount(0)
+            self.hids_summary.setHtml(
+                "<h3>HIDS Integration</h3>"
+                "<p>Admin access is required for OSSEC live ingest, orchestration, and provider-native response controls.</p>"
+            )
+            self.hids_health_badge.setText("HIDS: locked")
+            self.hids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+            self.hids_detail.setPlainText("HIDS integration workspace is locked for the current role.")
+            return
+        try:
+            exports = self._integration_rows("ossec")
+            incidents = self._incident_rows_for_prefix("OSSEC-")
+            live_status = self._get("/integrations/ossec/live/status", timeout=15).json()
+        except Exception as exc:
+            self._show_error(self.hids_detail, "HIDS refresh failed", exc)
+            return
+        dedupe_skips = len([item for item in exports if str(item.get("export_type", "")) == "dedupe_skip"])
+        self.hids_table.setRowCount(len(exports))
+        for r, item in enumerate(exports):
+            values = [item.get("created_at", ""), item.get("export_type", ""), item.get("target", ""), item.get("status", ""), item.get("detail", "")]
+            for c, value in enumerate(values):
+                self.hids_table.setItem(r, c, QTableWidgetItem(str(value)))
+            self._paint_row(self.hids_table, r, self._severity_color("high" if str(item.get("status", "")).lower() not in {"success", "ok"} else "low"))
+        self.hids_summary.setHtml(
+            "<h3>HIDS Import Status</h3>"
+            f"<p><b>Imports logged:</b> {len(exports)}<br>"
+            f"<b>OSSEC incidents:</b> {len(incidents)}<br>"
+            f"<b>Current file:</b> {html.escape(self.hids_file_path.text().strip())}<br>"
+            f"<b>Live ingest:</b> {html.escape('running' if live_status.get('running') else 'stopped')}<br>"
+            f"<b>Imported live:</b> {html.escape(str(live_status.get('total_imported', 0)))}<br>"
+            f"<b>Last error:</b> {html.escape(str(live_status.get('last_error', '') or 'none'))}<br>"
+            f"<b>Dedupe skips:</b> {dedupe_skips}</p>"
+        )
+        live_color = "#2f9e67" if live_status.get("running") and not live_status.get("last_error") else "#d64550" if live_status.get("last_error") else "#4a5568"
+        live_label = "running" if live_status.get("running") else "stopped"
+        self.hids_health_badge.setText(f"HIDS: {live_label}")
+        self.hids_health_badge.setStyleSheet(f"background:{live_color};color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+        if exports:
+            self.hids_detail.setPlainText(json.dumps(exports[0], indent=2, ensure_ascii=False))
+        else:
+            self.hids_detail.setPlainText("No HIDS integration exports yet.")
+
+    def import_whids_file(self) -> None:
+        path = self.whids_file_path.text().strip()
+        if not path:
+            self.statusBar().showMessage("Provide a WHIDS alert file path first")
+            return
+        try:
+            result = self._post("/integrations/whids/import/file", json={"file_path": path, "limit": 500}, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS import failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+        self.refresh_hosts()
+        self.refresh_history()
+        self._switch_to_tab("WHIDS")
+
+    def import_whids_manager(self) -> None:
+        manager_url = self.whids_manager_url.text().strip()
+        api_key = self.whids_manager_api_key.text().strip()
+        endpoint_uuid = self.whids_endpoint_uuid.text().strip()
+        if not manager_url or not api_key:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        payload = {
+            "manager_url": manager_url,
+            "api_key": api_key,
+            "limit": 500,
+            "endpoint_uuid": endpoint_uuid,
+            "verify_tls": self.whids_verify_tls.isChecked(),
+        }
+        try:
+            result = self._post("/integrations/whids/import/manager", json=payload, timeout=120).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS manager import failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+        self.refresh_hosts()
+        self.refresh_history()
+        self._switch_to_tab("WHIDS")
+
+    def import_whids_reports(self) -> None:
+        manager_url = self.whids_manager_url.text().strip()
+        api_key = self.whids_manager_api_key.text().strip()
+        if not manager_url or not api_key:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        payload = {
+            "manager_url": manager_url,
+            "api_key": api_key,
+            "limit": 500,
+            "endpoint_uuid": self.whids_endpoint_uuid.text().strip(),
+            "verify_tls": self.whids_verify_tls.isChecked(),
+        }
+        try:
+            result = self._post("/integrations/whids/reports", json=payload, timeout=120).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS report sync failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+        self.refresh_history()
+        self.refresh_artifacts()
+        self._switch_to_tab("WHIDS")
+
+    def import_whids_artifacts(self) -> None:
+        manager_url = self.whids_manager_url.text().strip()
+        api_key = self.whids_manager_api_key.text().strip()
+        endpoint_uuid = self.whids_endpoint_uuid.text().strip()
+        if not manager_url or not api_key or not endpoint_uuid:
+            self.statusBar().showMessage("Provide WHIDS manager URL, X-Api-Key and Endpoint UUID first")
+            return
+        payload = {
+            "manager_url": manager_url,
+            "api_key": api_key,
+            "endpoint_uuid": endpoint_uuid,
+            "since": self.whids_artifact_since.text().strip(),
+            "max_files": self.whids_artifact_limit.value(),
+            "verify_tls": self.whids_verify_tls.isChecked(),
+        }
+        try:
+            result = self._post("/integrations/whids/artifacts", json=payload, timeout=180).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS artifact sync failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+        self.refresh_history()
+        self.refresh_artifacts()
+        self._switch_to_tab("WHIDS")
+
+    def import_hids_file(self) -> None:
+        path = self.hids_file_path.text().strip()
+        if not path:
+            self.statusBar().showMessage("Provide an OSSEC/HIDS alert file path first")
+            return
+        try:
+            result = self._post("/integrations/ossec/import/file", json={"file_path": path, "limit": 500}, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.hids_detail, "HIDS import failed", exc)
+            return
+        self._show_json(self.hids_detail, result)
+        self.refresh_hids_workspace()
+        self.refresh_hosts()
+        self.refresh_history()
+        self._switch_to_tab("HIDS")
+
+    def orchestrate_hids_response(self, apply_actions: bool) -> None:
+        incident_id = self.hids_incident_id.text().strip()
+        if not incident_id:
+            row = self.hids_table.currentRow()
+            if row >= 0:
+                current_detail = self.hids_detail.toPlainText().strip()
+                try:
+                    payload = json.loads(current_detail)
+                    incident_id = str(payload.get("incident_id", "")).strip()
+                except Exception:
+                    incident_id = ""
+        if not incident_id:
+            incident_id, ok = QInputDialog.getText(self, "Incident Response", "Incident ID:")
+            if not ok or not incident_id.strip():
+                self.statusBar().showMessage("Provide an incident ID first")
+                return
+            incident_id = incident_id.strip()
+        try:
+            result = self._post(
+                f"/integrations/incidents/{incident_id}/response",
+                json={"apply_actions": apply_actions},
+                timeout=120,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.hids_detail, "HIDS response orchestration failed", exc)
+            return
+        self.hids_incident_id.setText(incident_id)
+        self._show_json(self.hids_detail, result)
+        self.refresh_history()
+        self.refresh_hids_workspace()
+        self._switch_to_tab("HIDS")
+
+    def _whids_manager_payload_base(self) -> dict:
+        return {
+            "manager_url": self.whids_manager_url.text().strip(),
+            "api_key": self.whids_manager_api_key.text().strip(),
+            "verify_tls": self.whids_verify_tls.isChecked(),
+        }
+
+    def load_integration_policy(self) -> None:
+        try:
+            result = self._get("/integrations/response-policy", timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "Integration policy load failed", exc)
+            return
+        self.integration_policy_payload.setPlainText(json.dumps(result, indent=2, ensure_ascii=False))
+        self._show_json(self.whids_detail, result)
+
+    def save_integration_policy(self) -> None:
+        try:
+            payload = {"policy": self._parse_json_text(self.integration_policy_payload, {})}
+            result = self._post("/integrations/response-policy", json=payload, timeout=60).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "Integration policy save failed", exc)
+            return
+        self.integration_policy_payload.setPlainText(json.dumps(result, indent=2, ensure_ascii=False))
+        self._show_json(self.whids_detail, result)
+
+    def start_whids_scheduler(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"]:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        payload["endpoint_uuid"] = self.whids_endpoint_uuid.text().strip()
+        payload["poll_interval"] = self.whids_scheduler_interval.value()
+        try:
+            result = self._post("/integrations/whids/scheduler/start", json=payload, timeout=60).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS scheduler start failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def stop_whids_scheduler(self) -> None:
+        try:
+            result = self._post("/integrations/whids/scheduler/stop", timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS scheduler stop failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def refresh_whids_scheduler_status(self) -> None:
+        try:
+            result = self._get("/integrations/whids/scheduler/status", timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS scheduler status failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def _parse_json_text(self, widget: QTextEdit, default):
+        text = widget.toPlainText().strip()
+        if not text:
+            return default
+        return json.loads(text)
+
+    def query_whids_iocs(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"]:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        filters = {}
+        if self.whids_rule_name.text().strip():
+            filters["value"] = self.whids_rule_name.text().strip()
+        payload["filters"] = filters
+        try:
+            result = self._post("/integrations/whids/iocs/query", json=payload, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS IoC query failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+
+    def add_whids_iocs(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"]:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        try:
+            payload["items"] = self._parse_json_text(self.whids_ioc_payload, [])
+            result = self._post("/integrations/whids/iocs/add", json=payload, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS IoC add failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def delete_whids_iocs(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"]:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        filters = {}
+        if self.whids_rule_name.text().strip():
+            filters["value"] = self.whids_rule_name.text().strip()
+        payload["filters"] = filters
+        try:
+            result = self._post("/integrations/whids/iocs/delete", json=payload, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS IoC delete failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def query_whids_rules(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"]:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        payload["name_filter"] = self.whids_rule_name.text().strip()
+        try:
+            result = self._post("/integrations/whids/rules/query", json=payload, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS rule query failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+
+    def add_whids_rules(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"]:
+            self.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            return
+        try:
+            payload["rules"] = self._parse_json_text(self.whids_rule_payload, [])
+            result = self._post("/integrations/whids/rules/add", json=payload, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS rule add failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def delete_whids_rules(self) -> None:
+        payload = self._whids_manager_payload_base()
+        if not payload["manager_url"] or not payload["api_key"] or not self.whids_rule_name.text().strip():
+            self.statusBar().showMessage("Provide WHIDS manager URL, X-Api-Key and rule name first")
+            return
+        payload["rule_name"] = self.whids_rule_name.text().strip()
+        try:
+            result = self._post("/integrations/whids/rules/delete", json=payload, timeout=90).json()
+        except Exception as exc:
+            self._show_error(self.whids_detail, "WHIDS rule delete failed", exc)
+            return
+        self._show_json(self.whids_detail, result)
+        self.refresh_whids_workspace()
+
+    def start_hids_live_ingest(self) -> None:
+        path = self.hids_file_path.text().strip()
+        if not path:
+            self.statusBar().showMessage("Provide an OSSEC/HIDS alert file path first")
+            return
+        payload = {
+            "file_path": path,
+            "poll_interval": self.hids_live_interval.value(),
+            "limit": 500,
+            "start_at_end": self.hids_live_start_at_end.isChecked(),
+        }
+        try:
+            result = self._post("/integrations/ossec/live/start", json=payload, timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.hids_detail, "HIDS live ingest start failed", exc)
+            return
+        self._show_json(self.hids_detail, result)
+        self.refresh_hids_workspace()
+        self.statusBar().showMessage("OSSEC live ingest started")
+        self._switch_to_tab("HIDS")
+
+    def stop_hids_live_ingest(self) -> None:
+        try:
+            result = self._post("/integrations/ossec/live/stop", timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.hids_detail, "HIDS live ingest stop failed", exc)
+            return
+        self._show_json(self.hids_detail, result)
+        self.refresh_hids_workspace()
+        self.statusBar().showMessage("OSSEC live ingest stopped")
+        self._switch_to_tab("HIDS")
+
+    def refresh_hids_live_status(self) -> None:
+        try:
+            result = self._get("/integrations/ossec/live/status", timeout=20).json()
+        except Exception as exc:
+            self._show_error(self.hids_detail, "HIDS live status failed", exc)
+            return
+        self._show_json(self.hids_detail, result)
+        self.refresh_hids_workspace()
+        self._switch_to_tab("HIDS")
+
+    def show_selected_whids_export(self) -> None:
+        row = self.whids_table.currentRow()
+        if row < 0:
+            return
+        values = {
+            "created_at": self.whids_table.item(row, 0).text() if self.whids_table.item(row, 0) else "",
+            "export_type": self.whids_table.item(row, 1).text() if self.whids_table.item(row, 1) else "",
+            "target": self.whids_table.item(row, 2).text() if self.whids_table.item(row, 2) else "",
+            "status": self.whids_table.item(row, 3).text() if self.whids_table.item(row, 3) else "",
+            "detail": self.whids_table.item(row, 4).text() if self.whids_table.item(row, 4) else "",
+        }
+        self.whids_detail.setPlainText(json.dumps(values, indent=2, ensure_ascii=False))
+
+    def show_selected_hids_export(self) -> None:
+        row = self.hids_table.currentRow()
+        if row < 0:
+            return
+        values = {
+            "created_at": self.hids_table.item(row, 0).text() if self.hids_table.item(row, 0) else "",
+            "export_type": self.hids_table.item(row, 1).text() if self.hids_table.item(row, 1) else "",
+            "target": self.hids_table.item(row, 2).text() if self.hids_table.item(row, 2) else "",
+            "status": self.hids_table.item(row, 3).text() if self.hids_table.item(row, 3) else "",
+            "detail": self.hids_table.item(row, 4).text() if self.hids_table.item(row, 4) else "",
+        }
+        self.hids_detail.setPlainText(json.dumps(values, indent=2, ensure_ascii=False))
+
+    def open_selected_whids_target(self) -> None:
+        row = self.whids_table.currentRow()
+        if row < 0:
+            self.statusBar().showMessage("Select a WHIDS export first")
+            return
+        target = self.whids_table.item(row, 2).text() if self.whids_table.item(row, 2) else ""
+        self._open_local_target(target)
+
+    def open_selected_hids_target(self) -> None:
+        row = self.hids_table.currentRow()
+        if row < 0:
+            self.statusBar().showMessage("Select a HIDS export first")
+            return
+        target = self.hids_table.item(row, 2).text() if self.hids_table.item(row, 2) else ""
+        self._open_local_target(target)
+
+    def _open_local_target(self, target: str) -> None:
+        candidate = str(target or "").strip()
+        if not candidate:
+            self.statusBar().showMessage("No local target is attached to this export")
+            return
+        path = Path(candidate)
+        if path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            return
+        self.statusBar().showMessage(f"Target not found locally: {candidate}")
+
+    def open_enterprise_case_for_incident(self, *, prefix: str = "") -> None:
+        incident_id = self.hids_incident_id.text().strip()
+        if prefix.upper().startswith("WHIDS"):
+            current_detail = self.whids_detail.toPlainText().strip()
+            incident_id = incident_id or self._find_incident_id_in_text(current_detail, "WHIDS-")
+        else:
+            current_detail = self.hids_detail.toPlainText().strip()
+            incident_id = incident_id or self._find_incident_id_in_text(current_detail, "OSSEC-")
+        if not incident_id:
+            self.statusBar().showMessage("No correlated incident ID found for enterprise case jump")
+            return
+        try:
+            cases = self._get("/enterprise/cases", timeout=20).json()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Enterprise case lookup failed: {exc}")
+            return
+        for idx, item in enumerate(cases):
+            if str(item.get("incident_id", "")).strip() == incident_id:
+                self._switch_to_tab("Enterprise")
+                self.refresh_enterprise_workspace()
+                self.enterprise_cases_table.selectRow(idx)
+                self.load_selected_case_board()
+                return
+        self.statusBar().showMessage(f"No enterprise case linked to {incident_id}")
+
+    def _find_incident_id_in_text(self, text: str, prefix: str) -> str:
+        match = re.search(rf"{re.escape(prefix)}[A-Z0-9-]+", text.upper())
+        return match.group(0) if match else ""
 
     def _render_monitor_brief(self, result: dict, incident: dict) -> str:
         score = result.get("final_score", {}) or {}
@@ -1712,6 +2524,7 @@ class ShadowLabDesktop(QMainWindow):
         self.vt_key.setText(self._load_secret("vt_key") if remember_api_key else "")
         self.malwarebazaar_key.setText(self._load_secret("malwarebazaar_key") if remember_api_key else "")
         self.yaraify_key.setText(self._load_secret("yaraify_key") if remember_api_key else "")
+        self.whids_manager_api_key.setText(self._load_secret("whids_manager_api_key") if remember_api_key else "")
         self.webhook_url.setText(self.settings.value("webhook_url", ""))
         self.hash_input.setText(self.settings.value("hash_input", ""))
         self.ip_input.setText(self.settings.value("ip_input", ""))
@@ -1726,10 +2539,26 @@ class ShadowLabDesktop(QMainWindow):
         self.block_target.setText(self.settings.value("block_target", ""))
         self.block_gateway.setText(self.settings.value("block_gateway", ""))
         self.approval_id.setText(self.settings.value("approval_id", ""))
+        self.whids_manager_url.setText(self.settings.value("whids_manager_url", self.whids_manager_url.text()))
+        self.whids_endpoint_uuid.setText(self.settings.value("whids_endpoint_uuid", ""))
+        self.whids_artifact_since.setText(self.settings.value("whids_artifact_since", ""))
+        self.whids_artifact_limit.setValue(int(self.settings.value("whids_artifact_limit", self.whids_artifact_limit.value())))
+        self.whids_scheduler_interval.setValue(float(self.settings.value("whids_scheduler_interval", self.whids_scheduler_interval.value())))
+        self.whids_verify_tls.setChecked(str(self.settings.value("whids_verify_tls", "true")).lower() == "true")
+        self.whids_file_path.setText(self.settings.value("whids_file_path", self.whids_file_path.text()))
+        self.whids_rule_name.setText(self.settings.value("whids_rule_name", ""))
+        self.whids_ioc_payload.setPlainText(self.settings.value("whids_ioc_payload", ""))
+        self.whids_rule_payload.setPlainText(self.settings.value("whids_rule_payload", ""))
+        self.integration_policy_payload.setPlainText(self.settings.value("integration_policy_payload", ""))
+        self.hids_file_path.setText(self.settings.value("hids_file_path", self.hids_file_path.text()))
+        self.hids_incident_id.setText(self.settings.value("hids_incident_id", ""))
+        self.hids_live_interval.setValue(float(self.settings.value("hids_live_interval", self.hids_live_interval.value())))
+        self.hids_live_start_at_end.setChecked(str(self.settings.value("hids_live_start_at_end", "true")).lower() == "true")
         advanced_visible = str(self.settings.value("advanced_visible", "true")).lower() == "true"
         self.advanced_card.setVisible(advanced_visible)
         self.toggle_advanced_btn.setText("Hide Advanced Settings" if advanced_visible else "Show Advanced Settings")
         self.enterprise_auto_refresh.setChecked(str(self.settings.value("enterprise_auto_refresh", "true")).lower() == "true")
+        self.enterprise_mitre_bundle_path.setText(str(self.settings.value("enterprise_mitre_bundle_path", self.enterprise_mitre_bundle_path.text())))
         self.enterprise_case_filter.setText(str(self.settings.value("enterprise_case_filter", "")))
         self.enterprise_task_filter.setText(str(self.settings.value("enterprise_task_filter", "")))
         self.enterprise_activity_filter.setText(str(self.settings.value("enterprise_activity_filter", "")))
@@ -1746,13 +2575,15 @@ class ShadowLabDesktop(QMainWindow):
         self.settings.remove("vt_key")
         self.settings.remove("malwarebazaar_key")
         self.settings.remove("yaraify_key")
+        self.settings.remove("whids_manager_api_key")
         if self.remember_api_key.isChecked():
             self._save_secret("api_key", self.api_key.text())
             self._save_secret("vt_key", self.vt_key.text())
             self._save_secret("malwarebazaar_key", self.malwarebazaar_key.text())
             self._save_secret("yaraify_key", self.yaraify_key.text())
+            self._save_secret("whids_manager_api_key", self.whids_manager_api_key.text())
         else:
-            for key in ["api_key", "vt_key", "malwarebazaar_key", "yaraify_key"]:
+            for key in ["api_key", "vt_key", "malwarebazaar_key", "yaraify_key", "whids_manager_api_key"]:
                 self._delete_secret(key)
         self.settings.setValue("duration", self.duration.value())
         self.settings.setValue("interval", self.interval.value())
@@ -1770,9 +2601,25 @@ class ShadowLabDesktop(QMainWindow):
         self.settings.setValue("block_target", self.block_target.text())
         self.settings.setValue("block_gateway", self.block_gateway.text())
         self.settings.setValue("approval_id", self.approval_id.text().strip())
+        self.settings.setValue("whids_manager_url", self.whids_manager_url.text())
+        self.settings.setValue("whids_endpoint_uuid", self.whids_endpoint_uuid.text())
+        self.settings.setValue("whids_artifact_since", self.whids_artifact_since.text())
+        self.settings.setValue("whids_artifact_limit", self.whids_artifact_limit.value())
+        self.settings.setValue("whids_scheduler_interval", self.whids_scheduler_interval.value())
+        self.settings.setValue("whids_verify_tls", self.whids_verify_tls.isChecked())
+        self.settings.setValue("whids_file_path", self.whids_file_path.text())
+        self.settings.setValue("whids_rule_name", self.whids_rule_name.text())
+        self.settings.setValue("whids_ioc_payload", self.whids_ioc_payload.toPlainText())
+        self.settings.setValue("whids_rule_payload", self.whids_rule_payload.toPlainText())
+        self.settings.setValue("integration_policy_payload", self.integration_policy_payload.toPlainText())
+        self.settings.setValue("hids_file_path", self.hids_file_path.text())
+        self.settings.setValue("hids_incident_id", self.hids_incident_id.text())
+        self.settings.setValue("hids_live_interval", self.hids_live_interval.value())
+        self.settings.setValue("hids_live_start_at_end", self.hids_live_start_at_end.isChecked())
         self.settings.setValue("advanced_visible", self.advanced_card.isVisible())
         self.settings.setValue("current_tab_index", self.tabs.currentIndex())
         self.settings.setValue("enterprise_auto_refresh", self.enterprise_auto_refresh.isChecked())
+        self.settings.setValue("enterprise_mitre_bundle_path", self.enterprise_mitre_bundle_path.text())
         self.settings.setValue("enterprise_case_filter", self.enterprise_case_filter.text())
         self.settings.setValue("enterprise_task_filter", self.enterprise_task_filter.text())
         self.settings.setValue("enterprise_activity_filter", self.enterprise_activity_filter.text())
@@ -1793,6 +2640,7 @@ class ShadowLabDesktop(QMainWindow):
 
     def _persist_enterprise_ui_state(self) -> None:
         self.settings.setValue("enterprise_auto_refresh", self.enterprise_auto_refresh.isChecked())
+        self.settings.setValue("enterprise_mitre_bundle_path", self.enterprise_mitre_bundle_path.text())
         self.settings.setValue("enterprise_case_filter", self.enterprise_case_filter.text())
         self.settings.setValue("enterprise_task_filter", self.enterprise_task_filter.text())
         self.settings.setValue("enterprise_activity_filter", self.enterprise_activity_filter.text())
@@ -1981,7 +2829,7 @@ class ShadowLabDesktop(QMainWindow):
         source = "VirusTotal + MalwareBazaar + YARAify"
         value = str(self.selected_process.get("sha256", "-")) if self.selected_process else f"PID {pid}"
         self._record_threat_history("process", value, source, result)
-        self.tabs.setCurrentIndex(4)
+        self._switch_to_tab("Threat Intel")
 
     def run_memory_analysis(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2010,7 +2858,7 @@ class ShadowLabDesktop(QMainWindow):
             for c, value in enumerate(row):
                 self.internals_table.setItem(r, c, QTableWidgetItem(str(value)))
         self._show_json(self.hunt_out, {"summary": {"handles": len(result.get("handles", [])), "modules": len(result.get("modules", []))}})
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def run_strings_analysis(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2037,7 +2885,7 @@ class ShadowLabDesktop(QMainWindow):
             "Sample:",
             *sample,
         ]))
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def run_yara_scan(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2061,7 +2909,7 @@ class ShadowLabDesktop(QMainWindow):
             f"Rule Count: {lookup.get('yara_rule_count', 0)}\n"
             f"Matches:\n" + ("\n".join(matches) if matches else "None")
         )
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def run_sandbox_trace(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2075,7 +2923,7 @@ class ShadowLabDesktop(QMainWindow):
             return
         events = result.get("events", [])
         self.hunt_out.setPlainText("\n".join([f"Collected Events: {len(events)}", ""] + [f"{event.get('time')} | {event.get('type')} | {event.get('detail')}" for event in events[:50]]))
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def load_process_tree(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2099,7 +2947,7 @@ class ShadowLabDesktop(QMainWindow):
         self.tree_view.expandAll()
         lineage = "\n".join([f"{item.get('name')} (PID {item.get('pid')}, PPID {item.get('ppid')})" for item in result.get("lineage", [])])
         self.hunt_out.setPlainText(f"Lineage:\n{lineage}")
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def run_ai_analysis(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2111,7 +2959,7 @@ class ShadowLabDesktop(QMainWindow):
             self._show_error(self.hunt_out, "AI analysis failed", exc)
             return
         self.hunt_out.setPlainText(f"Risk: {result.get('risk')}\nConfidence: {result.get('confidence')}\n\n{result.get('analysis')}")
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def run_auto_triage(self) -> None:
         ident = self._selected_process_or_warn()
@@ -2132,7 +2980,7 @@ class ShadowLabDesktop(QMainWindow):
             self._show_error(self.hunt_out, "Auto triage failed", exc)
             return
         self._show_json(self.hunt_out, result)
-        self.tabs.setCurrentIndex(2)
+        self._switch_to_tab("Advanced Hunt")
 
     def run_monitor(self) -> None:
         payload = {"duration": self.duration.value(), "interval": self.interval.value()}
@@ -2151,7 +2999,7 @@ class ShadowLabDesktop(QMainWindow):
         severity = incident.get("severity", "unknown")
         self.metric_inc.setStyleSheet(f"color:{self._severity_color(severity).name()};font-weight:700;")
         self.metric_inc.setText(f"Last Incident: {incident.get('incident_id','-')} ({severity})")
-        self.refresh_history(); self.refresh_artifacts(); self.tabs.setCurrentIndex(0)
+        self.refresh_history(); self.refresh_artifacts(); self._switch_to_tab("Dashboards")
 
     def refresh_persistence(self) -> None:
         try: self.persistence_items = self._get("/persistence", timeout=45).json()
@@ -2210,7 +3058,7 @@ class ShadowLabDesktop(QMainWindow):
         except Exception as exc: self._show_error(self.threat_out, "Hash lookup failed", exc); return
         self._show_json(self.threat_out, result)
         self._record_threat_history("hash", self.hash_input.text().strip(), "MalwareBazaar + YARAify + VirusTotal", result)
-        self.tabs.setCurrentIndex(4)
+        self._switch_to_tab("Threat Intel")
 
     def lookup_ip(self) -> None:
         if not self.ip_input.text().strip(): return
@@ -2218,7 +3066,7 @@ class ShadowLabDesktop(QMainWindow):
         except Exception as exc: self._show_error(self.threat_out, "IP lookup failed", exc); return
         self._show_json(self.threat_out, result)
         self._record_threat_history("ip", self.ip_input.text().strip(), "AbuseIPDB", result)
-        self.tabs.setCurrentIndex(4)
+        self._switch_to_tab("Threat Intel")
 
     def use_selected_process_hash(self) -> None:
         if not self.selected_process:
@@ -2228,7 +3076,7 @@ class ShadowLabDesktop(QMainWindow):
         self.hash_input.setText(hash_value)
         self.ti_last_type.setText("Last Query: process hash prepared")
         self.ti_last_value.setText(f"Value: {hash_value[:20]}..." if hash_value else "Value: unavailable")
-        self.tabs.setCurrentIndex(4)
+        self._switch_to_tab("Threat Intel")
 
     def use_selected_process_ip(self) -> None:
         if not self.selected_process:
@@ -2244,7 +3092,7 @@ class ShadowLabDesktop(QMainWindow):
         self.ip_input.setText(candidate)
         self.ti_last_type.setText("Last Query: process IP prepared")
         self.ti_last_value.setText(f"Value: {candidate or 'unavailable'}")
-        self.tabs.setCurrentIndex(4)
+        self._switch_to_tab("Threat Intel")
 
     def _record_threat_history(self, query_type: str, value: str, source: str, payload) -> None:
         self.threat_history.insert(0, {"type": query_type, "value": value, "source": source, "payload": json.dumps(payload, indent=2, ensure_ascii=False)})
@@ -2622,7 +3470,7 @@ class ShadowLabDesktop(QMainWindow):
             self._show_error(self.deception_out, "Honeypot deploy failed", exc)
             return
         self._show_json(self.deception_out, result)
-        self.tabs.setCurrentIndex(5)
+        self._switch_to_tab("Deception")
 
     def check_honeypot(self) -> None:
         try:
@@ -2757,6 +3605,10 @@ class ShadowLabDesktop(QMainWindow):
             assets = self._get("/enterprise/assets", timeout=10).json()
             cases = self._get("/enterprise/cases", timeout=10).json()
             detections = self._get("/enterprise/detections/lifecycle", timeout=10).json()
+            mitre_status = self._get("/enterprise/mitre/status", timeout=10).json()
+            mitre_summary = self._get("/enterprise/mitre/summary", timeout=10).json()
+            mitre_discover = self._get("/enterprise/mitre/discover", timeout=10).json()
+            mitre_compare = self._post("/enterprise/mitre/compare", json={"file_path": self.enterprise_mitre_bundle_path.text().strip()}, timeout=20).json() if self.enterprise_mitre_bundle_path.text().strip() else {}
         except Exception as exc:
             self._show_error(self.enterprise_detail, "Enterprise workspace failed", exc)
             self.enterprise_live_status.setText("Live sync failed")
@@ -2800,7 +3652,8 @@ class ShadowLabDesktop(QMainWindow):
             f"<br><b>Attack chain:</b> {html.escape(', '.join(story.get('attack_chain', [])) if isinstance(story.get('attack_chain', []), list) else str(story.get('attack_chain', 'ready')))}</p>"
             "<p><b>Raw detail:</b> use the left-side tables, case board, and notification inbox for operational depth. Run <b>Replay Artifact</b> only when you explicitly want replay analysis.</p>"
         )
-        self._show_json(self.enterprise_detail, {"triage": triage, "assets": assets, "detections": detections, "story": story})
+        self.enterprise_mitre_summary.setHtml(self._render_enterprise_mitre_summary(mitre_status, mitre_summary, mitre_compare, mitre_discover))
+        self._show_json(self.enterprise_detail, {"triage": triage, "assets": assets, "detections": detections, "mitre_status": mitre_status, "mitre_summary": mitre_summary, "mitre_discover": mitre_discover, "mitre_compare": mitre_compare, "story": story})
         if cases:
             selected_row = next((idx for idx, item in enumerate(cases) if int(item.get("id", 0) or 0) == preferred_case_id), 0)
             self.enterprise_cases_table.selectRow(selected_row)
@@ -2871,6 +3724,7 @@ class ShadowLabDesktop(QMainWindow):
             activity = self._get(f"/enterprise/cases/{case_id}/activity", timeout=20).json()
             notes = self._get("/enterprise/investigations/notes", params={"case_id": case_id}, timeout=20).json()
             stories = self._get("/enterprise/investigations/stories", params={"case_id": case_id}, timeout=20).json()
+            mitre = self._get(f"/enterprise/cases/{case_id}/mitre", timeout=20).json()
         except Exception as exc:
             self._show_error(self.enterprise_detail, "Case board load failed", exc)
             self.enterprise_live_status.setText("Live sync failed")
@@ -2881,6 +3735,7 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_activity_data = activity
         self.enterprise_notes_data = notes
         self.enterprise_stories_data = stories
+        self.enterprise_case_mitre_data = mitre
         queue = board.get("queue", {}) if isinstance(board, dict) else {}
         kpis = board.get("kpis", {}) if isinstance(board, dict) else {}
         self.enterprise_timeline_data = board.get("timeline", []) if isinstance(board.get("timeline", []), list) else []
@@ -2898,6 +3753,7 @@ class ShadowLabDesktop(QMainWindow):
             f"<br><b>Linked entities:</b> {len(self.enterprise_entity_links_data)}</p>"
             f"<h4>Next Steps</h4><ul>{next_steps or '<li>No recommended next steps.</li>'}</ul>"
         )
+        self.enterprise_case_mitre.setHtml(self._render_enterprise_case_mitre(mitre))
         self._set_metric_label(self.enterprise_overdue_value, str(queue.get("overdue_tasks", 0)))
         self._set_metric_label(self.enterprise_assignments_value, str(queue.get("assignments", 0)))
         self._apply_enterprise_filters()
@@ -2917,11 +3773,17 @@ class ShadowLabDesktop(QMainWindow):
         self._refresh_enterprise_timeline_table()
         self._refresh_enterprise_entity_links_table()
         self.enterprise_live_status.setText(f"Live sync updated {time.strftime('%H:%M:%S')}")
-        self._show_json(self.enterprise_detail, {"board": board, "assignments": assignments, "tasks": tasks, "activity": activity, "notes": notes, "stories": stories, "notifications": self.enterprise_notifications_data})
+        self._show_json(self.enterprise_detail, {"board": board, "assignments": assignments, "tasks": tasks, "activity": activity, "notes": notes, "stories": stories, "mitre": mitre, "notifications": self.enterprise_notifications_data})
 
     def _clear_enterprise_case_views(self) -> None:
         self.enterprise_case_board.setHtml(
             "<h3>Case Board</h3><p>No case selected yet. Pick a case on the left or create a new one.</p>"
+        )
+        self.enterprise_mitre_summary.setHtml(
+            "<h3>ATT&CK Coverage</h3><p>Load a MITRE ATT&CK bundle to see enterprise coverage, tactics, mitigations, and software overlap.</p>"
+        )
+        self.enterprise_case_mitre.setHtml(
+            "<h3>Case ATT&CK</h3><p>Select a case to review mapped techniques, mitigations, and actor context.</p>"
         )
         self.enterprise_graph_summary.setHtml(
             "<h3>Case Correlation View</h3><p>No active case context yet.</p>"
@@ -2938,6 +3800,7 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_activity_data = []
         self.enterprise_notes_data = []
         self.enterprise_stories_data = []
+        self.enterprise_case_mitre_data = {}
         self.enterprise_graph_focus.setRowCount(0)
         self.enterprise_assignments_table.setRowCount(0)
         self.enterprise_tasks_table.setRowCount(0)
@@ -2947,6 +3810,117 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_notifications_table.setRowCount(0)
         self.enterprise_case_timeline.setRowCount(0)
         self.enterprise_entity_links.setRowCount(0)
+
+    def _render_enterprise_mitre_summary(self, status: dict[str, Any], summary: dict[str, Any], compare: dict[str, Any], discover: list[dict[str, Any]]) -> str:
+        loaded = bool(status.get("loaded"))
+        top_tactics = "".join(
+            f"<li>{html.escape(str(item.get('name', '')))}: {html.escape(str(item.get('count', 0)))}</li>"
+            for item in summary.get("top_tactics", [])[:6]
+        )
+        top_techniques = "".join(
+            f"<li>{html.escape(str(item.get('technique_id', '')))} - {html.escape(str(item.get('name', '')))} ({html.escape(str(item.get('count', 0)))})</li>"
+            for item in summary.get("top_mapped_techniques", [])[:6]
+        )
+        tactic_heat = "".join(
+            f"<li>{html.escape(str(item.get('name', '')))} score {html.escape(str(item.get('score', 0)))}</li>"
+            for item in summary.get("tactic_heat", [])[:6]
+        )
+        discovered_html = "".join(
+            f"<li>{html.escape(Path(str(item.get('path', ''))).name)}"
+            f" | v{html.escape(str(item.get('version', 'unknown')))}"
+            f" | techniques {html.escape(str(item.get('technique_count', 0)))}</li>"
+            for item in discover[:5]
+        )
+        diff_html = "".join(
+            f"<li>{html.escape(str(item.get('technique_id', '')))} updated to {html.escape(str(item.get('candidate_modified', '')))}</li>"
+            for item in compare.get("modified_techniques", [])[:5]
+        )
+        bundle_path = html.escape(str(status.get("bundle_path", "") or ""))
+        return (
+            "<h3>ATT&CK Enterprise Coverage</h3>"
+            f"<p><b>Bundle loaded:</b> {'yes' if loaded else 'no'}"
+            f"<br><b>Techniques indexed:</b> {html.escape(str(status.get('technique_count', 0)))}"
+            f"<br><b>Tactics indexed:</b> {html.escape(str(status.get('tactic_count', 0)))}"
+            f"<br><b>Recent incidents reviewed:</b> {html.escape(str(summary.get('recent_incident_count', 0)))}</p>"
+            f"<p><b>Bundle path:</b> {bundle_path or 'not loaded'}</p>"
+            f"<h4>Top Tactics</h4><ul>{top_tactics or '<li>No mapped tactics yet.</li>'}</ul>"
+            f"<h4>Top Techniques</h4><ul>{top_techniques or '<li>No mapped techniques yet.</li>'}</ul>"
+            f"<h4>Tactic Heat</h4><ul>{tactic_heat or '<li>No tactic heat yet.</li>'}</ul>"
+            f"<h4>Lifecycle Diff</h4><ul>{diff_html or '<li>No bundle diff found for the selected path.</li>'}</ul>"
+            f"<h4>Known Bundles</h4><ul>{discovered_html or '<li>No ATT&CK bundles discovered.</li>'}</ul>"
+        )
+
+    def _render_enterprise_case_mitre(self, coverage: dict[str, Any]) -> str:
+        summary = coverage.get("coverage_summary", {}) if isinstance(coverage, dict) else {}
+        techniques = coverage.get("techniques", []) if isinstance(coverage.get("techniques", []), list) else []
+        technique_rows = "".join(
+            f"<li>{html.escape(str(item.get('attack_id', '')))} - {html.escape(str(item.get('name', '')))}"
+            f" | tactics: {html.escape(', '.join(item.get('tactics', [])) if isinstance(item.get('tactics', []), list) else '')}</li>"
+            for item in techniques[:8]
+        )
+        mitigations = "".join(
+            f"<li>{html.escape(str(item.get('name', '')))} ({html.escape(str(item.get('count', 0)))})</li>"
+            for item in summary.get("top_mitigations", [])[:5]
+        )
+        software = "".join(
+            f"<li>{html.escape(str(item.get('name', '')))} ({html.escape(str(item.get('count', 0)))})</li>"
+            for item in summary.get("top_software", [])[:5]
+        )
+        rollup = "".join(
+            f"<li>{html.escape(str(item.get('attack_id', '')))} ({html.escape(str(item.get('count', 0)))})</li>"
+            for item in summary.get("parent_technique_rollup", [])[:5]
+        )
+        cues = "".join(
+            f"<li>{html.escape(str(item.get('cue', '')))} ({html.escape(str(item.get('count', 0)))})</li>"
+            for item in summary.get("telemetry_cue_hotspots", [])[:6]
+        )
+        return (
+            "<h3>Case ATT&CK</h3>"
+            f"<p><b>Incident scope:</b> {html.escape(', '.join(coverage.get('incident_ids', [])) if isinstance(coverage.get('incident_ids', []), list) else '')}"
+            f"<br><b>Mapped techniques:</b> {html.escape(str(summary.get('technique_count', 0)))}"
+            f"<br><b>Sub-techniques:</b> {html.escape(str(summary.get('subtechnique_count', 0)))}"
+            f"<br><b>Tactic progression:</b> {html.escape(' -> '.join(summary.get('tactic_progression', [])) if isinstance(summary.get('tactic_progression', []), list) else '')}</p>"
+            f"<h4>Observed Techniques</h4><ul>{technique_rows or '<li>No ATT&CK techniques mapped yet.</li>'}</ul>"
+            f"<h4>Top Mitigations</h4><ul>{mitigations or '<li>No mitigations linked yet.</li>'}</ul>"
+            f"<h4>Top Software</h4><ul>{software or '<li>No software overlap yet.</li>'}</ul>"
+            f"<h4>Parent Rollup</h4><ul>{rollup or '<li>No parent/sub-technique rollup yet.</li>'}</ul>"
+            f"<h4>Telemetry Cues</h4><ul>{cues or '<li>No telemetry cues captured yet.</li>'}</ul>"
+        )
+
+    def export_enterprise_mitre_layer(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        payload = {
+            "case_id": case_id,
+            "layer_name": f"ShadowLab Case {case_id} ATT&CK Coverage",
+            "description": "Navigator layer exported from the enterprise investigation workspace.",
+        }
+        try:
+            result = self._post("/enterprise/mitre/navigator/export", json=payload, timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "ATT&CK layer export failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        saved_path = str(result.get("saved_path", "") or "")
+        if saved_path:
+            self.statusBar().showMessage(f"Navigator layer exported to {saved_path}")
+
+    def export_enterprise_mitre_workbench(self) -> None:
+        case_id = self._selected_enterprise_case_id()
+        if case_id is None:
+            self.statusBar().showMessage("Select a case first")
+            return
+        try:
+            result = self._post("/enterprise/mitre/workbench/export", json={"case_id": case_id}, timeout=45).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "Workbench export failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        saved_path = str(result.get("saved_path", "") or "")
+        if saved_path:
+            self.statusBar().showMessage(f"Workbench coverage exported to {saved_path}")
 
     def _refresh_enterprise_kpi_chart(self, queue: dict, kpis: dict, note_count: int, story_count: int) -> None:
         load_set = QBarSet("Load")
@@ -3445,6 +4419,24 @@ class ShadowLabDesktop(QMainWindow):
         pdf_path = str(result.get("pdf_path", "") or "")
         if pdf_path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(pdf_path))
+
+    def load_enterprise_mitre_bundle(self) -> None:
+        bundle_path = self.enterprise_mitre_bundle_path.text().strip()
+        if not bundle_path:
+            self.statusBar().showMessage("Provide an ATT&CK STIX bundle path first")
+            return
+        try:
+            result = self._post(
+                "/enterprise/mitre/load-bundle",
+                json={"file_path": bundle_path, "source": "desktop"},
+                timeout=60,
+            ).json()
+        except Exception as exc:
+            self._show_error(self.enterprise_detail, "ATT&CK bundle load failed", exc)
+            return
+        self._show_json(self.enterprise_detail, result)
+        self.statusBar().showMessage("ATT&CK bundle loaded")
+        self.refresh_enterprise_workspace()
 
     def request_enterprise_approval(self) -> None:
         row = self.enterprise_cases_table.currentRow()

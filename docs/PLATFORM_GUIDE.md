@@ -1,6 +1,6 @@
 # ShadowLab Platform Guide
 
-ShadowLab is a locally operated, API-first cybersecurity operations platform whose day-to-day experience is centered around the desktop client. The project is no longer just a simple monitoring tool. In its current state, it provides a unified workspace for collecting host telemetry, investigating suspicious processes, reviewing persistence artifacts, enriching findings with threat intelligence, creating cases, running investigations, exporting reports, and maintaining security-operations oversight.
+ShadowLab is a locally operated, API-first cybersecurity operations platform whose day-to-day experience is centered around the desktop client. The project is no longer just a simple monitoring tool. In its current state, it provides a unified workspace for collecting host telemetry, investigating suspicious processes, reviewing persistence artifacts, enriching findings with threat intelligence and MITRE ATT&CK context, creating cases, running investigations, exporting reports, and maintaining security-operations oversight.
 
 The goal of this document is to present the project in a more product-oriented way. It explains what ShadowLab is today, which major areas already exist, and how an operator can use the platform in practice.
 
@@ -32,6 +32,8 @@ The strength of this design is that the UI and backend remain separate. That mea
 
 `Dashboards` and `Overview` give the operator a broad picture of current platform state. These areas are intended for quick visibility into monitoring output, telemetry posture, and overall system condition.
 
+`WHIDS` and `HIDS` sit directly after `Dashboards` in the desktop. These sections expose provider-oriented workflows for import, live status, evidence pull, scheduler state, and enterprise jump-off. `WHIDS` focuses on manager and export-based EDR ingestion, while `HIDS` focuses on OSSEC-style alert ingestion and response planning.
+
 `Processes` is one of the main investigation entry points. It allows the operator to inspect process profiles, process trees, extracted strings, internals, YARAify enrichment, sandbox traces, AI analysis, and one-click triage.
 
 `Advanced Hunt` is designed for deeper, operator-driven investigation work.
@@ -56,7 +58,7 @@ The strength of this design is that the UI and backend remain separate. That mea
 
 Inside `Enterprise Ops`, the operator selects or creates a case and then sees the overall state of that case through the board. It becomes easy to understand who is working on it, which tasks remain open, which ones are overdue, what activity has taken place, and which notifications matter. Report export is also managed from here.
 
-`Enterprise Intel` provides a more analytical view. It brings together critical asset visibility, detection lifecycle data, notes, stories, case timeline, entity links, and scoped graph correlation. This turns the case from a simple ticket into an actual investigation object.
+`Enterprise Intel` provides a more analytical view. It brings together critical asset visibility, detection lifecycle data, ATT&CK coverage, tactic heat, bundle lifecycle diff, case ATT&CK rollup, notes, stories, case timeline, entity links, and scoped graph correlation. This turns the case from a simple ticket into an actual investigation object.
 
 This shift moves ShadowLab closer to a compact SOC-style investigation platform rather than just a defensive lab utility.
 
@@ -70,11 +72,41 @@ If an event grows into an incident or case-level workflow, a case is created und
 
 If the focus is platform hardening or platform health, the operator moves into `Security Ops`, where integrity, observability, secrets, and readiness can be reviewed.
 
+If the focus is external detection tooling, the operator usually enters through `WHIDS` or `HIDS`, normalizes those detections into ShadowLab incidents, and then moves into `Enterprise` for case-driven work.
+
+If the focus is ATT&CK maturity, the operator loads a STIX bundle, reviews the discovered bundle list and diff, then works from case-level ATT&CK coverage. From there the operator can export a Navigator layer, export a Workbench coverage bundle, and review technique-aware response decisions.
+
+## MITRE ATT&CK Layer
+
+ShadowLab now has a dedicated ATT&CK layer inside the enterprise workflow.
+
+The backend keeps bundle lifecycle state such as bundle version, modified date, object counts, discovered candidate bundles, and diff results against the currently loaded dataset. This gives the operator a simple way to understand whether the ATT&CK dataset is current and what changed between versions.
+
+Incident and case coverage are no longer limited to the stored `mitre_mapping` field. ShadowLab also performs lightweight ATT&CK inference from incident title, summary, notes, process-execution language, download behavior, credential-access hints, persistence hints, lateral-movement cues, and exfiltration patterns. This gives better ATT&CK visibility when upstream tools did not provide full mapping.
+
+Case-level ATT&CK views now include tactic heat, tactic progression, sub-technique counts, parent-technique rollups, top mitigations, and top software overlap. That makes the enterprise workspace more useful for both analysis and reporting.
+
+Navigator export is still supported, but ShadowLab now also exports a Workbench-oriented coverage JSON so ATT&CK relationship and annotation work can continue outside the product when needed.
+
 ## Recommended Operator Flow
 
 The most practical flow starts with `Overview` and `Dashboards` for general awareness. The second stage is process investigation. The third stage expands context using persistence review, threat intelligence, graph, and timeline. The fourth stage opens a case and starts enterprise workflow. The fifth stage exports reports and artifacts. The sixth stage uses security-operations controls to verify platform health and evidence integrity.
 
 This flow shows one of ShadowLab's main strengths. It does not only display data, it also gives the operator a structured way to work through that data.
+
+## Validation And Readiness
+
+ShadowLab now includes repeatable validation helpers for deployment and workflow maturity.
+
+Current validation coverage includes:
+
+- deployment preflight and runtime-restore checks
+- RBAC smoke tests for `viewer`, `analyst`, and `admin`
+- live ShadowLab and `WHIDS` integration smoke tests
+- performance and dedupe probes for large ingest paths
+- native `OSSEC` active-response validation on elevated Windows hosts
+
+That matters because the platform now contains response, orchestration, and integration features that should be re-tested, not only assumed.
 
 ## Visual Tour
 

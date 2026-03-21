@@ -8,12 +8,15 @@ These are already present in the project:
 
 - FastAPI backend with RBAC and feature gating
 - PySide6 desktop client
+- WHIDS and OSSEC/HIDS integration layer
 - process investigation and auto triage
 - persistence review and remediation workflow
 - graph, timeline, host, artifact, and history surfaces
 - deception, evidence, and quarantine workflows
 - enterprise case workflow with assignments, tasks, notes, stories, pins, timeline, notifications, and report export
+- enterprise MITRE ATT&CK lifecycle, coverage, Navigator export, Workbench export, and technique-aware response mapping
 - security-ops workspace with integrity, observability, readiness, secrets, and reporting
+- deployment validation, RBAC smoke testing, live integration smoke testing, and performance/dedupe probes
 
 ## Next 10 Priorities
 
