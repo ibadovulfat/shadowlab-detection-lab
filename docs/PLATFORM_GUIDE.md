@@ -36,6 +36,8 @@ The strength of this design is that the UI and backend remain separate. That mea
 
 `Processes` is one of the main investigation entry points. It allows the operator to inspect process profiles, process trees, extracted strings, internals, YARAify enrichment, sandbox traces, AI analysis, and one-click triage.
 
+That process workflow now also includes local YARA fallback, memory YARA enrichment, and fused verdict scoring built from curated `rules-master`, `signature-base`, and ShadowLab tradecraft rules. Broad community noise such as `domain.yar` and `RAT_PoetRATPython.yar` has been intentionally removed from the enterprise pack to keep verdicts readable.
+
 `Advanced Hunt` is designed for deeper, operator-driven investigation work.
 
 `Persistence` is used to review autoruns, scheduled tasks, services, and other persistence artifacts, and to trigger remediation when needed.
@@ -105,6 +107,7 @@ Current validation coverage includes:
 - live ShadowLab and `WHIDS` integration smoke tests
 - performance and dedupe probes for large ingest paths
 - native `OSSEC` active-response validation on elevated Windows hosts
+- local YARA compile-health and `Inceptor` payload validation
 
 That matters because the platform now contains response, orchestration, and integration features that should be re-tested, not only assumed.
 

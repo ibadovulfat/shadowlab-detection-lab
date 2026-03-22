@@ -577,6 +577,43 @@ def create_table(conn):
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS yara_scan_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                target_path TEXT DEFAULT '',
+                pack TEXT DEFAULT '',
+                scope TEXT DEFAULT 'file',
+                status TEXT DEFAULT '',
+                match_count INTEGER DEFAULT 0,
+                suppressed_count INTEGER DEFAULT 0,
+                compile_error_count INTEGER DEFAULT 0,
+                source_counts_json TEXT DEFAULT '{}',
+                matched_rules_json TEXT DEFAULT '[]',
+                errors_json TEXT DEFAULT '[]'
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS yara_rule_hit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                rule_id TEXT NOT NULL,
+                source TEXT DEFAULT '',
+                source_path TEXT DEFAULT '',
+                pack TEXT DEFAULT '',
+                scope TEXT DEFAULT 'file',
+                severity TEXT DEFAULT 'low',
+                confidence TEXT DEFAULT 'low',
+                score INTEGER DEFAULT 0,
+                suppressed INTEGER DEFAULT 0
+            );
+            """
+        )
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
                 applied_at REAL DEFAULT (strftime('%s', 'now'))
@@ -961,6 +998,37 @@ def _create_table_postgres(conn) -> None:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS yara_scan_log (
+            id BIGSERIAL PRIMARY KEY,
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            target_path TEXT DEFAULT '',
+            pack TEXT DEFAULT '',
+            scope TEXT DEFAULT 'file',
+            status TEXT DEFAULT '',
+            match_count INTEGER DEFAULT 0,
+            suppressed_count INTEGER DEFAULT 0,
+            compile_error_count INTEGER DEFAULT 0,
+            source_counts_json TEXT DEFAULT '{}',
+            matched_rules_json TEXT DEFAULT '[]',
+            errors_json TEXT DEFAULT '[]'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS yara_rule_hit_log (
+            id BIGSERIAL PRIMARY KEY,
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            rule_id TEXT NOT NULL,
+            source TEXT DEFAULT '',
+            source_path TEXT DEFAULT '',
+            pack TEXT DEFAULT '',
+            scope TEXT DEFAULT 'file',
+            severity TEXT DEFAULT 'low',
+            confidence TEXT DEFAULT 'low',
+            score INTEGER DEFAULT 0,
+            suppressed INTEGER DEFAULT 0
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version TEXT PRIMARY KEY,
             applied_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
@@ -994,6 +1062,9 @@ def _ensure_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_connector_queue_status_retry ON connector_delivery_queue(status, next_retry_at, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_approval_status_created_at ON approval_requests(status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_secret_rotation_created_at ON secret_rotation_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_yara_scan_created_at ON yara_scan_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_yara_rule_hit_created_at ON yara_rule_hit_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_yara_rule_hit_rule_id ON yara_rule_hit_log(rule_id, created_at DESC)",
     ]
     for statement in statements:
         conn.execute(statement)
@@ -1817,6 +1888,95 @@ def get_app_setting(conn, key: str) -> str:
     if row is None:
         return ""
     return str(row[0] or "")
+
+
+def log_yara_scan(
+    conn,
+    *,
+    target_path: str,
+    pack: str,
+    scope: str,
+    status: str,
+    match_count: int,
+    suppressed_count: int,
+    compile_error_count: int,
+    source_counts_json: str = "{}",
+    matched_rules_json: str = "[]",
+    errors_json: str = "[]",
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO yara_scan_log (
+            target_path, pack, scope, status, match_count, suppressed_count, compile_error_count,
+            source_counts_json, matched_rules_json, errors_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            target_path,
+            pack,
+            scope,
+            status,
+            int(match_count),
+            int(suppressed_count),
+            int(compile_error_count),
+            source_counts_json,
+            matched_rules_json,
+            errors_json,
+        ),
+    )
+
+
+def log_yara_rule_hit(
+    conn,
+    *,
+    rule_id: str,
+    source: str,
+    source_path: str,
+    pack: str,
+    scope: str,
+    severity: str,
+    confidence: str,
+    score: int,
+    suppressed: bool,
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO yara_rule_hit_log (
+            rule_id, source, source_path, pack, scope, severity, confidence, score, suppressed
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            rule_id,
+            source,
+            source_path,
+            pack,
+            scope,
+            severity,
+            confidence,
+            int(score),
+            1 if suppressed else 0,
+        ),
+    )
+
+
+def get_yara_scan_log(conn, limit: int = 100) -> pd.DataFrame:
+    return _read_sql_query(
+        conn,
+        "SELECT * FROM yara_scan_log ORDER BY created_at DESC LIMIT ?",
+        (int(limit),),
+    )
+
+
+def get_yara_rule_hits(conn, limit: int = 250) -> pd.DataFrame:
+    return _read_sql_query(
+        conn,
+        "SELECT * FROM yara_rule_hit_log ORDER BY created_at DESC LIMIT ?",
+        (int(limit),),
+    )
 
 
 def get_schema_migrations(conn) -> pd.DataFrame:

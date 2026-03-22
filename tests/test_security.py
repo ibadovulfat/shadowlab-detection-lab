@@ -277,6 +277,36 @@ class AuthApiTests(unittest.TestCase):
             conn.close()
         self.assertTrue(stored.startswith("enc:v1:"))
 
+    def test_triage_respond_executes_policy_plan(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, policy_profile="lab")
+        profile = {"pid": 321, "name": "evil.exe", "exe": "C:\\Temp\\evil.exe"}
+        intel = {
+            "yaraify": {"status": "ok", "matches": []},
+            "local_yara": {"matched_rules": ["Inceptor_AMSI_WLDP_ETW_Bypass"], "confidence": "high"},
+            "virustotal": {"positives": 12},
+            "malwarebazaar": {"query_status": "ok"},
+        }
+        memory_result = {"memory_yara": {"matched_rules": ["Inceptor_Process_Injection_Syscall_Chain"]}}
+        fusion = {"verdict": "malicious", "severity": "critical", "confidence": "high", "score": 96}
+        response_plan = {"auto": [{"action": "suspend"}], "manual": [{"action": "analyst-review"}]}
+        applied = {"executed": [{"action": "suspend", "status": "success"}], "skipped": [{"action": "analyst-review", "reason": "manual"}]}
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                with mock.patch.object(api.main.process_intel_service, "profile_process", return_value=profile):
+                    with mock.patch.object(api.main, "scan_process", return_value=intel):
+                        with mock.patch("plugins.memory_forensics.run_analysis", return_value=memory_result):
+                            with mock.patch.object(api.main, "fuse_detection_verdict", return_value=fusion):
+                                with mock.patch.object(api.main.response_service, "build_triage_response_plan", return_value=response_plan):
+                                    with mock.patch.object(api.main.response_service, "apply_triage_response_plan", return_value=applied):
+                                        response = self.client.post("/triage/321/respond", json={"process_name": "evil.exe"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["pid"], 321)
+        self.assertEqual(payload["process_name"], "evil.exe")
+        self.assertEqual(payload["fusion"]["verdict"], "malicious")
+        self.assertEqual(payload["response_plan"]["auto"][0]["action"], "suspend")
+        self.assertEqual(payload["applied"]["executed"][0]["action"], "suspend")
+
 
 if __name__ == "__main__":
     unittest.main()

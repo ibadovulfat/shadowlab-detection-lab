@@ -16,6 +16,7 @@ Covered areas:
 - backup and restore helpers
 - WHIDS and OSSEC live integration validation
 - deployment runtime restore and scheduler persistence
+- local YARA pack health, policy, and validation
 
 ## Startup Modes
 
@@ -125,6 +126,13 @@ Routes:
 - `GET /enterprise/report/security-ops`
 - `POST /enterprise/report/security-ops/export`
 - `GET /enterprise/abuse/summary`
+
+Local YARA observability routes:
+
+- `GET /yara/local/health`
+- `GET /yara/local/errors`
+- `GET /yara/local/analytics`
+- `GET /yara/local/update-workflow`
 
 ## Retention And Maintenance
 
@@ -250,6 +258,13 @@ Useful extra checks:
 
 - `python scripts/load_test_api.py --base-url http://127.0.0.1:8000 --path /health --requests 200 --concurrency 20`
 - `python scripts/smoke_test_postgres_runtime.py`
+
+Recommended YARA validation checkpoints:
+
+1. confirm `GET /yara/local/health` reports `compile_error_count = 0`
+2. confirm enterprise pack inventory remains stable after community updates
+3. validate at least one known `Inceptor` payload sample through the local enterprise pack
+4. review `/yara/local/analytics` for noisy or newly dominant rules before promoting pack changes
 
 ## Operator Notes
 

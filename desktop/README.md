@@ -16,6 +16,7 @@ The desktop is the main operator console and currently exposes:
 - enterprise case operations and investigation intelligence views
 - enterprise ATT&CK lifecycle, ATT&CK coverage, Navigator export, and Workbench export views
 - security-ops posture and reporting controls
+- local YARA policy, health, analytics, and error review from `Security Ops`
 
 ## Enterprise Layout
 
@@ -75,6 +76,12 @@ The client:
 - does not treat auth-disabled backends as implicit admin anymore
 - keeps `WHIDS` and `HIDS` controls locked for non-admin roles
 - still allows analysts to move into enterprise case work where capability policy permits it
+
+Current YARA-related desktop usage:
+
+- inspect triage summaries that merge `YARAify`, local YARA, memory YARA, and fused confidence
+- use `Security Ops` to review YARA health, policy, analytics, and compile errors
+- use `Triage Respond` for policy-aware response planning after high-confidence hits
 
 For local role-based testing, use:
 

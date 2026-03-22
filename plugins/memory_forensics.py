@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from plugins import yara_scanner
+
 
 VOLATILITY_PLUGINS = [
     "windows.info",
@@ -117,9 +119,61 @@ def run_volatility_analysis(pid: int, pname: str, dump_path: str | Path | None =
 def run_analysis(pid: int, pname: str) -> dict[str, Any]:
     dump = acquire_memory_dump(pid, pname)
     analysis = run_volatility_analysis(pid, pname, dump.get("path"))
+    memory_heuristics = _analyze_dump_content(dump.get("path"))
+    if memory_heuristics:
+        analysis["findings"].extend(memory_heuristics)
+        severity, verdict, summary = _summarize_findings(analysis["findings"], pid, pname)
+        analysis["severity"] = severity
+        analysis["verdict"] = verdict
+        analysis["summary"] = summary
+    memory_yara = yara_scanner.scan_file(
+        dump.get("path", ""),
+        pack="memory",
+        context={
+            "filepath": dump.get("path", "") or "",
+            "filename": Path(str(dump.get("path", "") or "")).name,
+            "scope": "memory",
+        },
+    ) if dump.get("path") else {
+        "status": "skipped",
+        "reason": "Memory dump path unavailable",
+        "matches": [],
+    }
+    fused = _fuse_memory_verdict(analysis, memory_yara)
+    analysis["memory_yara"] = memory_yara
+    analysis["fusion"] = fused
     return {
         "dump": dump,
         "analysis": analysis,
+    }
+
+
+def _fuse_memory_verdict(analysis: dict[str, Any], memory_yara: dict[str, Any]) -> dict[str, Any]:
+    score = 0
+    reasons: list[str] = []
+    severity = str(analysis.get("severity", "low")).lower()
+    if severity == "critical":
+        score += 55
+        reasons.append("Volatility surfaced critical hidden-process or stealth behaviour.")
+    elif severity == "high":
+        score += 35
+        reasons.append("Volatility surfaced high-severity memory injection indicators.")
+    elif severity == "medium":
+        score += 20
+        reasons.append("Volatility surfaced medium-severity memory anomalies.")
+
+    yara_score = int(memory_yara.get("score", 0) or 0) if isinstance(memory_yara, dict) else 0
+    yara_hits = int(memory_yara.get("active_match_count", memory_yara.get("match_count", 0)) or 0) if isinstance(memory_yara, dict) else 0
+    if yara_hits:
+        score += min(40, 10 + int(yara_score * 0.4))
+        reasons.append(f"Memory YARA matched {yara_hits} rule(s).")
+
+    final_score = max(0, min(100, score))
+    return {
+        "score": final_score,
+        "severity": "critical" if final_score >= 80 else "high" if final_score >= 55 else "medium" if final_score >= 30 else "low",
+        "confidence": "high" if final_score >= 75 else "medium" if final_score >= 45 else "low",
+        "reasons": reasons,
     }
 
 
@@ -165,6 +219,59 @@ def _simulate_findings(pid: int, pname: str) -> tuple[list[dict[str, Any]], list
     if not findings:
         lines.append("No injected code or hidden process artefacts identified in fallback mode.")
     return findings, lines
+
+
+def _analyze_dump_content(dump_path: str | Path | None) -> list[dict[str, Any]]:
+    if not dump_path:
+        return []
+    path = Path(dump_path)
+    if not path.exists():
+        return []
+    try:
+        lowered = path.read_bytes().lower()
+    except Exception:
+        return []
+
+    findings: list[dict[str, Any]] = []
+    if b"amsiscanbuffer" in lowered and b"etweventwrite" in lowered and b"virtualprotect" in lowered:
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "critical",
+                "title": "Patched AMSI or ETW sequence",
+                "detail": "Memory dump contained AMSI or ETW patch markers chained with memory-protection changes.",
+            }
+        )
+    if b"ntdll.dll" in lowered and b".text" in lowered and b"ntmapviewofsection" in lowered and b"ntunmapviewofsection" in lowered:
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "critical",
+                "title": "NTDLL remap or unhook sequence",
+                "detail": "Memory dump contained ntdll remap markers consistent with unhooking activity.",
+            }
+        )
+    if (b"ntqueueapcthread" in lowered or b"queueuserapc" in lowered) and (
+        b"ntwritevirtualmemory" in lowered or b"createremotethread" in lowered or b"rtlcreateuserthread" in lowered
+    ):
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "high",
+                "title": "APC or remote-thread injection chain",
+                "detail": "Memory dump contained APC or remote-thread APIs chained with injection markers.",
+            }
+        )
+    if b"page_execute_readwrite" in lowered or b"rwx" in lowered:
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "high",
+                "title": "Executable writable region markers",
+                "detail": "Memory dump contained RWX or PAGE_EXECUTE_READWRITE markers associated with shellcode staging.",
+            }
+        )
+    return findings
 
 
 def _parse_volatility_output(plugin: str, output: str, pid: int, pname: str) -> list[dict[str, Any]]:

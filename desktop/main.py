@@ -942,13 +942,14 @@ class ShadowLabDesktop(QMainWindow):
             "Sandbox": "can_run_hunt",
             "Process Tree": "can_run_hunt",
             "AI Analyst": "can_run_hunt",
+            "Triage Respond": "can_manage_process_actions",
             "Suspend": "can_manage_process_actions",
             "Resume": "can_manage_process_actions",
             "Kill": "can_manage_process_actions",
             "Kill Tree": "can_manage_process_actions",
             "Quarantine": "can_manage_process_actions",
         }
-        for text, fn in [("Auto Triage", self.run_auto_triage),("Threat Scan", self.scan_selected_process),("Memory Analysis", self.run_memory_analysis),("Internals", self.load_selected_internals),("Strings", self.run_strings_analysis),("YARA", self.run_yara_scan),("Sandbox", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis),("Suspend", lambda: self.process_action("suspend")),("Resume", lambda: self.process_action("resume")),("Kill", lambda: self.process_action("kill")),("Kill Tree", lambda: self.process_action("kill-tree")),("Quarantine", lambda: self.process_action("quarantine"))]:
+        for text, fn in [("Auto Triage", self.run_auto_triage),("Threat Scan", self.scan_selected_process),("Memory Analysis", self.run_memory_analysis),("Internals", self.load_selected_internals),("Strings", self.run_strings_analysis),("YARA", self.run_yara_scan),("Sandbox", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis),("Triage Respond", self.run_triage_response),("Suspend", lambda: self.process_action("suspend")),("Resume", lambda: self.process_action("resume")),("Kill", lambda: self.process_action("kill")),("Kill Tree", lambda: self.process_action("kill-tree")),("Quarantine", lambda: self.process_action("quarantine"))]:
             b = QPushButton(text)
             b.clicked.connect(fn)
             self._bind_capability(b, process_capabilities[text])
@@ -1499,6 +1500,16 @@ class ShadowLabDesktop(QMainWindow):
         row.addStretch(1)
         l.addWidget(self._panel_card("Security Ops Controls", controls, lambda: self._open_panel_window("Security Ops Controls", QLabel("Use Security Ops controls in main workspace."))))
 
+        yara_controls = QWidget(); yara_row = QHBoxLayout(yara_controls); yara_row.setContentsMargins(0, 0, 0, 0); yara_row.setSpacing(8)
+        refresh_yara_btn = QPushButton("Refresh YARA Ops"); refresh_yara_btn.clicked.connect(self.refresh_yara_ops_workspace); self._bind_capability(refresh_yara_btn, "can_manage_integrations")
+        load_yara_policy_btn = QPushButton("Load YARA Policy"); load_yara_policy_btn.clicked.connect(self.load_local_yara_policy); self._bind_capability(load_yara_policy_btn, "can_manage_integrations")
+        save_yara_policy_btn = QPushButton("Save YARA Policy"); save_yara_policy_btn.clicked.connect(self.save_local_yara_policy); self._bind_capability(save_yara_policy_btn, "can_manage_integrations")
+        load_yara_errors_btn = QPushButton("YARA Errors"); load_yara_errors_btn.clicked.connect(self.load_local_yara_errors); self._bind_capability(load_yara_errors_btn, "can_manage_integrations")
+        for btn in [refresh_yara_btn, load_yara_policy_btn, save_yara_policy_btn, load_yara_errors_btn]:
+            yara_row.addWidget(btn)
+        yara_row.addStretch(1)
+        l.addWidget(self._panel_card("Local YARA Controls", yara_controls, lambda: self._open_panel_window("Local YARA Controls", QLabel("Use YARA controls in main workspace."))))
+
         self.security_ops_summary = QTextBrowser(); self.security_ops_summary.setProperty("role", "brief"); self.security_ops_summary.setMinimumHeight(150)
         l.addWidget(self._panel_card("Security Ops Summary", self.security_ops_summary, lambda: self._open_panel_window("Security Ops Summary", self._clone_text_view(self.security_ops_summary))))
 
@@ -1506,9 +1517,14 @@ class ShadowLabDesktop(QMainWindow):
         left = QWidget(); ll = QVBoxLayout(left)
         self.security_integrity_table = QTableWidget(0, 2); self.security_integrity_table.setHorizontalHeaderLabels(["Bucket", "Count"]); self._style_table(self.security_integrity_table)
         self.security_platform_table = QTableWidget(0, 2); self.security_platform_table.setHorizontalHeaderLabels(["Domain", "Status"]); self._style_table(self.security_platform_table)
+        self.security_yara_table = QTableWidget(0, 4); self.security_yara_table.setHorizontalHeaderLabels(["Source", "Hits", "Suppressed", "Avg Score"]); self._style_table(self.security_yara_table)
         ll.addWidget(self._panel_card("Integrity Drift", self.security_integrity_table, lambda: self._open_panel_window("Integrity Drift", self._clone_table(self.security_integrity_table))))
         ll.addWidget(self._panel_card("Platform Readiness", self.security_platform_table, lambda: self._open_panel_window("Platform Readiness", self._clone_table(self.security_platform_table))))
+        ll.addWidget(self._panel_card("YARA Source Analytics", self.security_yara_table, lambda: self._open_panel_window("YARA Source Analytics", self._clone_table(self.security_yara_table))))
         right = QWidget(); rl = QVBoxLayout(right)
+        self.security_yara_policy = QTextEdit(); self.security_yara_policy.setPlaceholderText('{"allowlist_rule_patterns":[],"boost_rule_patterns":{}}')
+        self.security_yara_policy.setMinimumHeight(180)
+        rl.addWidget(self._panel_card("Local YARA Policy", self.security_yara_policy, lambda: self._open_panel_window("Local YARA Policy", self._clone_text_view(self.security_yara_policy))))
         self.security_ops_detail = QTextEdit(); self.security_ops_detail.setReadOnly(True)
         rl.addWidget(self._panel_card("Security Ops Detail", self.security_ops_detail, lambda: self._open_panel_window("Security Ops Detail", self._clone_text_view(self.security_ops_detail))))
         split.addWidget(left); split.addWidget(right); split.setStretchFactor(0, 2); split.setStretchFactor(1, 3)
@@ -1670,6 +1686,7 @@ class ShadowLabDesktop(QMainWindow):
 
     def _get(self, path: str, **kwargs): return self._request("GET", path, **kwargs)
     def _post(self, path: str, **kwargs): return self._request("POST", path, **kwargs)
+    def _put(self, path: str, **kwargs): return self._request("PUT", path, **kwargs)
     def _patch(self, path: str, **kwargs): return self._request("PATCH", path, **kwargs)
     def _delete(self, path: str, **kwargs): return self._request("DELETE", path, **kwargs)
 
@@ -1837,6 +1854,101 @@ class ShadowLabDesktop(QMainWindow):
 
     def _show_json(self, widget: QTextEdit, payload) -> None:
         widget.setPlainText(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    def _format_triage_summary(self, result: dict) -> str:
+        summary = result.get("triage_summary", {}) if isinstance(result, dict) else {}
+        fusion = result.get("fusion", {}) if isinstance(result, dict) else {}
+        response_plan = result.get("response_plan", {}) if isinstance(result, dict) else {}
+        yara_block = result.get("yara", {}) if isinstance(result, dict) else {}
+        memory = result.get("memory", {}) if isinstance(result, dict) else {}
+        reasons = [str(item).strip() for item in summary.get("reasons", []) if str(item).strip()]
+        remote_matches = [str(item).strip() for item in yara_block.get("matches", []) if str(item).strip()]
+        local_matches = [str(item).strip() for item in yara_block.get("local_matches", []) if str(item).strip()]
+        memory_yara = (memory.get("memory_yara", {}) or {}) if isinstance(memory, dict) else {}
+        memory_matches = [str(item).strip() for item in memory_yara.get("matched_rules", []) if str(item).strip()]
+        auto_actions = [str(item.get("action", "")).strip() for item in response_plan.get("auto", []) if str(item.get("action", "")).strip()]
+        manual_actions = [str(item.get("action", "")).strip() for item in response_plan.get("manual", []) if str(item.get("action", "")).strip()]
+        lines = [
+            "Auto Triage Summary",
+            "",
+            f"Verdict: {summary.get('verdict', fusion.get('verdict', 'unknown'))}",
+            f"Severity: {summary.get('severity', fusion.get('severity', 'unknown'))}",
+            f"Confidence: {summary.get('confidence', fusion.get('confidence', 'low'))}",
+            f"Risk Score: {summary.get('score', fusion.get('score', 0))}",
+            "",
+            "Why It Triggered:",
+            *(reasons[:8] or ["No strong reasons captured."]),
+            "",
+            f"YARAify Matches: {len(remote_matches)}",
+            *(remote_matches[:8] or ["None"]),
+            "",
+            f"Local YARA Matches: {len(local_matches)}",
+            *(local_matches[:12] or ["None"]),
+            "",
+            f"Memory YARA Matches: {len(memory_matches)}",
+            *(memory_matches[:12] or ["None"]),
+            "",
+            "Planned Auto Response:",
+            *(auto_actions or ["None"]),
+            "",
+            "Analyst Review Queue:",
+            *(manual_actions or ["None"]),
+        ]
+        return "\n".join(lines)
+
+    def _format_yara_summary(self, result: dict) -> str:
+        yaraify = result.get("result", {}) if isinstance(result, dict) else {}
+        remote_matches = [str(item).strip() for item in result.get("matches", []) if str(item).strip()]
+        local_result = result.get("local_result", {}) if isinstance(result, dict) else {}
+        local_matches = [str(item).strip() for item in local_result.get("matched_rules", []) if str(item).strip()]
+        provider = str(result.get("provider", "YARAify"))
+        lines = [
+            f"{provider} + Local YARA",
+            "",
+            f"Remote Status: {yaraify.get('status', 'unknown')}",
+            f"Remote Rule Count: {yaraify.get('yara_rule_count', 0)}",
+            f"Remote Matches: {len(remote_matches)}",
+            *(remote_matches[:12] or ["None"]),
+            "",
+            f"Local Pack: {local_result.get('pack', 'n/a')}",
+            f"Local Severity: {local_result.get('severity', 'unknown')}",
+            f"Local Confidence: {local_result.get('confidence', 'low')}",
+            f"Local Score: {local_result.get('score', 0)}",
+            f"Local Matches: {len(local_matches)}",
+            *(local_matches[:16] or ["None"]),
+        ]
+        compile_errors = local_result.get("compile_errors", []) if isinstance(local_result, dict) else []
+        if compile_errors:
+            lines.extend(["", f"Compile Errors: {len(compile_errors)}", *(str(item) for item in compile_errors[:6])])
+        return "\n".join(lines)
+
+    def _format_response_execution(self, result: dict) -> str:
+        fusion = result.get("fusion", {}) if isinstance(result, dict) else {}
+        applied = result.get("applied", {}) if isinstance(result, dict) else {}
+        executed = applied.get("executed", []) if isinstance(applied, dict) else []
+        skipped = applied.get("skipped", []) if isinstance(applied, dict) else []
+        lines = [
+            "Triage Response Execution",
+            "",
+            f"Verdict: {fusion.get('verdict', 'unknown')}",
+            f"Severity: {fusion.get('severity', 'unknown')}",
+            f"Confidence: {fusion.get('confidence', 'low')}",
+            f"Score: {fusion.get('score', 0)}",
+            "",
+            "Executed Actions:",
+        ]
+        if executed:
+            for item in executed:
+                lines.append(f"- {item.get('action', 'unknown')}: {item.get('status', 'done')}")
+        else:
+            lines.append("None")
+        lines.extend(["", "Deferred Actions:"])
+        if skipped:
+            for item in skipped:
+                lines.append(f"- {item.get('action', 'unknown')}: {item.get('reason', 'manual review')}")
+        else:
+            lines.append("None")
+        return "\n".join(lines)
 
     def _switch_to_tab(self, tab_name: str) -> None:
         wanted = tab_name.strip().lower()
@@ -2900,15 +3012,7 @@ class ShadowLabDesktop(QMainWindow):
         except Exception as exc:
             self._show_error(self.hunt_out, "YARA scan failed", exc)
             return
-        lookup = result.get("result", {}) if isinstance(result, dict) else {}
-        matches = result.get("matches", [])
-        provider = result.get("provider", "YARAify")
-        self.hunt_out.setPlainText(
-            f"{provider} Lookup\n\n"
-            f"Status: {lookup.get('status', 'unknown')}\n"
-            f"Rule Count: {lookup.get('yara_rule_count', 0)}\n"
-            f"Matches:\n" + ("\n".join(matches) if matches else "None")
-        )
+        self.hunt_out.setPlainText(self._format_yara_summary(result))
         self._switch_to_tab("Advanced Hunt")
 
     def run_sandbox_trace(self) -> None:
@@ -2979,7 +3083,29 @@ class ShadowLabDesktop(QMainWindow):
         except Exception as exc:
             self._show_error(self.hunt_out, "Auto triage failed", exc)
             return
-        self._show_json(self.hunt_out, result)
+        self.hunt_out.setPlainText(self._format_triage_summary(result))
+        self._switch_to_tab("Advanced Hunt")
+
+    def run_triage_response(self) -> None:
+        ident = self._selected_process_or_warn()
+        if not ident:
+            return
+        pid, name = ident
+        answer = QMessageBox.question(
+            self,
+            "Apply Triage Response",
+            f"Apply policy-driven triage response for {name} (PID {pid})?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            result = self._post(f"/triage/{pid}/respond", json={"process_name": name}, timeout=120).json()
+        except Exception as exc:
+            self._show_error(self.hunt_out, "Triage response failed", exc)
+            return
+        self.hunt_out.setPlainText(self._format_response_execution(result))
         self._switch_to_tab("Advanced Hunt")
 
     def run_monitor(self) -> None:
@@ -4492,19 +4618,24 @@ class ShadowLabDesktop(QMainWindow):
         try:
             report = self._get("/enterprise/report/security-ops", timeout=45).json()
             observability = self._get("/observability/summary", timeout=30).json()
+            yara_health = self._get("/yara/local/health", timeout=30).json()
+            yara_analytics = self._get("/yara/local/analytics", timeout=30).json()
         except Exception as exc:
             self._show_error(self.security_ops_detail, "Security Ops refresh failed", exc)
             return
         integrity = report.get("integrity", {})
         abuse = report.get("abuse", {})
         database = report.get("database", {})
+        sources = yara_analytics.get("sources", []) if isinstance(yara_analytics, dict) else []
         counts = integrity.get("counts", {}) if isinstance(integrity.get("counts"), dict) else {}
         self.security_ops_summary.setHtml(
             "<h3>Security Ops Posture</h3>"
             f"<p><b>Integrity status:</b> {html.escape(str(integrity.get('status', 'unknown')))}"
             f"<br><b>Signature valid:</b> {html.escape(str(integrity.get('signature_valid', False)))}"
             f"<br><b>Dead letters:</b> {html.escape(str(abuse.get('dead_letters', 0)))}"
-            f"<br><b>Observability events:</b> {html.escape(str(observability.get('event_count', 0)))}</p>"
+            f"<br><b>Observability events:</b> {html.escape(str(observability.get('event_count', 0)))}"
+            f"<br><b>YARA compile errors:</b> {html.escape(str(yara_health.get('compile_error_count', 0)))}"
+            f"<br><b>YARA scans tracked:</b> {html.escape(str(len(yara_analytics.get('recent_scans', []))))}</p>"
         )
         integrity_rows = [
             ("verified", counts.get("verified", 0)),
@@ -4526,7 +4657,67 @@ class ShadowLabDesktop(QMainWindow):
         for r, item in enumerate(platform_rows):
             self.security_platform_table.setItem(r, 0, QTableWidgetItem(str(item[0])))
             self.security_platform_table.setItem(r, 1, QTableWidgetItem(str(item[1])))
-        self._show_json(self.security_ops_detail, {"report": report, "observability": observability})
+        self.security_yara_table.setRowCount(len(sources[:12]))
+        for r, item in enumerate(sources[:12]):
+            self.security_yara_table.setItem(r, 0, QTableWidgetItem(str(item.get("source", "unknown"))))
+            self.security_yara_table.setItem(r, 1, QTableWidgetItem(str(item.get("total_hits", 0))))
+            self.security_yara_table.setItem(r, 2, QTableWidgetItem(str(item.get("suppressed_hits", 0))))
+            self.security_yara_table.setItem(r, 3, QTableWidgetItem(f"{float(item.get('avg_score', 0) or 0):.1f}"))
+        self._show_json(self.security_ops_detail, {"report": report, "observability": observability, "yara_health": yara_health, "yara_analytics": yara_analytics})
+
+    def refresh_yara_ops_workspace(self) -> None:
+        try:
+            health = self._get("/yara/local/health", timeout=30).json()
+            analytics = self._get("/yara/local/analytics", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "YARA ops refresh failed", exc)
+            return
+        self.security_ops_summary.setHtml(
+            "<h3>Local YARA Operations</h3>"
+            f"<p><b>Policy loaded:</b> {html.escape(str(health.get('policy_loaded', False)))}"
+            f"<br><b>Compile errors:</b> {html.escape(str(health.get('compile_error_count', 0)))}"
+            f"<br><b>Enterprise rules loaded:</b> {html.escape(str(health.get('enterprise_rules_loaded', 0)))}</p>"
+        )
+        sources = analytics.get("sources", []) if isinstance(analytics, dict) else []
+        self.security_yara_table.setRowCount(len(sources[:12]))
+        for r, item in enumerate(sources[:12]):
+            self.security_yara_table.setItem(r, 0, QTableWidgetItem(str(item.get("source", "unknown"))))
+            self.security_yara_table.setItem(r, 1, QTableWidgetItem(str(item.get("total_hits", 0))))
+            self.security_yara_table.setItem(r, 2, QTableWidgetItem(str(item.get("suppressed_hits", 0))))
+            self.security_yara_table.setItem(r, 3, QTableWidgetItem(f"{float(item.get('avg_score', 0) or 0):.1f}"))
+        self._show_json(self.security_ops_detail, {"yara_health": health, "yara_analytics": analytics})
+
+    def load_local_yara_policy(self) -> None:
+        try:
+            result = self._get("/yara/local/policy", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Local YARA policy load failed", exc)
+            return
+        self.security_yara_policy.setPlainText(json.dumps(result.get("policy", {}), indent=2, ensure_ascii=False))
+        self._show_json(self.security_ops_detail, result)
+
+    def save_local_yara_policy(self) -> None:
+        try:
+            payload = json.loads(self.security_yara_policy.toPlainText() or "{}")
+        except ValueError as exc:
+            self._show_error(self.security_ops_detail, "Local YARA policy save failed", exc)
+            return
+        try:
+            result = self._put("/yara/local/policy", json={"policy": payload}, timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Local YARA policy save failed", exc)
+            return
+        self.security_yara_policy.setPlainText(json.dumps(result.get("policy", {}), indent=2, ensure_ascii=False))
+        self._show_json(self.security_ops_detail, result)
+        self.refresh_yara_ops_workspace()
+
+    def load_local_yara_errors(self) -> None:
+        try:
+            result = self._get("/yara/local/errors", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.security_ops_detail, "Local YARA errors failed", exc)
+            return
+        self._show_json(self.security_ops_detail, result)
 
     def refresh_integrity_manifest(self) -> None:
         try:

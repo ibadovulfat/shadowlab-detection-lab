@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from plugins import yara_scanner
 
 ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
 MALWAREBAZAAR_AUTH_KEY = os.environ.get("MALWAREBAZAAR_AUTH_KEY")
@@ -218,6 +219,109 @@ def check_file_yaraify(file_hash: str, auth_key: str | None = None) -> dict[str,
         return {"status": "error", "message": str(exc)}
 
 
+def run_local_yara_scan(filepath: str, pack: str = "enterprise", context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return yara_scanner.scan_file(filepath, pack=pack, context=context)
+
+
+def _should_run_local_yara(yaraify_result: dict[str, Any] | None) -> bool:
+    if not isinstance(yaraify_result, dict):
+        return True
+    status = str(yaraify_result.get("status", "")).lower()
+    if status in {"error", "skipped", "forbidden", "not_found", "unknown", "missing", "unavailable"}:
+        return True
+    if status != "ok":
+        return True
+    return int(yaraify_result.get("yara_rule_count", 0) or 0) <= 0 and not yaraify_result.get("matched_rules")
+
+
+def _normalized_status(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _severity_from_score(score: int) -> str:
+    if score >= 85:
+        return "critical"
+    if score >= 65:
+        return "high"
+    if score >= 40:
+        return "medium"
+    return "low"
+
+
+def fuse_detection_verdict(
+    *,
+    yaraify_result: dict[str, Any] | None = None,
+    local_yara_result: dict[str, Any] | None = None,
+    virustotal_result: dict[str, Any] | None = None,
+    malwarebazaar_result: dict[str, Any] | None = None,
+    memory_result: dict[str, Any] | None = None,
+    behavior_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    score = 0
+    reasons: list[str] = []
+
+    if isinstance(yaraify_result, dict) and _normalized_status(yaraify_result.get("status")) == "ok":
+        yaraify_hits = len(yaraify_result.get("matched_rules", []) or [])
+        if yaraify_hits:
+            addition = min(35, 15 + (yaraify_hits * 3))
+            score += addition
+            reasons.append(f"YARAify matched {yaraify_hits} rule(s).")
+
+    if isinstance(local_yara_result, dict):
+        local_score = int(local_yara_result.get("score", 0) or 0)
+        local_hits = int(local_yara_result.get("active_match_count", local_yara_result.get("match_count", 0)) or 0)
+        suppressed_hits = int(local_yara_result.get("suppressed_match_count", 0) or 0)
+        if local_hits:
+            addition = min(40, 10 + int(local_score * 0.45))
+            score += addition
+            reasons.append(f"Local YARA matched {local_hits} rule(s) with {local_yara_result.get('confidence', 'low')} confidence.")
+        if suppressed_hits:
+            reasons.append(f"Suppressed {suppressed_hits} lower-confidence local YARA match(es) via allowlist.")
+
+    if isinstance(malwarebazaar_result, dict) and _normalized_status(malwarebazaar_result.get("status")) == "ok":
+        score += 20
+        signature = malwarebazaar_result.get("signature")
+        reasons.append(f"MalwareBazaar returned a known sample{' (' + str(signature) + ')' if signature else ''}.")
+
+    if isinstance(virustotal_result, dict):
+        stats = (virustotal_result.get("last_analysis_stats") or {}) if isinstance(virustotal_result, dict) else {}
+        malicious = int(stats.get("malicious", 0) or 0)
+        suspicious = int(stats.get("suspicious", 0) or 0)
+        if malicious or suspicious:
+            vt_score = min(25, malicious * 3 + suspicious * 2)
+            score += vt_score
+            reasons.append(f"VirusTotal reported malicious={malicious}, suspicious={suspicious}.")
+
+    if isinstance(memory_result, dict):
+        analysis = memory_result.get("analysis", {}) if isinstance(memory_result.get("analysis"), dict) else memory_result
+        memory_yara = analysis.get("memory_yara", {}) if isinstance(analysis.get("memory_yara"), dict) else {}
+        if memory_yara.get("match_count"):
+            score += min(30, 12 + int(memory_yara.get("score", 0) * 0.3))
+            reasons.append(f"Memory YARA matched {memory_yara.get('match_count', 0)} rule(s).")
+        severity = _normalized_status(analysis.get("severity"))
+        if severity == "critical":
+            score += 25
+            reasons.append("Memory analysis found critical stealth or injection artefacts.")
+        elif severity == "high":
+            score += 15
+            reasons.append("Memory analysis found high-severity injection artefacts.")
+
+    if isinstance(behavior_result, dict):
+        likelihood = float(behavior_result.get("likelihood", 0.0) or 0.0)
+        if likelihood > 0:
+            addition = min(30, int(likelihood * 25))
+            score += addition
+            reasons.append(f"Behavioral engine likelihood={likelihood:.2f}.")
+
+    final_score = max(0, min(100, score))
+    return {
+        "score": final_score,
+        "severity": _severity_from_score(final_score),
+        "confidence": "high" if final_score >= 75 else "medium" if final_score >= 45 else "low",
+        "reasons": reasons,
+    }
+
+
 def scan_process(
     proc_info: dict[str, Any],
     virustotal_api_key: str | None = None,
@@ -235,11 +339,35 @@ def scan_process(
     vt_result = check_file_vt(file_hash, virustotal_api_key)
     malwarebazaar_result = check_file_malwarebazaar(file_hash, malwarebazaar_auth_key)
     yaraify_result = check_file_yaraify(file_hash, yaraify_auth_key)
+    if _should_run_local_yara(yaraify_result):
+        local_yara_result = run_local_yara_scan(
+            exe_path,
+            context={
+                "sha256": file_hash,
+                "signature_status": proc_info.get("signature_status", ""),
+                "filepath": exe_path,
+            },
+        )
+    else:
+        local_yara_result = {
+            "status": "skipped",
+            "reason": "YARAify already returned matches",
+            "matches": [],
+        }
+    fusion = fuse_detection_verdict(
+        yaraify_result=yaraify_result,
+        local_yara_result=local_yara_result,
+        virustotal_result=vt_result,
+        malwarebazaar_result=malwarebazaar_result,
+    )
     return {
         "process": proc_info.get("name"),
         "pid": proc_info.get("pid"),
+        "path": exe_path,
         "hash": file_hash,
         "virustotal": vt_result,
         "malwarebazaar": malwarebazaar_result,
         "yaraify": yaraify_result,
+        "local_yara": local_yara_result,
+        "fusion": fusion,
     }

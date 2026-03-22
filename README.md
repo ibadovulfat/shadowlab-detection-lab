@@ -70,6 +70,7 @@ Inside `Enterprise`, the workspace is split into:
 - telemetry monitoring with CPU, memory, thread, handle, file, TCP, and bandwidth metrics
 - Windows Defender and Sysmon event summarization
 - rule-based and scored behavioral detections
+- layered `YARAify -> local YARA -> memory YARA` triage with curated `rules-master`, `signature-base`, and ShadowLab tradecraft packs
 - incident bundle generation and incident status updates
 - process profile, tree, memory-analysis metadata, strings, internals, YARAify enrichment, sandbox trace, AI analysis, and one-click triage
 - persistence discovery, remediation, and rollback workflows
@@ -94,6 +95,23 @@ desktop/     PySide6 desktop client
 docs/        Usage and production operation guides
 scripts/     Startup, auth, packaging, migration, and verification helpers
 ```
+
+## Local YARA Layer
+
+ShadowLab now uses a layered local YARA pipeline tuned for Windows tradecraft and payload triage.
+
+- `YARAify` remains the first external lookup
+- local fallback and deep scan use ShadowLab rules, `rules-master`, and `signature-base-master`
+- dedicated `Inceptor_*` and `Memory_*` rules raise confidence for AMSI, ETW, manual map, syscall, APC, and unhook tradecraft
+- noisy community rules such as `domain.yar` and `RAT_PoetRATPython.yar` were removed from the enterprise pack
+
+Latest validated state:
+
+- `enterprise_rules_requested = 1163`
+- `enterprise_rules_loaded = 1163`
+- `compile_error_count = 0`
+
+Detailed validation notes live in [plugins/rules/YARA_VALIDATION.md](plugins/rules/YARA_VALIDATION.md).
 
 ## Quick Start
 

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 import database as db
 import api.security as security_module
 import monitor_core
+from plugins import yara_scanner
 from api.security import (
     SecurityContext,
     build_auth_context_payload,
@@ -59,7 +60,7 @@ from services.response_service import ResponseOrchestrator
 from services.secret_store import secret_store
 from services.telemetry_service import CollectorTelemetryBridge, TelemetryMonitoringService
 from services.timeline_service import TimelineService
-from threat_intelligence import check_file_malwarebazaar, check_file_vt, check_file_yaraify, check_ip, scan_process
+from threat_intelligence import check_file_malwarebazaar, check_file_vt, check_file_yaraify, check_ip, fuse_detection_verdict, run_local_yara_scan, scan_process
 import yaml
 
 
@@ -260,6 +261,7 @@ class StringScanRequest(BaseModel):
 
 class YaraLookupRequest(BaseModel):
     yaraify_auth_key: str | None = None
+    local_yara_pack: str = Field(default="enterprise")
 
 
 class SandboxTraceRequest(BaseModel):
@@ -321,9 +323,26 @@ class TriageRequest(BaseModel):
     virustotal_api_key: str | None = None
     malwarebazaar_auth_key: str | None = None
     yaraify_auth_key: str | None = None
+    local_yara_pack: str = Field(default="enterprise")
     trace_duration: int = Field(default=3, ge=1, le=20)
     strings_min_length: int = Field(default=4, ge=3, le=20)
     strings_patterns: list[str] = Field(default_factory=lambda: ["http", "powershell", "cmd", "password"])
+
+
+class TriageRespondRequest(BaseModel):
+    process_name: str = ""
+
+
+class LocalYaraPolicyRequest(BaseModel):
+    policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class LocalYaraRuleTuningRequest(BaseModel):
+    rule_id: str
+    score_delta: int = Field(default=0, ge=0, le=20)
+    disabled: bool = False
+    force: bool = False
+    notes: str = ""
 
 
 class AgentRegistrationRequest(BaseModel):
@@ -1620,17 +1639,111 @@ def process_strings(pid: int, payload: StringScanRequest) -> dict[str, Any]:
 def process_yara(pid: int, payload: YaraLookupRequest) -> dict[str, Any]:
     profile = process_intel_service.profile_process(pid)
     file_hash = profile.get("sha256")
-    if not file_hash:
-        raise HTTPException(status_code=400, detail="Process hash unavailable for YARAify lookup")
-    result = check_file_yaraify(file_hash, payload.yaraify_auth_key)
+    exe_path = str(profile.get("exe") or "")
+    result = {
+        "status": "skipped",
+        "reason": "Process hash unavailable for YARAify lookup",
+    }
+    if file_hash:
+        result = check_file_yaraify(file_hash, payload.yaraify_auth_key)
+    local_result = run_local_yara_scan(
+        exe_path,
+        pack=payload.local_yara_pack,
+        context={
+            "sha256": file_hash or "",
+            "signature_status": profile.get("signature_status", ""),
+            "filepath": exe_path,
+        },
+    ) if exe_path else {
+        "status": "skipped",
+        "reason": "Executable path unavailable for local YARA scan",
+        "matches": [],
+    }
     return {
         "pid": pid,
-        "exe": profile.get("exe"),
+        "exe": exe_path,
         "hash": file_hash,
         "provider": "YARAify",
         "result": result,
+        "local_result": local_result,
         "matches": result.get("matched_rules", []) if isinstance(result, dict) else [],
+        "local_matches": local_result.get("matched_rules", []) if isinstance(local_result, dict) else [],
     }
+
+
+@app.get("/yara/local/health", dependencies=[Depends(require_analyst_or_admin)])
+def local_yara_health() -> dict[str, Any]:
+    return yara_scanner.build_health_report()
+
+
+@app.get("/yara/local/policy", dependencies=[Depends(require_admin)])
+def local_yara_policy() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "policy": yara_scanner.load_policy(),
+        "health": yara_scanner.build_health_report(),
+    }
+
+
+@app.put("/yara/local/policy", dependencies=[Depends(require_admin)])
+def update_local_yara_policy(payload: LocalYaraPolicyRequest) -> dict[str, Any]:
+    saved = yara_scanner.save_policy(payload.policy)
+    conn = db.create_connection()
+    if conn:
+        try:
+            db.set_app_setting(conn, "local_yara_policy_json", json.dumps(saved, ensure_ascii=False))
+        finally:
+            conn.close()
+    return {
+        "status": "updated",
+        "policy": saved,
+        "health": yara_scanner.build_health_report(),
+    }
+
+
+@app.get("/yara/local/errors", dependencies=[Depends(require_analyst_or_admin)])
+def local_yara_errors() -> dict[str, Any]:
+    health = yara_scanner.build_health_report()
+    return {
+        "status": "ok",
+        "compile_error_count": health.get("compile_error_count", 0),
+        "compile_errors": health.get("compile_errors", []),
+        "policy_path": health.get("policy_path", ""),
+    }
+
+
+@app.get("/yara/local/analytics", dependencies=[Depends(require_analyst_or_admin)])
+def local_yara_analytics(limit: int = 250) -> dict[str, Any]:
+    return yara_scanner.analyze_sources(limit=max(25, min(int(limit), 1000)))
+
+
+@app.post("/yara/local/tuning/rule", dependencies=[Depends(require_admin)])
+def update_local_yara_rule_tuning(payload: LocalYaraRuleTuningRequest) -> dict[str, Any]:
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+    try:
+        db.upsert_detection_rule(
+            conn,
+            rule_id=payload.rule_id,
+            tuning_json=json.dumps({"score_delta": payload.score_delta}, ensure_ascii=False),
+            suppression_json=json.dumps({"disabled": payload.disabled, "force": payload.force}, ensure_ascii=False),
+            notes=payload.notes,
+        )
+        registry = db.get_detection_rules(conn).fillna("").to_dict(orient="records")
+    finally:
+        conn.close()
+    return {"status": "updated", "rule_id": payload.rule_id, "registry": registry[:100]}
+
+
+@app.get("/yara/local/update-workflow", dependencies=[Depends(require_analyst_or_admin)])
+def local_yara_update_workflow() -> dict[str, Any]:
+    return yara_scanner.build_update_workflow_report()
+
+
+@app.post("/yara/local/update-workflow/snapshot", dependencies=[Depends(require_admin)])
+def snapshot_local_yara_update_workflow() -> dict[str, Any]:
+    return yara_scanner.save_update_snapshot()
 
 
 @app.post("/processes/{pid}/sandbox-trace", dependencies=[Depends(require_analyst_or_admin)])
@@ -2122,9 +2235,25 @@ def auto_triage(request: Request, pid: int, payload: TriageRequest) -> dict[str,
             "status": "skipped",
             "reason": "Process hash unavailable",
         }
+        local_yara = run_local_yara_scan(
+            exe_path,
+            pack=payload.local_yara_pack,
+            context={
+                "sha256": profile.get("sha256", "") or "",
+                "signature_status": profile.get("signature_status", ""),
+                "filepath": exe_path or "",
+            },
+        ) if exe_path and (
+            str(yara_lookup.get("status", "")).lower() != "ok" or not yara_lookup.get("matched_rules")
+        ) else {
+            "status": "skipped",
+            "reason": "YARAify already returned matches",
+            "matches": [],
+        }
         yara_matches = yara_lookup.get("matched_rules", []) if isinstance(yara_lookup, dict) else []
         trace = sandbox.ProcessTracer(pid).trace(duration=payload.trace_duration, interval=0.5)
         analyst = ai_analyst.AIAnalyst().analyze_process(profile)
+        memory_result = memory_forensics.run_analysis(pid, profile.get("name", "process"))
         intel = None
         if payload.virustotal_api_key or payload.malwarebazaar_auth_key or payload.yaraify_auth_key:
             intel = scan_process(
@@ -2133,20 +2262,101 @@ def auto_triage(request: Request, pid: int, payload: TriageRequest) -> dict[str,
                 malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
                 yaraify_auth_key=payload.yaraify_auth_key,
             )
+        fused_verdict = fuse_detection_verdict(
+            yaraify_result=yara_lookup,
+            local_yara_result=local_yara,
+            virustotal_result=(intel or {}).get("virustotal", {}) if isinstance(intel, dict) else {},
+            malwarebazaar_result=(intel or {}).get("malwarebazaar", {}) if isinstance(intel, dict) else {},
+            memory_result=memory_result,
+        )
+        response_plan = response_service.build_triage_response_plan(
+            profile=profile,
+            fusion=fused_verdict,
+            local_yara=local_yara,
+            memory=memory_result,
+        )
+        triage_summary = {
+            "confidence": fused_verdict.get("confidence", "low"),
+            "severity": fused_verdict.get("severity", "low"),
+            "top_reasons": list(fused_verdict.get("reasons", []))[:5],
+            "remote_yara_hits": yara_matches[:10],
+            "local_yara_hits": local_yara.get("matched_rules", [])[:10] if isinstance(local_yara, dict) else [],
+            "inceptor_hits": [rule for rule in (local_yara.get("matched_rules", []) if isinstance(local_yara, dict) else []) if str(rule).startswith("Inceptor_")],
+            "memory_verdict": memory_result.get("analysis", {}).get("verdict", "") if isinstance(memory_result, dict) else "",
+            "memory_confidence": memory_result.get("analysis", {}).get("fusion", {}).get("confidence", "low") if isinstance(memory_result, dict) else "low",
+        }
         return {
             "profile": profile,
             "internals_summary": {"handles": len(internals.get_process_handles(pid)), "modules": len(internals.get_process_libs(pid))},
             "strings": {"total": len(strings), "hits": hits[:25]},
-            "yara": {"provider": "YARAify", "result": yara_lookup, "matches": yara_matches},
+            "yara": {
+                "provider": "YARAify",
+                "result": yara_lookup,
+                "matches": yara_matches,
+                "local_result": local_yara,
+                "local_matches": local_yara.get("matched_rules", []) if isinstance(local_yara, dict) else [],
+            },
             "sandbox": trace,
-            "memory": memory_forensics.run_analysis(pid, profile.get("name", "process")),
+            "memory": memory_result,
             "ai_analyst": analyst,
             "threat_intel": intel,
+            "fusion": fused_verdict,
+            "triage_summary": triage_summary,
+            "response_plan": response_plan,
         }
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Triage failed for PID {pid}: {exc}") from exc
+
+
+@app.post("/triage/{pid}/respond", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
+def triage_respond(request: Request, pid: int, payload: TriageRespondRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="triage:respond")
+    profile = process_intel_service.profile_process(pid)
+    process_name = str(profile.get("name") or payload.process_name or "process").strip()
+    enforce_process_action_policy(request, process_name)
+    executable_path = str(profile.get("exe") or "")
+    intel = scan_process({"exe": executable_path, "pid": pid, "name": process_name}) if executable_path else {}
+    memory_result = __import__("plugins.memory_forensics", fromlist=["run_analysis"]).run_analysis(pid, process_name)
+    local_yara = (intel or {}).get("local_yara", {}) if isinstance(intel, dict) else {}
+    fusion = fuse_detection_verdict(
+        yaraify_result=(intel or {}).get("yaraify", {}) if isinstance(intel, dict) else {},
+        local_yara_result=local_yara,
+        virustotal_result=(intel or {}).get("virustotal", {}) if isinstance(intel, dict) else {},
+        malwarebazaar_result=(intel or {}).get("malwarebazaar", {}) if isinstance(intel, dict) else {},
+        memory_result=memory_result,
+    )
+    response_plan = response_service.build_triage_response_plan(
+        profile=profile,
+        fusion=fusion,
+        local_yara=local_yara,
+        memory=memory_result,
+    )
+    applied = response_service.apply_triage_response_plan(
+        pid=pid,
+        process_name=process_name,
+        executable_path=executable_path,
+        plan=response_plan,
+    )
+    if executable_path and any(item.get("action") == "quarantine" for item in applied.get("executed", [])):
+        conn = db.create_connection()
+        if conn:
+            try:
+                for item in applied.get("executed", []):
+                    if item.get("action") == "quarantine":
+                        db.log_quarantine(conn, pid, process_name, executable_path, item.get("result", {}).get("path", ""), "active")
+                        break
+            finally:
+                conn.close()
+        integrity_service.refresh_manifest()
+    return {
+        "pid": pid,
+        "process_name": process_name,
+        "fusion": fusion,
+        "response_plan": response_plan,
+        "applied": applied,
+    }
 
 
 @app.post("/scenario/run", dependencies=[Depends(require_admin)])

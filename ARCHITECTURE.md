@@ -45,6 +45,21 @@ Key services include:
 
 This layer keeps desktop concerns separate from backend behavior so the same API can serve future clients or automation.
 
+### Local YARA layer
+
+ShadowLab now includes a dedicated local YARA layer that sits between external threat-intel lookups and operator response.
+
+That layer currently provides:
+
+- `YARAify` first-pass external lookup
+- curated local YARA fallback and deep scan packs
+- community pack ingestion from `rules-master` and `signature-base-master`
+- ShadowLab-specific `Inceptor_*` and `Memory_*` tradecraft rules
+- pack strategies such as `fast`, `balanced`, `enterprise`, and `memory`
+- rule suppression, allowlist, registry tuning, telemetry, and compile-health reporting
+
+The current enterprise pack excludes broad, low-value noise sources such as `domain.yar` and `RAT_PoetRATPython.yar` so fused verdicts stay readable.
+
 ### Persistence layer
 
 `database.py` backs:

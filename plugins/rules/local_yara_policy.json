@@ -1,0 +1,38 @@
+{
+  "allowlist_hashes": [],
+  "allowlist_path_prefixes": [],
+  "allowlist_rule_patterns": [
+    "generic_javascript",
+    "maldoc_find"
+  ],
+  "suppressed_rule_patterns": [
+    "deprecated",
+    "mobile_malware",
+    "poetrat_python"
+  ],
+  "file_allowlist_rule_patterns": [],
+  "file_suppressed_rule_patterns": [
+    "url",
+    "domain",
+    "powershell"
+  ],
+  "memory_allowlist_rule_patterns": [],
+  "memory_suppressed_rule_patterns": [
+    "packer"
+  ],
+  "boost_rule_patterns": {
+    "inceptor": 8,
+    "amsi": 6,
+    "etw": 6,
+    "manual_map": 6,
+    "syswhispers": 8,
+    "unhook": 8
+  },
+  "memory_boost_rule_patterns": {
+    "ntdll": 8,
+    "amsi": 8,
+    "etw": 8,
+    "queueuserapc": 8,
+    "ntqueueapcthread": 8
+  }
+}

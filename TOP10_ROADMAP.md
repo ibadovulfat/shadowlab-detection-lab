@@ -17,6 +17,7 @@ These are already present in the project:
 - enterprise MITRE ATT&CK lifecycle, coverage, Navigator export, Workbench export, and technique-aware response mapping
 - security-ops workspace with integrity, observability, readiness, secrets, and reporting
 - deployment validation, RBAC smoke testing, live integration smoke testing, and performance/dedupe probes
+- layered local YARA pipeline with `YARAify` fallback, community pack curation, memory scan support, telemetry, and policy tuning
 
 ## Next 10 Priorities
 

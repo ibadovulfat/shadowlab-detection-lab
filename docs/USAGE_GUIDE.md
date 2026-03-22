@@ -101,9 +101,24 @@ Recommended flow:
 2. inspect the selected process profile
 3. review process tree and internals
 4. run strings and YARAify lookup when relevant
-5. run sandbox trace for short-lived behavior capture
-6. use one-click triage for a bundled view
-7. take response action only after review
+5. let ShadowLab fall back to local YARA and memory YARA when external results are weak or unavailable
+6. run sandbox trace for short-lived behavior capture
+7. use one-click triage for a bundled view
+8. take response action only after review
+
+Current local YARA packs:
+
+- `fast`
+- `balanced`
+- `enterprise`
+- `memory`
+
+Current validated enterprise-pack state:
+
+- `rules_master = 434`
+- `signature_base = 726`
+- `enterprise = 1163`
+- `compile_error_count = 0`
 
 ## Threat Intelligence
 
@@ -222,6 +237,17 @@ Security-ops routes:
 - `POST /enterprise/maintenance/retention`
 
 Use the `Security Ops` desktop tab for a safer operational entry point to these features.
+
+Local YARA operational routes:
+
+- `GET /yara/local/health`
+- `GET /yara/local/policy`
+- `PUT /yara/local/policy`
+- `GET /yara/local/errors`
+- `GET /yara/local/analytics`
+- `POST /yara/local/tuning/rule`
+- `GET /yara/local/update-workflow`
+- `POST /yara/local/update-workflow/snapshot`
 
 ## Verification Helpers
 

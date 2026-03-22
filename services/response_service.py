@@ -5,6 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 import shutil
+import re
 from typing import Any
 
 import psutil
@@ -97,6 +98,103 @@ class ResponseOrchestrator:
             "command": command,
             "returncode": completed.returncode,
         }
+
+    def build_triage_response_plan(
+        self,
+        *,
+        profile: dict[str, Any],
+        fusion: dict[str, Any],
+        local_yara: dict[str, Any] | None = None,
+        memory: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        confidence = str(fusion.get("confidence", "low")).lower()
+        severity = str(fusion.get("severity", "low")).lower()
+        process_name = str(profile.get("name") or "process")
+        remote_ips = self.extract_remote_ips(profile)
+        actions: list[dict[str, Any]] = []
+        manual_required: list[dict[str, Any]] = []
+
+        if confidence == "high":
+            actions.append({"action": "suspend", "mode": "auto", "reason": f"High-confidence fused verdict for {process_name}."})
+            if profile.get("exe"):
+                actions.append({"action": "quarantine", "mode": "auto", "reason": "Executable path is available for containment copy."})
+            for ip in remote_ips[:3]:
+                actions.append({"action": "firewall-drop", "mode": "auto", "target": ip, "reason": "Active remote IP observed during high-confidence triage."})
+        elif confidence == "medium":
+            actions.append({"action": "memory-review", "mode": "auto", "reason": "Medium-confidence verdict requires deeper memory review."})
+            manual_required.append({"action": "analyst-review", "mode": "manual", "reason": "Containment should be analyst-approved for medium-confidence findings."})
+            if remote_ips:
+                manual_required.append({"action": "firewall-drop", "mode": "manual", "targets": remote_ips[:3], "reason": "Remote IP blocking is suggested if analyst confirms malicious traffic."})
+        else:
+            manual_required.append({"action": "analyst-review", "mode": "manual", "reason": "Low-confidence verdict should remain in triage."})
+
+        inceptor_hits = []
+        if isinstance(local_yara, dict):
+            inceptor_hits = [rule for rule in local_yara.get("matched_rules", []) if str(rule).startswith("Inceptor_")]
+        if inceptor_hits:
+            manual_required.append(
+                {
+                    "action": "inceptor-hunt",
+                    "mode": "manual",
+                    "reason": f"Inceptor tradecraft markers matched: {', '.join(inceptor_hits[:5])}.",
+                }
+            )
+
+        memory_fusion = {}
+        if isinstance(memory, dict):
+            analysis = memory.get("analysis", {}) if isinstance(memory.get("analysis"), dict) else {}
+            memory_fusion = analysis.get("fusion", {}) if isinstance(analysis.get("fusion"), dict) else {}
+        return {
+            "confidence": confidence,
+            "severity": severity,
+            "remote_ips": remote_ips,
+            "actions": actions,
+            "manual_required": manual_required,
+            "memory_confidence": memory_fusion.get("confidence", "low") if memory_fusion else "low",
+        }
+
+    def apply_triage_response_plan(
+        self,
+        *,
+        pid: int,
+        process_name: str,
+        executable_path: str | None,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        executed: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for item in plan.get("actions", []):
+            action = str(item.get("action", "")).lower()
+            try:
+                if action == "suspend":
+                    result = self.suspend(pid, process_name)
+                elif action == "quarantine":
+                    result = self.quarantine_file(pid, process_name, executable_path)
+                elif action == "firewall-drop":
+                    result = self.execute_ossec_active_response("firewall-drop", str(item.get("target", "")))
+                else:
+                    continue
+            except Exception as exc:
+                result = {"ok": False, "message": str(exc)}
+            if result.get("ok"):
+                executed.append({"action": action, "result": result})
+            else:
+                failed.append({"action": action, "result": result})
+        return {"executed": executed, "failed": failed, "manual_required": plan.get("manual_required", [])}
+
+    def extract_remote_ips(self, profile: dict[str, Any]) -> list[str]:
+        remote_ips: list[str] = []
+        for item in profile.get("network_connections", []) or []:
+            candidate = str(item)
+            matches = re.findall(r"->([0-9a-fA-F:.]+):\d+", candidate)
+            for ip_text in matches:
+                try:
+                    normalized = str(ipaddress.ip_address(ip_text))
+                except ValueError:
+                    continue
+                if normalized not in remote_ips:
+                    remote_ips.append(normalized)
+        return remote_ips
 
     def _execute(self, action: str, pid: int, process_name: str, operation) -> dict[str, Any]:
         if process_name.lower() in self.protected_names:
