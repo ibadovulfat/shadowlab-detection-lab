@@ -5,6 +5,7 @@ import hashlib
 import os
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -98,6 +99,34 @@ class AuthApiTests(unittest.TestCase):
         self.assertFalse(payload["capabilities"]["can_manage_process_actions"])
         self.assertFalse(payload["capabilities"]["can_run_monitor"])
 
+    def test_auth_context_uses_role_key_even_when_auth_disabled(self) -> None:
+        analyst_key = "analyst-secret"
+        settings = make_settings(
+            auth_required=False,
+            api_keys_sha256={"analyst": hashlib.sha256(analyst_key.encode("utf-8")).hexdigest()},
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context", headers={"X-API-Key": analyst_key})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["role"], "analyst")
+        self.assertTrue(payload["capabilities"]["can_run_hunt"])
+        self.assertFalse(payload["capabilities"]["can_manage_process_actions"])
+
+    def test_auth_context_returns_viewer_for_invalid_key_when_auth_disabled(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            api_keys_sha256={"admin": hashlib.sha256(b"admin-secret").hexdigest()},
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context", headers={"X-API-Key": "wrong-secret"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["role"], "viewer")
+        self.assertFalse(payload["capabilities"]["can_run_hunt"])
+
     def test_admin_only_endpoint_blocks_viewer(self) -> None:
         viewer_key = "viewer-secret"
         settings = make_settings(
@@ -108,6 +137,20 @@ class AuthApiTests(unittest.TestCase):
             response = self.client.post("/integrations/telemetry-fabric/start", headers={"X-API-Key": viewer_key})
         self.assertEqual(response.status_code, 403)
         self.assertIn("Admin role required", response.text)
+
+    def test_viewer_is_blocked_from_sensitive_read_sections(self) -> None:
+        viewer_key = "viewer-secret"
+        settings = make_settings(
+            api_keys_sha256={"viewer": hashlib.sha256(viewer_key.encode("utf-8")).hexdigest()},
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            process_response = self.client.get("/processes", headers={"X-API-Key": viewer_key})
+            artifact_response = self.client.get("/artifacts", headers={"X-API-Key": viewer_key})
+            timeline_response = self.client.get("/timeline", headers={"X-API-Key": viewer_key})
+        for response in (process_response, artifact_response, timeline_response):
+            self.assertEqual(response.status_code, 403)
+            self.assertIn("Analyst or admin role required", response.text)
 
     def test_failed_authentication_is_rate_limited(self) -> None:
         settings = make_settings(api_keys_sha256={"viewer": hashlib.sha256(b"viewer-secret").hexdigest()})
@@ -194,6 +237,31 @@ class AuthApiTests(unittest.TestCase):
             with mock.patch.object(security, "security_settings", settings):
                 with self.assertRaises(RuntimeError):
                     api.main._validate_startup_security_posture()
+
+    def test_startup_security_validation_rejects_non_loopback_host_when_auth_disabled(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            policy_profile="lab",
+        )
+        with mock.patch.dict(os.environ, {"SHADOWLAB_HOST": "0.0.0.0"}, clear=False):
+            with mock.patch.object(api.main, "security_settings", settings):
+                with mock.patch.object(security, "security_settings", settings):
+                    with self.assertRaises(RuntimeError):
+                        api.main._validate_startup_security_posture()
+
+    def test_html_artifact_download_is_forced_as_attachment(self) -> None:
+        artifact_path = Path(api.main.OUT_DIR) / "SecurityOps_Report.html"
+        artifact_path.write_text("<html><body>report</body></html>", encoding="utf-8")
+        try:
+            settings = make_settings(auth_required=False, policy_profile="lab")
+            with mock.patch.object(api.main, "security_settings", settings):
+                with mock.patch.object(security, "security_settings", settings):
+                    response = self.client.get("/artifacts/SecurityOps_Report.html")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("attachment;", response.headers.get("content-disposition", "").lower())
+            self.assertEqual(response.headers.get("x-download-options"), "noopen")
+        finally:
+            artifact_path.unlink(missing_ok=True)
 
     def test_approval_is_action_scoped_and_one_time(self) -> None:
         db = __import__("database")

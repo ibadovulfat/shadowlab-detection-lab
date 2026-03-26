@@ -15,8 +15,46 @@ VOLATILITY_PLUGINS = [
     "windows.cmdline",
     "windows.psxview",
     "windows.malfind",
+    "windows.dlllist",
+    "windows.handles",
     "windows.netscan",
 ]
+
+EXECUTE_PAGE_MARKERS = (
+    b"page_execute_readwrite",
+    b"page_execute_read",
+    b"page_execute_writecopy",
+    b"rwx",
+)
+PRIVATE_MEMORY_MARKERS = (
+    b"private",
+    b"vad",
+    b"unbacked",
+    b"no file object",
+    b"shellcode",
+)
+PATCH_MARKERS = (
+    b"patch",
+    b"patched",
+    b"hook",
+    b"hooked",
+    b"integrity mismatch",
+    b"mismatch",
+)
+MANUAL_MAP_MARKERS = (
+    b"manual map",
+    b"mapmoduletomemory",
+    b"callmappeddllmoduleexport",
+    b"loadmodulefromdisk",
+    b"getlibraryaddress",
+    b"dinvoke",
+    b"syswhispers",
+)
+PORTABLE_EXECUTABLE_MARKERS = (
+    b"this program cannot be run in dos mode",
+    b"mz",
+    b"pe\x00\x00",
+)
 
 
 def acquire_memory_dump(pid: int, pname: str) -> dict[str, Any]:
@@ -262,13 +300,42 @@ def _analyze_dump_content(dump_path: str | Path | None) -> list[dict[str, Any]]:
                 "detail": "Memory dump contained APC or remote-thread APIs chained with injection markers.",
             }
         )
-    if b"page_execute_readwrite" in lowered or b"rwx" in lowered:
+    if any(marker in lowered for marker in EXECUTE_PAGE_MARKERS):
         findings.append(
             {
                 "plugin": "shadowlab.memory.heuristics",
                 "severity": "high",
                 "title": "Executable writable region markers",
                 "detail": "Memory dump contained RWX or PAGE_EXECUTE_READWRITE markers associated with shellcode staging.",
+            }
+        )
+    if any(marker in lowered for marker in EXECUTE_PAGE_MARKERS) and any(marker in lowered for marker in PRIVATE_MEMORY_MARKERS):
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "critical",
+                "title": "Unbacked executable private region",
+                "detail": "Memory dump contained executable private-memory markers consistent with shellcode or unbacked injected pages.",
+            }
+        )
+    if b"ntdll.dll" in lowered and b".text" in lowered and any(marker in lowered for marker in PATCH_MARKERS):
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "critical",
+                "title": "NTDLL text integrity mismatch",
+                "detail": "Memory dump contained ntdll .text patch or mismatch markers consistent with unhooking or integrity tampering.",
+            }
+        )
+    if any(marker in lowered for marker in MANUAL_MAP_MARKERS) and (
+        any(marker in lowered for marker in PORTABLE_EXECUTABLE_MARKERS) or any(marker in lowered for marker in EXECUTE_PAGE_MARKERS)
+    ):
+        findings.append(
+            {
+                "plugin": "shadowlab.memory.heuristics",
+                "severity": "high",
+                "title": "Manual mapped module indicators",
+                "detail": "Memory dump contained manual-mapping markers together with PE or executable-page evidence.",
             }
         )
     return findings
@@ -311,6 +378,26 @@ def _parse_volatility_output(plugin: str, output: str, pid: int, pname: str) -> 
                 "severity": "medium",
                 "title": "Network artefacts present in memory",
                 "detail": "Netscan surfaced active remote communication artefacts during memory analysis.",
+            }
+        )
+    if plugin == "windows.dlllist" and any(module in lowered for module in ("amsi.dll", "wldp.dll", "ntdll.dll")) and (
+        "\\temp\\" in lowered or "\\appdata\\" in lowered or "\\downloads\\" in lowered
+    ):
+        findings.append(
+            {
+                "plugin": plugin,
+                "severity": "high",
+                "title": "Sensitive module load from suspicious path",
+                "detail": f"{pname} ({pid}) loaded sensitive Windows modules while volatility surfaced user-writable module paths.",
+            }
+        )
+    if plugin == "windows.handles" and "process" in lowered and any(target in lowered for target in ("lsass.exe", "winlogon.exe", "explorer.exe")):
+        findings.append(
+            {
+                "plugin": plugin,
+                "severity": "high",
+                "title": "Cross-process handle access",
+                "detail": f"{pname} ({pid}) opened handles into high-value peer processes during memory analysis.",
             }
         )
     return findings

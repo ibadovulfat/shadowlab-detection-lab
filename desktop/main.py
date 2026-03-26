@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QBoxLayout, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
     QCheckBox, QInputDialog, QLineEdit, QListWidget, QMainWindow, QMessageBox, QMenu, QPushButton, QSpinBox,
     QDialog,
+    QFileDialog,
     QFrame, QScrollArea, QSplitter, QSizePolicy, QStatusBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QTextEdit,
     QToolButton,
     QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -46,9 +47,11 @@ class ShadowLabDesktop(QMainWindow):
         self.threat_history: list[dict[str, str]] = []
         self.custom_toolbar_buttons: list[dict[str, str]] = []
         self.auth_context: dict = {}
+        self.discovered_auth_context: dict = {}
         self.capability_widgets: list[tuple[QWidget, str]] = []
         self.panel_windows: list[QDialog] = []
         self.auth_active = False
+        self.local_role_mode_active = False
         self._enterprise_table_updating = False
         self.enterprise_selected_case_id: int | None = None
         self.enterprise_loaded_once = False
@@ -70,6 +73,7 @@ class ShadowLabDesktop(QMainWindow):
             "QTextEdit,QTextBrowser,QTableWidget,QListWidget{background:#16202c;color:#eef4fb;border:1px solid #243446;border-radius:8px;padding:6px;}"
             "QPushButton{background:#1a2a3d;color:#c8d8ea;border:1px solid #2c4260;border-radius:8px;padding:6px 12px;font-weight:600;font-size:12px;} "
             "QPushButton:hover{background:#1d7df2;color:white;border-color:#1d7df2;} QPushButton:pressed{background:#155bc2;}"
+            "QTabWidget::tab-bar{alignment:center;}"
             "QTabWidget::pane{border:1px solid #243446;border-radius:6px;} "
             "QTabBar::tab{background:#16202c;color:#96a5b8;padding:8px 14px;border:1px solid transparent;border-bottom:none;border-radius:6px 6px 0 0;margin-right:2px;font-size:12px;} "
             "QTabBar::tab:selected{background:#1d7df2;color:white;border-color:#1d7df2;} QTabBar::tab:hover{color:#eef4fb;background:#1d2a3a;}"
@@ -311,28 +315,34 @@ class ShadowLabDesktop(QMainWindow):
         self.tabs.addTab(self._scrollable_tab(self._hids_tab()), "HIDS")
         self.tabs.addTab(self._scrollable_tab(self._overview_tab()), "Overview")
         self.tabs.addTab(self._scrollable_tab(self._process_tab(), allow_horizontal=True), "Processes")
-        self.tabs.addTab(self._hunt_tab(), "Advanced Hunt")
-        self.tabs.addTab(self._persistence_tab(), "Persistence")
-        self.tabs.addTab(self._threat_tab(), "Threat Intel")
-        self.tabs.addTab(self._deception_tab(), "Deception")
-        self.tabs.addTab(self._network_tab(), "Network")
-        self.tabs.addTab(self._hosts_tab(), "Hosts")
+        self.tabs.addTab(self._scrollable_tab(self._hunt_tab(), allow_horizontal=True), "Advanced Hunt")
+        self.tabs.addTab(self._scrollable_tab(self._persistence_tab(), allow_horizontal=True), "Persistence")
+        self.tabs.addTab(self._scrollable_tab(self._threat_tab(), allow_horizontal=True), "Threat Intel")
+        self.tabs.addTab(self._scrollable_tab(self._malware_analyst_tab(), allow_horizontal=True), "Static Analysis")
+        self.tabs.addTab(self._scrollable_tab(self._deception_tab(), allow_horizontal=True), "Deception")
+        self.tabs.addTab(self._scrollable_tab(self._network_tab(), allow_horizontal=True), "Network")
+        self.tabs.addTab(self._scrollable_tab(self._hosts_tab(), allow_horizontal=True), "Hosts")
         self.tabs.addTab(self._scrollable_tab(self._graph_tab()), "Graph")
-        self.tabs.addTab(self._timeline_tab(), "Timeline")
-        self.tabs.addTab(self._quarantine_tab(), "Quarantine")
-        self.tabs.addTab(self._history_tab(), "History")
-        self.tabs.addTab(self._artifacts_tab(), "Artifacts")
+        self.tabs.addTab(self._scrollable_tab(self._timeline_tab(), allow_horizontal=True), "Timeline")
+        self.tabs.addTab(self._scrollable_tab(self._quarantine_tab(), allow_horizontal=True), "Quarantine")
+        self.tabs.addTab(self._scrollable_tab(self._history_tab(), allow_horizontal=True), "History")
+        self.tabs.addTab(self._scrollable_tab(self._artifacts_tab(), allow_horizontal=True), "Artifacts")
         self.tabs.addTab(self._scrollable_tab(self._enterprise_tab(), allow_horizontal=True), "Enterprise")
-        self.tabs.addTab(self._scrollable_tab(self._security_ops_tab()), "Security Ops")
-        self.tabs.addTab(self._scenario_tab(), "Scenarios")
+        self.tabs.addTab(self._scrollable_tab(self._security_ops_tab(), allow_horizontal=True), "Security Ops")
+        self.tabs.addTab(self._scrollable_tab(self._scenario_tab(), allow_horizontal=True), "Scenarios")
         self.tabs.addTab(self._scrollable_tab(self._about_tab()), "About / FAQ")
+        self.tabs.setDocumentMode(True)
         self.tabs.setUsesScrollButtons(True)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setElideMode(Qt.ElideRight)
+        self.tabs.tabBar().setUsesScrollButtons(True)
         self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(content)
         self._load_settings()
         self._update_controls_layout()
+        QTimer.singleShot(0, self._update_tab_bar_layout)
 
     def _dashboard_hub_tab(self) -> QWidget:
         w = QWidget()
@@ -1067,6 +1077,68 @@ class ShadowLabDesktop(QMainWindow):
         l.addWidget(split, 1)
         return w
 
+    def _malware_analyst_tab(self) -> QWidget:
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(10)
+        self._tab_header(l, "Static Analysis Workspace", "Detect It Easy-backed static binary analysis for file inspection and selected-process executable triage.")
+
+        status_row = QWidget(); sr = QHBoxLayout(status_row)
+        sr.setContentsMargins(0, 0, 0, 0); sr.setSpacing(8)
+        self.ma_status_badge = QLabel("DIE Status: unknown")
+        self.ma_repo_badge = QLabel("Repo: -")
+        self.ma_runtime_badge = QLabel("Runtime: -")
+        for item in [self.ma_status_badge, self.ma_repo_badge, self.ma_runtime_badge]:
+            sr.addWidget(item)
+        sr.addStretch(1)
+        l.addWidget(self._panel_card("Detect It Easy Readiness", status_row, lambda: self._open_panel_window("DIE Readiness", self._clone_text_view(self.ma_summary))))
+
+        controls = QWidget(); cr = QVBoxLayout(controls)
+        cr.setContentsMargins(0, 0, 0, 0); cr.setSpacing(8)
+        path_row = QWidget(); pr = QHBoxLayout(path_row)
+        pr.setContentsMargins(0, 0, 0, 0); pr.setSpacing(8)
+        action_row = QWidget(); ar = QHBoxLayout(action_row)
+        ar.setContentsMargins(0, 0, 0, 0); ar.setSpacing(8)
+        self.ma_file_path = QLineEdit()
+        self.ma_file_path.setPlaceholderText("File path for Detect It Easy analysis")
+        self.ma_file_path.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        browse_btn = QPushButton("Browse")
+        browse_btn.clicked.connect(self.pick_malware_analyst_file)
+        use_process_btn = QPushButton("Use Selected Process")
+        use_process_btn.clicked.connect(self.use_selected_process_for_malware_analysis)
+        analyze_file_btn = QPushButton("Analyze File")
+        analyze_file_btn.clicked.connect(self.run_malware_analyst_file_scan)
+        analyze_process_btn = QPushButton("Analyze Selected Process")
+        analyze_process_btn.clicked.connect(self.run_malware_analyst_process_scan)
+        refresh_btn = QPushButton("Refresh DIE Status")
+        refresh_btn.clicked.connect(self.refresh_malware_analyst_status)
+        self._bind_capability(use_process_btn, "can_run_hunt")
+        self._bind_capability(analyze_file_btn, "can_run_hunt")
+        self._bind_capability(analyze_process_btn, "can_run_hunt")
+        pr.addWidget(self.ma_file_path, 1)
+        pr.addWidget(browse_btn)
+        for widget in [use_process_btn, analyze_file_btn, analyze_process_btn, refresh_btn]:
+            ar.addWidget(widget)
+        ar.addStretch(1)
+        cr.addWidget(path_row)
+        cr.addWidget(action_row)
+        l.addWidget(self._panel_card("Static Analysis Actions", controls, lambda: self._open_panel_window("Static Analysis Output", self._clone_text_view(self.ma_output))))
+
+        split = QSplitter(Qt.Horizontal)
+        left = QWidget(); ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0); ll.setSpacing(8)
+        self.ma_summary = QTextBrowser(); self.ma_summary.setProperty("role", "brief"); self.ma_summary.setMinimumHeight(160)
+        self.ma_highlights = QTableWidget(0, 2)
+        self.ma_highlights.setHorizontalHeaderLabels(["Category", "Highlight"])
+        self._style_table(self.ma_highlights)
+        ll.addWidget(self._panel_card("Analysis Summary", self.ma_summary, lambda: self._open_panel_window("Static Analysis Summary", self._clone_text_view(self.ma_summary))))
+        ll.addWidget(self._panel_card("DIE Highlights", self.ma_highlights, lambda: self._open_panel_window("DIE Highlights", self._clone_table(self.ma_highlights))))
+        self.ma_output = QTextEdit(); self.ma_output.setReadOnly(True)
+        split.addWidget(left)
+        split.addWidget(self._panel_card("Raw DIE Output", self.ma_output, lambda: self._open_panel_window("Raw DIE Output", self._clone_text_view(self.ma_output))))
+        split.setStretchFactor(0, 2)
+        split.setStretchFactor(1, 3)
+        l.addWidget(split, 1)
+        return w
+
     def _deception_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
         self._tab_header(l, "Deception & Evidence Workspace", "Deploy honeypots and canaries, capture and review evidence bundles.")
@@ -1501,10 +1573,10 @@ class ShadowLabDesktop(QMainWindow):
         l.addWidget(self._panel_card("Security Ops Controls", controls, lambda: self._open_panel_window("Security Ops Controls", QLabel("Use Security Ops controls in main workspace."))))
 
         yara_controls = QWidget(); yara_row = QHBoxLayout(yara_controls); yara_row.setContentsMargins(0, 0, 0, 0); yara_row.setSpacing(8)
-        refresh_yara_btn = QPushButton("Refresh YARA Ops"); refresh_yara_btn.clicked.connect(self.refresh_yara_ops_workspace); self._bind_capability(refresh_yara_btn, "can_manage_integrations")
+        refresh_yara_btn = QPushButton("Refresh YARA Ops"); refresh_yara_btn.clicked.connect(self.refresh_yara_ops_workspace); self._bind_capability(refresh_yara_btn, "can_run_hunt")
         load_yara_policy_btn = QPushButton("Load YARA Policy"); load_yara_policy_btn.clicked.connect(self.load_local_yara_policy); self._bind_capability(load_yara_policy_btn, "can_manage_integrations")
         save_yara_policy_btn = QPushButton("Save YARA Policy"); save_yara_policy_btn.clicked.connect(self.save_local_yara_policy); self._bind_capability(save_yara_policy_btn, "can_manage_integrations")
-        load_yara_errors_btn = QPushButton("YARA Errors"); load_yara_errors_btn.clicked.connect(self.load_local_yara_errors); self._bind_capability(load_yara_errors_btn, "can_manage_integrations")
+        load_yara_errors_btn = QPushButton("YARA Errors"); load_yara_errors_btn.clicked.connect(self.load_local_yara_errors); self._bind_capability(load_yara_errors_btn, "can_run_hunt")
         for btn in [refresh_yara_btn, load_yara_policy_btn, save_yara_policy_btn, load_yara_errors_btn]:
             yara_row.addWidget(btn)
         yara_row.addStretch(1)
@@ -1548,17 +1620,34 @@ class ShadowLabDesktop(QMainWindow):
         root.setSpacing(12)
         left_card = QFrame(); left_card.setProperty("card", True); l = QVBoxLayout(left_card)
         left_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        about = QTextBrowser(); about.setReadOnly(True); about.setHtml(
-            "<h2>About ShadowLab</h2><p><b>Created by Ulfat Ibadov</b><br>Offensive Security Expert</p>"
-            "<p>LinkedIn: <a href='https://www.linkedin.com/in/ibadovulfat/'>https://www.linkedin.com/in/ibadovulfat/</a><br>"
-            "Portfolio: <a href='https://about.surf'>https://about.surf</a><br>"
-            "GitHub: <a href='https://github.com/ibadovulfat'>https://github.com/ibadovulfat</a></p>"
-            "<h3>FAQ</h3><p><b>What is this?</b><br>API-first Windows defensive operations platform.</p>"
-            "<p><b>What can I do?</b><br>Monitor, inspect internals, run strings/YARA/sandbox analysis, check persistence, deploy deception, capture evidence, query threat intel, review history, inspect artifacts, run scenarios.</p>"
-            "<p><b>Can this become EXE?</b><br>Yes, this desktop client is the base for packaging.</p>"
-        ); about.setOpenExternalLinks(True); l.addWidget(about)
+        about_title = QLabel("About ShadowLab")
+        about_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
+        about_body = QLabel(
+            "<p><b>ShadowLab</b> is a modern defensive operations platform for detection engineering, threat hunting, incident response, enterprise triage, and security research.</p>"
+            "<p>It combines host telemetry, process intelligence, persistence review, layered YARA analysis, threat intelligence enrichment, graph investigation, evidence handling, and structured case workflows in one operator-focused workspace.</p>"
+            "<p><b>Stack</b><br>"
+            "Backend &amp; API: Python · FastAPI · Uvicorn · SQLite · PostgreSQL<br>"
+            "Desktop Client: PySide6 · pywin32 · psutil · Watchdog<br>"
+            "Detection &amp; Analysis: YARA Python · Scapy · scikit-learn · Pandas · NumPy<br>"
+            "Visualization: Plotly · Matplotlib · Pyvis<br>"
+            "AI &amp; Enrichment: OpenAI · OTLP HTTP<br>"
+            "Reporting &amp; Export: ReportLab<br>"
+            "Infrastructure: Docker · GitHub Actions</p>"
+            "<p><b>FAQ</b><br>"
+            "<b>What is ShadowLab?</b> API-first cyber defense and security operations platform.<br>"
+            "<b>Who is it for?</b> Detection engineers, threat hunters, SOC analysts, incident responders, and defensive researchers.<br>"
+            "<b>Can it be packaged?</b> Yes. The desktop client is ready to be used as the packaging base for EXE delivery.</p>"
+        )
+        about_body.setWordWrap(True)
+        about_body.setTextFormat(Qt.RichText)
+        about_body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        about_body.setStyleSheet("color:#e5edf5;font-size:13px;line-height:1.45;")
+        l.addWidget(about_title)
+        l.addWidget(about_body, 1)
         row = QWidget(); r = QHBoxLayout(row)
-        for label, url in [("LinkedIn", "https://www.linkedin.com/in/ibadovulfat/"),("Portfolio", "https://about.surf"),("GitHub", "https://github.com/ibadovulfat")]:
+        r.setContentsMargins(0, 0, 0, 0)
+        r.setSpacing(8)
+        for label, url in [("Project", "https://shadowlab.about.surf/"), ("GitHub", "https://github.com/ibadovulfat")]:
             b = QPushButton(label); b.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u))); r.addWidget(b)
         r.addStretch(1); l.addWidget(row)
 
@@ -1568,7 +1657,9 @@ class ShadowLabDesktop(QMainWindow):
         photo_title = QLabel("Creator Profile")
         photo_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
         photo_sub = QLabel("Ulfat Ibadov")
-        photo_sub.setStyleSheet("color:#96a5b8;font-size:12px;")
+        photo_sub.setStyleSheet("color:#f4f7fb;font-size:14px;font-weight:700;")
+        creator_role = QLabel("Offensive Security Expert")
+        creator_role.setStyleSheet("color:#96a5b8;font-size:12px;")
         profile_image = QLabel()
         static_dir = Path(__file__).resolve().parent.parent / "static"
         image_path = static_dir / "ulfat-profile.png"
@@ -1580,7 +1671,15 @@ class ShadowLabDesktop(QMainWindow):
         profile_image.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(photo_title)
         right_layout.addWidget(photo_sub)
+        right_layout.addWidget(creator_role)
         right_layout.addWidget(profile_image)
+        creator_actions = QWidget(); creator_row = QHBoxLayout(creator_actions)
+        creator_row.setContentsMargins(0, 0, 0, 0)
+        creator_row.setSpacing(8)
+        for label, url in [("Portfolio", "https://about.surf"), ("LinkedIn", "https://www.linkedin.com/in/ibadovulfat/")]:
+            b = QPushButton(label); b.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u))); creator_row.addWidget(b)
+        creator_row.addStretch(1)
+        right_layout.addWidget(creator_actions)
 
         root.addWidget(left_card, 3)
         root.addWidget(right_card, 2)
@@ -1814,6 +1913,8 @@ class ShadowLabDesktop(QMainWindow):
             self.enterprise_live_status.setText("Preparing enterprise workspace...")
             if not self.enterprise_loaded_once:
                 QTimer.singleShot(150, self.refresh_enterprise_workspace)
+        elif tab_name == "Static Analysis":
+            QTimer.singleShot(100, self.refresh_malware_analyst_status)
 
     def _auto_refresh_active_tab(self) -> None:
         current_index = self.tabs.currentIndex()
@@ -1827,10 +1928,13 @@ class ShadowLabDesktop(QMainWindow):
             self.refresh_whids_workspace()
         elif tab_name == "HIDS" and self.auth_context.get("capabilities", {}).get("can_manage_integrations", False):
             self.refresh_hids_workspace()
+        elif tab_name == "Static Analysis" and self.auth_context.get("capabilities", {}).get("can_run_hunt", False):
+            self.refresh_malware_analyst_status()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_controls_layout()
+        self._update_tab_bar_layout()
 
     def _update_controls_layout(self) -> None:
         available_width = max(1080, self.width() - 28)
@@ -1847,6 +1951,18 @@ class ShadowLabDesktop(QMainWindow):
             equal_height = max(self.ops_card.height(), self.advanced_card.height())
             self.ops_card.setMinimumHeight(equal_height)
             self.advanced_card.setMinimumHeight(equal_height)
+
+    def _update_tab_bar_layout(self) -> None:
+        if not hasattr(self, "tabs"):
+            return
+        tab_bar = self.tabs.tabBar()
+        available_width = max(0, self.tabs.width() - 24)
+        total_width = sum(tab_bar.tabSizeHint(index).width() for index in range(tab_bar.count()))
+        should_expand = bool(available_width) and total_width <= available_width
+        tab_bar.setExpanding(should_expand)
+        tab_bar.setUsesScrollButtons(not should_expand)
+        tab_bar.setElideMode(Qt.ElideNone if should_expand else Qt.ElideRight)
+        tab_bar.updateGeometry()
 
     def _show_error(self, widget: QTextEdit, title: str, exc: Exception) -> None:
         widget.setPlainText(f"{title}:\n{exc}")
@@ -1965,7 +2081,7 @@ class ShadowLabDesktop(QMainWindow):
         ]
 
     def _incident_rows_for_prefix(self, prefix: str) -> list[dict]:
-        incidents = self._get("/history/incidents", timeout=30).json()
+        incidents = self._get("/incidents", timeout=30).json()
         normalized_prefix = prefix.strip().upper()
         return [
             item for item in incidents
@@ -2588,11 +2704,21 @@ class ShadowLabDesktop(QMainWindow):
         return {"role": "viewer", "capabilities": {}}
 
     def activate_role_mode(self) -> None:
+        if self.discovered_auth_context and not bool(self.discovered_auth_context.get("auth_required", False)) and not self.api_key.text().strip():
+            self.auth_active = False
+            self.local_role_mode_active = True
+            self._apply_auth_context(self.discovered_auth_context)
+            role = str(self.discovered_auth_context.get("role", "unknown"))
+            self.statusBar().showMessage(f"Local role mode enabled. Backend role/capabilities active: {role}.")
+            self.refresh_overview()
+            return
         if not self.api_key.text().strip():
             self.auth_active = False
+            self.local_role_mode_active = False
             self._apply_auth_context(self._viewer_mode_payload())
             self.statusBar().showMessage("Viewer mode active. Enter an API key and press OK to elevate access.")
             return
+        self.local_role_mode_active = False
         self.auth_active = True
         self.check_api_health()
 
@@ -2823,17 +2949,26 @@ class ShadowLabDesktop(QMainWindow):
         try:
             self._get("/health", timeout=5)
             self._set_health_badge(True)
-            if not self.auth_active:
-                self._apply_auth_context(self._viewer_mode_payload())
-                self.statusBar().showMessage("Connected to backend. Viewer mode active until you press OK.")
-                return
             context_response = self._get("/auth/context", timeout=5, raise_for_status=False)
             if context_response.status_code == 200:
                 payload = context_response.json()
+                self.discovered_auth_context = payload if isinstance(payload, dict) else {}
                 if not bool(payload.get("auth_required", False)):
                     self.auth_active = False
+                    if self.local_role_mode_active:
+                        self._apply_auth_context(payload)
+                        role = str(self.auth_context.get("role", "unknown"))
+                        self.statusBar().showMessage(f"Backend auth is disabled. Local role mode active: {role}.")
+                    else:
+                        self._apply_auth_context(self._viewer_mode_payload())
+                        self.statusBar().showMessage("Backend auth is disabled. Viewer mode active until you press OK.")
+                    self.refresh_overview()
+                    return
+                if not self.auth_active:
                     self._apply_auth_context(self._viewer_mode_payload())
-                    self.statusBar().showMessage("Backend auth is disabled. Enable SHADOWLAB_REQUIRE_AUTH for real role-based API key mode.")
+                    role = str(payload.get("role", "unknown"))
+                    self.statusBar().showMessage(f"Connected to backend. {role} mode available; press OK to activate API-key mode.")
+                    self.refresh_overview()
                     return
                 self._apply_auth_context(payload)
                 role = str(self.auth_context.get("role", "unknown"))
@@ -2842,12 +2977,13 @@ class ShadowLabDesktop(QMainWindow):
                 return
             if context_response.status_code in {401, 403}:
                 self.auth_active = False
+                self.local_role_mode_active = False
                 self._apply_auth_context(self._viewer_mode_payload())
                 self.statusBar().showMessage("API key was rejected. Viewer mode remains active.")
                 return
             self._raise_for_api_error(context_response)
         except Exception as exc:
-            self._set_health_badge(False); self.auth_active = False; self._apply_auth_context(self._viewer_mode_payload()); self.statusBar().showMessage(f"Backend unavailable: {exc}")
+            self._set_health_badge(False); self.auth_active = False; self.local_role_mode_active = False; self._apply_auth_context(self._viewer_mode_payload()); self.statusBar().showMessage(f"Backend unavailable: {exc}")
 
     def refresh_overview(self) -> None:
         self.refresh_history(); self.refresh_artifacts(); self.refresh_network()
@@ -3220,6 +3356,106 @@ class ShadowLabDesktop(QMainWindow):
         self.ti_last_value.setText(f"Value: {candidate or 'unavailable'}")
         self._switch_to_tab("Threat Intel")
 
+    def pick_malware_analyst_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select File for Detect It Easy Analysis")
+        if file_path:
+            self.ma_file_path.setText(file_path)
+
+    def use_selected_process_for_malware_analysis(self) -> None:
+        if not self.selected_process:
+            self.statusBar().showMessage("First select a process to prepare static analysis")
+            return
+        exe_path = str(self.selected_process.get("exe") or "")
+        self.ma_file_path.setText(exe_path)
+        self._switch_to_tab("Static Analysis")
+        self.statusBar().showMessage("Selected process executable copied into Static Analysis workspace")
+
+    def refresh_malware_analyst_status(self) -> None:
+        try:
+            result = self._get("/malware-analyst/status", timeout=30).json()
+        except Exception as exc:
+            self._show_error(self.ma_output, "Static Analysis status refresh failed", exc)
+            return
+        inventory = result.get("signature_inventory", {}) if isinstance(result, dict) else {}
+        guidance = result.get("guidance", []) if isinstance(result.get("guidance", []), list) else []
+        self.ma_status_badge.setText(f"DIE Status: {result.get('status', 'unknown')}")
+        self.ma_repo_badge.setText(f"Repo: {'ready' if result.get('die_repo_path') else 'missing'}")
+        self.ma_runtime_badge.setText(f"Runtime: {'ready' if result.get('diec_path') else 'missing'}")
+        if "Static Analysis Result" not in self.ma_summary.toPlainText():
+            self.ma_summary.setHtml(
+                "<h3>Detect It Easy Integration Status</h3>"
+                f"<p><b>Status:</b> {html.escape(str(result.get('status', 'unknown')))}"
+                f"<br><b>MIT License:</b> {html.escape(str(result.get('mit_license_detected', False)))}"
+                f"<br><b>Repo Path:</b> {html.escape(str(result.get('die_repo_path', '') or 'Not detected'))}"
+                f"<br><b>diec Path:</b> {html.escape(str(result.get('diec_path', '') or 'Not detected'))}"
+                f"<br><b>DB Signatures:</b> {html.escape(str(inventory.get('db_signatures', 0)))}"
+                f"<br><b>PEiD Rule Files:</b> {html.escape(str(inventory.get('peid_rule_files', 0)))}"
+                f"<br><b>YARA Rule Files:</b> {html.escape(str(inventory.get('yara_rule_files', 0)))}</p>"
+                f"<p><b>Guidance:</b></p><ul>{''.join(f'<li>{html.escape(str(item))}</li>' for item in guidance) or '<li>No guidance available.</li>'}</ul>"
+            )
+        if not self.ma_output.toPlainText().strip():
+            self._show_json(self.ma_output, result)
+        self.statusBar().showMessage("Static Analysis readiness refreshed")
+
+    def run_malware_analyst_file_scan(self) -> None:
+        file_path = self.ma_file_path.text().strip()
+        if not file_path:
+            self.statusBar().showMessage("Provide a file path for static analysis")
+            return
+        try:
+            result = self._post("/malware-analyst/file", json={"file_path": file_path}, timeout=120).json()
+        except Exception as exc:
+            self._show_error(self.ma_output, "Static Analysis file scan failed", exc)
+            return
+        self._render_malware_analyst_result(result, source="file", value=file_path)
+
+    def run_malware_analyst_process_scan(self) -> None:
+        ident = self._selected_process_or_warn()
+        if not ident:
+            return
+        pid, name = ident
+        try:
+            result = self._get(f"/malware-analyst/processes/{pid}", timeout=120).json()
+        except Exception as exc:
+            self._show_error(self.ma_output, "Static Analysis process scan failed", exc)
+            return
+        self._render_malware_analyst_result(result, source="process", value=f"{name} ({pid})")
+
+    def _render_malware_analyst_result(self, result: dict, *, source: str, value: str) -> None:
+        die = result.get("die", {}) if isinstance(result.get("die"), dict) else {}
+        highlights = result.get("highlights", []) if isinstance(result.get("highlights", []), list) else []
+        process = result.get("process", {}) if isinstance(result.get("process"), dict) else {}
+        static_analysis = result.get("static_analysis", {}) if isinstance(result.get("static_analysis"), dict) else {}
+        combined_static = result.get("combined_static", {}) if isinstance(result.get("combined_static"), dict) else {}
+        pe_structure = result.get("pe_structure", {}) if isinstance(result.get("pe_structure"), dict) else {}
+        suspicious_indicators = static_analysis.get("suspicious_indicators", []) if isinstance(static_analysis.get("suspicious_indicators"), list) else []
+        self.ma_highlights.setRowCount(len(highlights[:20]))
+        for row, item in enumerate(highlights[:20]):
+            self.ma_highlights.setItem(row, 0, QTableWidgetItem(str(item.get("category", ""))))
+            self.ma_highlights.setItem(row, 1, QTableWidgetItem(str(item.get("text", ""))))
+        self.ma_summary.setHtml(
+            "<h3>Static Analysis Result</h3>"
+            f"<p><b>Source:</b> {html.escape(source)}"
+            f"<br><b>Value:</b> {html.escape(value)}"
+            f"<br><b>Status:</b> {html.escape(str(result.get('status', 'unknown')))}"
+            f"<br><b>Summary:</b> {html.escape(str(result.get('summary', '')))}"
+            f"<br><b>Static Verdict:</b> {html.escape(str(static_analysis.get('verdict', 'unknown')))}"
+            f"<br><b>Static Severity:</b> {html.escape(str(static_analysis.get('severity', 'low')))}"
+            f"<br><b>Static Score:</b> {html.escape(str(static_analysis.get('score', 0)))}"
+            f"<br><b>PE Structure Score:</b> {html.escape(str(pe_structure.get('risk', {}).get('score', 0) if isinstance(pe_structure.get('risk'), dict) else 0))}"
+            f"<br><b>Combined Static Score:</b> {html.escape(str(combined_static.get('score', 0)))}"
+            f"<br><b>DIE Runtime:</b> {html.escape(str(die.get('diec_path', '') or 'Not configured'))}</p>"
+            f"{'<p><b>Process:</b> ' + html.escape(str(process.get('name', ''))) + ' | <b>SHA256:</b> ' + html.escape(str(process.get('sha256', '') or 'n/a')) + '</p>' if process else ''}"
+            f"<p><b>Highlights:</b> {html.escape(str(len(highlights)))}"
+            f"<br><b>Suspicious Indicators:</b> {html.escape(', '.join(str(item) for item in suspicious_indicators[:6]) or 'None')}</p>"
+        )
+        self._show_json(self.ma_output, result)
+        self.ma_status_badge.setText(f"DIE Status: {die.get('status', result.get('status', 'unknown'))}")
+        self.ma_repo_badge.setText(f"Repo: {'ready' if die.get('die_repo_path') else 'missing'}")
+        self.ma_runtime_badge.setText(f"Runtime: {'ready' if die.get('diec_path') else 'missing'}")
+        self._record_threat_history("malware-analyst", value, "Detect It Easy", result)
+        self._switch_to_tab("Static Analysis")
+
     def _record_threat_history(self, query_type: str, value: str, source: str, payload) -> None:
         self.threat_history.insert(0, {"type": query_type, "value": value, "source": source, "payload": json.dumps(payload, indent=2, ensure_ascii=False)})
         self.threat_history = self.threat_history[:20]
@@ -3527,6 +3763,16 @@ class ShadowLabDesktop(QMainWindow):
         self.art_detail.setPlainText(json.dumps(self.artifacts, indent=2)); self.metric_art.setText(f"Artifacts: {len(self.artifacts)}")
         self.art_preview.setHtml("<h3>Artifact Preview</h3><p>Select an artifact to inspect local path, URL, and quick preview.</p>")
 
+    def _render_html_source_preview(self, text: str, title: str) -> None:
+        snippet = html.escape(text[:6000])
+        self.art_preview.setHtml(
+            "<div style='font-family:Consolas,\"Cascadia Code\",monospace;color:#eef4fb;'>"
+            f"<h3 style='font-family:\"Segoe UI\",Arial,sans-serif;color:#f4f7fb;'>{html.escape(title)}</h3>"
+            "<p style='color:#96a5b8;'>HTML previews are rendered as escaped source to avoid executing untrusted markup.</p>"
+            f"<pre style='white-space:pre-wrap;background:#0f1823;border:1px solid #243446;border-radius:8px;padding:12px;'>{snippet}</pre>"
+            "</div>"
+        )
+
     def refresh_quarantine(self) -> None:
         try:
             items = self._get("/quarantine", timeout=20).json()
@@ -3705,7 +3951,7 @@ class ShadowLabDesktop(QMainWindow):
         self.art_detail.setPlainText(f"Artifact: {name}\nLocal Path: {path}\nDownload URL: {self._url('/artifacts/' + name)}")
         suffix = Path(path).suffix.lower()
         if suffix == ".html" and Path(path).exists():
-            self.art_preview.setHtml(Path(path).read_text(encoding="utf-8", errors="ignore")[:6000])
+            self._render_html_source_preview(Path(path).read_text(encoding="utf-8", errors="ignore"), name)
         elif suffix == ".json" and Path(path).exists():
             self.art_preview.setPlainText(Path(path).read_text(encoding="utf-8", errors="ignore")[:4000])
         else:

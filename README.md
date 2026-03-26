@@ -29,6 +29,7 @@ Main desktop tabs:
 - `Advanced Hunt`
 - `Persistence`
 - `Threat Intel`
+- `Static Analysis`
 - `Deception`
 - `Network`
 - `Hosts`
@@ -49,17 +50,17 @@ Inside `Enterprise`, the workspace is split into:
 
 ## Images
 
-### Overview Telemetry Dashboard
+### Overview Incident Brief
 
-![Overview Telemetry Dashboard](images/overview-telemetry-dashboard.png)
+![Overview Incident Brief](images/overview-incident-brief.png)
 
 ### Process Intelligence Workspace
 
 ![Process Intelligence Workspace](images/process-intelligence-workspace.png)
 
-### Graph Workspace
+### Graph Interactive Browser
 
-![Graph Workspace](images/graph-workspace.png)
+![Graph Interactive Browser](images/graph-interactive-browser.png)
 
 ### About Creator Profile
 
@@ -112,6 +113,16 @@ Latest validated state:
 - `compile_error_count = 0`
 
 Detailed validation notes live in [plugins/rules/YARA_VALIDATION.md](plugins/rules/YARA_VALIDATION.md).
+
+## Static Analysis Companion
+
+ShadowLab's `Static Analysis` workspace can use Detect It Easy through the native `die-python` binding or, optionally, an external Windows companion binary.
+
+- preferred runtime: native `die-python`
+- optional subprocess runtime: `diec.exe` or `die.exe` via `SHADOWLAB_DIEC_PATH` or `PATH`
+- if `diec.exe` is missing, ShadowLab still falls back to `pefile`-based structural PE analysis
+- native binding execution is isolated in a worker process so the main API survives DiE-native faults
+- `Refresh DIE Status` preserves the active analysis summary and raw output panes
 
 ## Quick Start
 

@@ -150,6 +150,25 @@ python -m unittest tests.test_api_load tests.test_threat_intelligence tests.test
 python -m py_compile plugins\yara_scanner.py api\main.py database.py plugins\memory_forensics.py desktop\main.py threat_intelligence.py
 ```
 
+## Validation Corpus
+
+ShadowLab now includes a repeatable validation corpus manifest for detection regression checks:
+
+- [config/detection_validation_corpus.json](/C:/Users/ulfat/Documents/shadowlab-detection-lab/config/detection_validation_corpus.json)
+- [scripts/validate_detection_corpus.py](/C:/Users/ulfat/Documents/shadowlab-detection-lab/scripts/validate_detection_corpus.py)
+
+The validator checks:
+
+1. whether the sample still triggers at least one expected high-signal YARA rule
+2. whether the sample still reaches the expected minimum structural static-analysis score
+3. whether any sample went missing from the analyst corpus
+
+Run it with:
+
+```powershell
+python scripts\validate_detection_corpus.py
+```
+
 ## Current Assessment
 
 The current YARA state is suitable for ShadowLab's Windows-focused detection-and-response workflow:

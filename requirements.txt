@@ -19,6 +19,8 @@ pyvis==0.3.2
 # --- Security & Plugins ---
 scapy==2.5.0
 yara-python==4.5.0
+pefile==2024.8.26
+die-python>=0.5.0
 pyautogui==0.9.54
 watchdog==4.0.1
 

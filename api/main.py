@@ -51,6 +51,7 @@ from services.hids_integration_service import HidsIntegrationService
 from services.incident_service import IncidentArtifactService
 from services.integrity_service import IntegrityService
 from services.investigation_service import InvestigationService
+from services.malware_analyst_service import MalwareAnalystService
 from services.migration_service import MigrationService
 from services.mitre_service import MitreAttackService
 from services.observability_service import ObservabilityService
@@ -129,6 +130,7 @@ graph_service = GraphService(OUT_DIR)
 collector_bridge = CollectorTelemetryBridge(config, OUT_DIR)
 enterprise_service = EnterpriseService(BASE_DIR, process_intel_service, fleet_service)
 mitre_service = MitreAttackService(BASE_DIR, db)
+malware_analyst_service = MalwareAnalystService(BASE_DIR, process_intel_service)
 hids_integration_service = HidsIntegrationService(
     db,
     enterprise_service=enterprise_service,
@@ -248,6 +250,10 @@ class ThreatHashLookupRequest(BaseModel):
     @classmethod
     def _validate_hash(cls, value: str) -> str:
         return _validated_sha256(value)
+
+
+class MalwareAnalystFileRequest(BaseModel):
+    file_path: str
 
 
 class SnifferRequest(BaseModel):
@@ -1458,104 +1464,107 @@ def get_config() -> dict[str, Any]:
 @app.post("/monitor/run", dependencies=[Depends(require_analyst_or_admin)])
 def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
     _apply_rate_limit(request, bucket="monitor_run", detail="Too many monitor runs. Wait briefly and retry.")
-    telemetry_service = TelemetryMonitoringService(config)
-    telemetry_rows: list[dict[str, Any]] = []
-    timeline_scores: list[float] = []
+    observability_service.log_event("monitor_run_requested", duration=payload.duration, interval=payload.interval)
+    with observability_service.span("monitor.run"):
+        telemetry_service = TelemetryMonitoringService(config)
+        telemetry_rows: list[dict[str, Any]] = []
+        timeline_scores: list[float] = []
 
-    defender_summary, sysmon_summary = telemetry_service.collect_event_context()
-    start = time.time()
-    while time.time() - start < payload.duration:
-        row = telemetry_service.sample_once()
-        telemetry_rows.append(row)
-        score = detection_service.incremental_score(telemetry_rows, defender_summary, sysmon_summary)
-        timeline_scores.append(float(score["likelihood"]))
-        time.sleep(max(0.1, float(payload.interval)))
+        defender_summary, sysmon_summary = telemetry_service.collect_event_context()
+        start = time.time()
+        while time.time() - start < payload.duration:
+            row = telemetry_service.sample_once()
+            telemetry_rows.append(row)
+            score = detection_service.incremental_score(telemetry_rows, defender_summary, sysmon_summary)
+            timeline_scores.append(float(score["likelihood"]))
+            time.sleep(max(0.1, float(payload.interval)))
 
-    final = detection_service.final_score(telemetry_rows, defender_summary, sysmon_summary)
-    incident = detection_service.build_incident(telemetry_rows, defender_summary, sysmon_summary)
+        final = detection_service.final_score(telemetry_rows, defender_summary, sysmon_summary)
+        incident = detection_service.build_incident(telemetry_rows, defender_summary, sysmon_summary)
 
-    _write_monitor_artifacts(telemetry_rows, defender_summary, sysmon_summary, final, payload.report_sections, incident)
+        _write_monitor_artifacts(telemetry_rows, defender_summary, sysmon_summary, final, payload.report_sections, incident)
 
-    conn = db.create_connection()
-    if conn:
-        db.insert_telemetry(conn, telemetry_rows)
-        db.upsert_incident(
-            conn,
-            incident.incident_id,
-            incident.created_at,
-            incident.severity,
-            incident.title,
-            incident.summary,
-            status="open",
-            notes="\n".join(incident.notes),
-            recommended_actions=json.dumps(incident.recommended_actions),
-            attack_chain=json.dumps(incident.attack_chain),
-            mitre_mapping=json.dumps(incident.mitre_techniques),
-            correlation_story=incident.correlation_story,
-        )
-        fleet_service.register_local_host(conn)
-        conn.close()
-
-    if alert_webhook_url and incident.severity.lower() in {"high", "critical"}:
         conn = db.create_connection()
         if conn:
-            try:
-                alert_result = alert_service.dispatch(
-                    alert_webhook_url,
-                    {
-                        "product": "ShadowLab",
-                        "incident_id": incident.incident_id,
-                        "severity": incident.severity,
-                        "title": incident.title,
-                        "summary": incident.summary,
-                        "findings": [finding.to_dict() for finding in incident.findings],
-                    },
-                )
-                db.log_alert(
-                    conn,
-                    alert_webhook_url,
-                    _alert_destination_type(alert_webhook_url),
-                    incident.severity,
-                    incident.title,
-                    alert_result.status,
-                    alert_result.detail,
-                )
-            finally:
-                conn.close()
+            db.insert_telemetry(conn, telemetry_rows)
+            db.upsert_incident(
+                conn,
+                incident.incident_id,
+                incident.created_at,
+                incident.severity,
+                incident.title,
+                incident.summary,
+                status="open",
+                notes="\n".join(incident.notes),
+                recommended_actions=json.dumps(incident.recommended_actions),
+                attack_chain=json.dumps(incident.attack_chain),
+                mitre_mapping=json.dumps(incident.mitre_techniques),
+                correlation_story=incident.correlation_story,
+            )
+            fleet_service.register_local_host(conn)
+            conn.close()
 
-    collector_export = {"enabled": False}
-    collector_config = config.get("telemetry_fabric") or {}
-    if collector_bridge.is_enabled() and bool(collector_config.get("export_on_monitor", True)):
-        collector_export = collector_bridge.export_monitor_session(
-            telemetry_rows,
-            defender_summary,
-            sysmon_summary,
-            final,
-            incident.to_dict(),
-        )
-        _log_collector_exports(collector_export)
+        if alert_webhook_url and incident.severity.lower() in {"high", "critical"}:
+            conn = db.create_connection()
+            if conn:
+                try:
+                    alert_result = alert_service.dispatch(
+                        alert_webhook_url,
+                        {
+                            "product": "ShadowLab",
+                            "incident_id": incident.incident_id,
+                            "severity": incident.severity,
+                            "title": incident.title,
+                            "summary": incident.summary,
+                            "findings": [finding.to_dict() for finding in incident.findings],
+                        },
+                    )
+                    db.log_alert(
+                        conn,
+                        alert_webhook_url,
+                        _alert_destination_type(alert_webhook_url),
+                        incident.severity,
+                        incident.title,
+                        alert_result.status,
+                        alert_result.detail,
+                    )
+                finally:
+                    conn.close()
 
-    return {
-        "telemetry_count": len(telemetry_rows),
-        "telemetry_rows": telemetry_rows,
-        "timeline_scores": timeline_scores,
-        "event_summaries": {
-            "defender": defender_summary,
-            "sysmon": sysmon_summary,
-        },
-        "final_score": final,
-        "incident": incident.to_dict(),
-        "collector_export": collector_export,
-        "artifacts": _artifact_manifest(),
-    }
+        collector_export = {"enabled": False}
+        collector_config = config.get("telemetry_fabric") or {}
+        if collector_bridge.is_enabled() and bool(collector_config.get("export_on_monitor", True)):
+            collector_export = collector_bridge.export_monitor_session(
+                telemetry_rows,
+                defender_summary,
+                sysmon_summary,
+                final,
+                incident.to_dict(),
+            )
+            _log_collector_exports(collector_export)
+
+        observability_service.log_event("monitor_run_completed", telemetry_count=len(telemetry_rows), severity=incident.severity)
+        return {
+            "telemetry_count": len(telemetry_rows),
+            "telemetry_rows": telemetry_rows,
+            "timeline_scores": timeline_scores,
+            "event_summaries": {
+                "defender": defender_summary,
+                "sysmon": sysmon_summary,
+            },
+            "final_score": final,
+            "incident": incident.to_dict(),
+            "collector_export": collector_export,
+            "artifacts": _artifact_manifest(),
+        }
 
 
-@app.get("/processes")
+@app.get("/processes", dependencies=[Depends(require_analyst_or_admin)])
 def list_processes() -> list[dict[str, Any]]:
     return process_intel_service.snapshot_processes()
 
 
-@app.get("/processes/{pid}")
+@app.get("/processes/{pid}", dependencies=[Depends(require_analyst_or_admin)])
 def get_process(pid: int) -> dict[str, Any]:
     try:
         return process_intel_service.profile_process(pid)
@@ -1565,7 +1574,7 @@ def get_process(pid: int) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/processes/{pid}/tree")
+@app.get("/processes/{pid}/tree", dependencies=[Depends(require_analyst_or_admin)])
 def process_tree(pid: int) -> dict[str, Any]:
     snapshot = process_intel_service.snapshot_processes(include_deep_fields=False)
     indexed = {int(row["pid"]): row for row in snapshot if row.get("pid") is not None}
@@ -1733,6 +1742,7 @@ def update_local_yara_rule_tuning(payload: LocalYaraRuleTuningRequest) -> dict[s
         registry = db.get_detection_rules(conn).fillna("").to_dict(orient="records")
     finally:
         conn.close()
+    yara_scanner.clear_registry_rule_override_cache()
     return {"status": "updated", "rule_id": payload.rule_id, "registry": registry[:100]}
 
 
@@ -1915,7 +1925,22 @@ def threat_hash_lookup_with_auth(request: Request, payload: ThreatHashLookupRequ
     }
 
 
-@app.get("/history/telemetry")
+@app.get("/malware-analyst/status", dependencies=[Depends(require_analyst_or_admin)])
+def malware_analyst_status() -> dict[str, Any]:
+    return malware_analyst_service.status()
+
+
+@app.post("/malware-analyst/file", dependencies=[Depends(require_analyst_or_admin)])
+def malware_analyst_file(payload: MalwareAnalystFileRequest) -> dict[str, Any]:
+    return malware_analyst_service.analyze_file(payload.file_path)
+
+
+@app.get("/malware-analyst/processes/{pid}", dependencies=[Depends(require_analyst_or_admin)])
+def malware_analyst_process(pid: int) -> dict[str, Any]:
+    return malware_analyst_service.analyze_process(pid)
+
+
+@app.get("/history/telemetry", dependencies=[Depends(require_analyst_or_admin)])
 def telemetry_history() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -1927,7 +1952,7 @@ def telemetry_history() -> list[dict[str, Any]]:
     return history_df.to_dict(orient="records")
 
 
-@app.get("/history/responses")
+@app.get("/history/responses", dependencies=[Depends(require_analyst_or_admin)])
 def response_history() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -1939,7 +1964,7 @@ def response_history() -> list[dict[str, Any]]:
     return response_df.to_dict(orient="records")
 
 
-@app.get("/incidents")
+@app.get("/incidents", dependencies=[Depends(require_analyst_or_admin)])
 def incidents() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -1951,7 +1976,7 @@ def incidents() -> list[dict[str, Any]]:
     return frame.to_dict(orient="records")
 
 
-@app.get("/history/alerts")
+@app.get("/history/alerts", dependencies=[Depends(require_analyst_or_admin)])
 def alert_history() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -1963,7 +1988,7 @@ def alert_history() -> list[dict[str, Any]]:
     return frame.to_dict(orient="records")
 
 
-@app.get("/history/remediations")
+@app.get("/history/remediations", dependencies=[Depends(require_analyst_or_admin)])
 def remediation_history() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -2096,7 +2121,7 @@ def delete_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
         conn.close()
 
 
-@app.get("/timeline")
+@app.get("/timeline", dependencies=[Depends(require_analyst_or_admin)])
 def timeline() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -2113,13 +2138,13 @@ def timeline() -> list[dict[str, Any]]:
         conn.close()
 
 
-@app.get("/timeline/graph")
+@app.get("/timeline/graph", dependencies=[Depends(require_analyst_or_admin)])
 def timeline_graph() -> dict[str, Any]:
     items = timeline()
     return timeline_service.build_graph(items)
 
 
-@app.get("/hosts")
+@app.get("/hosts", dependencies=[Depends(require_analyst_or_admin)])
 def hosts() -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
@@ -2130,7 +2155,7 @@ def hosts() -> list[dict[str, Any]]:
         conn.close()
 
 
-@app.get("/graph/entity-map")
+@app.get("/graph/entity-map", dependencies=[Depends(require_analyst_or_admin)])
 def entity_map(pid: int | None = None) -> dict[str, Any]:
     conn = db.create_connection()
     incidents: list[dict[str, Any]] = []
@@ -2159,13 +2184,13 @@ def entity_map(pid: int | None = None) -> dict[str, Any]:
     )
 
 
-@app.get("/graph/entity-map/html")
+@app.get("/graph/entity-map/html", dependencies=[Depends(require_analyst_or_admin)])
 def entity_map_html(pid: int | None = None):
     graph = entity_map(pid=pid)
-    target = Path(graph["html_path"])
+    target = safe_child_path(OUT_DIR, Path(graph["html_path"]).name, allowed_suffixes={".html"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="Graph HTML not found")
-    return FileResponse(target)
+    return _safe_file_response(target)
 
 
 @app.post("/agents/register", dependencies=[Depends(require_admin)])
@@ -2226,137 +2251,167 @@ def auto_triage(request: Request, pid: int, payload: TriageRequest) -> dict[str,
     import plugins.sandbox as sandbox
     import plugins.strings_analyser as strings_analyser
 
+    observability_service.log_event("triage_requested", pid=pid)
     try:
-        profile = process_intel_service.profile_process(pid)
-        exe_path = profile.get("exe")
-        strings = strings_analyser.extract_strings(exe_path, payload.strings_min_length)
-        hits = strings_analyser.search_patterns(strings, payload.strings_patterns)
-        yara_lookup = check_file_yaraify(profile.get("sha256", ""), payload.yaraify_auth_key) if profile.get("sha256") else {
-            "status": "skipped",
-            "reason": "Process hash unavailable",
-        }
-        local_yara = run_local_yara_scan(
-            exe_path,
-            pack=payload.local_yara_pack,
-            context={
-                "sha256": profile.get("sha256", "") or "",
-                "signature_status": profile.get("signature_status", ""),
-                "filepath": exe_path or "",
-            },
-        ) if exe_path and (
-            str(yara_lookup.get("status", "")).lower() != "ok" or not yara_lookup.get("matched_rules")
-        ) else {
-            "status": "skipped",
-            "reason": "YARAify already returned matches",
-            "matches": [],
-        }
-        yara_matches = yara_lookup.get("matched_rules", []) if isinstance(yara_lookup, dict) else []
-        trace = sandbox.ProcessTracer(pid).trace(duration=payload.trace_duration, interval=0.5)
-        analyst = ai_analyst.AIAnalyst().analyze_process(profile)
-        memory_result = memory_forensics.run_analysis(pid, profile.get("name", "process"))
-        intel = None
-        if payload.virustotal_api_key or payload.malwarebazaar_auth_key or payload.yaraify_auth_key:
-            intel = scan_process(
-                {"exe": exe_path, "pid": pid, "name": profile.get("name")},
-                virustotal_api_key=payload.virustotal_api_key,
-                malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
-                yaraify_auth_key=payload.yaraify_auth_key,
+        with observability_service.span(f"triage.pid.{pid}"):
+            profile = process_intel_service.profile_process(pid)
+            exe_path = profile.get("exe")
+            strings = strings_analyser.extract_strings(exe_path, payload.strings_min_length)
+            hits = strings_analyser.search_patterns(strings, payload.strings_patterns)
+            yara_lookup = check_file_yaraify(profile.get("sha256", ""), payload.yaraify_auth_key) if profile.get("sha256") else {
+                "status": "skipped",
+                "reason": "Process hash unavailable",
+            }
+            local_yara = run_local_yara_scan(
+                exe_path,
+                pack=payload.local_yara_pack,
+                context={
+                    "sha256": profile.get("sha256", "") or "",
+                    "signature_status": profile.get("signature_status", ""),
+                    "filepath": exe_path or "",
+                },
+            ) if exe_path and (
+                str(yara_lookup.get("status", "")).lower() != "ok" or not yara_lookup.get("matched_rules")
+            ) else {
+                "status": "skipped",
+                "reason": "YARAify already returned matches",
+                "matches": [],
+            }
+            static_pe = malware_analyst_service.analyze_file(exe_path) if exe_path else {
+                "status": "skipped",
+                "summary": "Executable path unavailable for static PE analysis.",
+            }
+            yara_matches = yara_lookup.get("matched_rules", []) if isinstance(yara_lookup, dict) else []
+            trace = sandbox.ProcessTracer(pid).trace(duration=payload.trace_duration, interval=0.5)
+            analyst = ai_analyst.AIAnalyst().analyze_process(profile)
+            memory_result = memory_forensics.run_analysis(pid, profile.get("name", "process"))
+            intel = None
+            if payload.virustotal_api_key or payload.malwarebazaar_auth_key or payload.yaraify_auth_key:
+                intel = scan_process(
+                    {"exe": exe_path, "pid": pid, "name": profile.get("name")},
+                    virustotal_api_key=payload.virustotal_api_key,
+                    malwarebazaar_auth_key=payload.malwarebazaar_auth_key,
+                    yaraify_auth_key=payload.yaraify_auth_key,
+                )
+            fused_verdict = fuse_detection_verdict(
+                yaraify_result=yara_lookup,
+                local_yara_result=local_yara,
+                virustotal_result=(intel or {}).get("virustotal", {}) if isinstance(intel, dict) else {},
+                malwarebazaar_result=(intel or {}).get("malwarebazaar", {}) if isinstance(intel, dict) else {},
+                static_result=static_pe,
+                memory_result=memory_result,
             )
-        fused_verdict = fuse_detection_verdict(
-            yaraify_result=yara_lookup,
-            local_yara_result=local_yara,
-            virustotal_result=(intel or {}).get("virustotal", {}) if isinstance(intel, dict) else {},
-            malwarebazaar_result=(intel or {}).get("malwarebazaar", {}) if isinstance(intel, dict) else {},
-            memory_result=memory_result,
-        )
-        response_plan = response_service.build_triage_response_plan(
-            profile=profile,
-            fusion=fused_verdict,
-            local_yara=local_yara,
-            memory=memory_result,
-        )
-        triage_summary = {
-            "confidence": fused_verdict.get("confidence", "low"),
-            "severity": fused_verdict.get("severity", "low"),
-            "top_reasons": list(fused_verdict.get("reasons", []))[:5],
-            "remote_yara_hits": yara_matches[:10],
-            "local_yara_hits": local_yara.get("matched_rules", [])[:10] if isinstance(local_yara, dict) else [],
-            "inceptor_hits": [rule for rule in (local_yara.get("matched_rules", []) if isinstance(local_yara, dict) else []) if str(rule).startswith("Inceptor_")],
-            "memory_verdict": memory_result.get("analysis", {}).get("verdict", "") if isinstance(memory_result, dict) else "",
-            "memory_confidence": memory_result.get("analysis", {}).get("fusion", {}).get("confidence", "low") if isinstance(memory_result, dict) else "low",
-        }
-        return {
-            "profile": profile,
-            "internals_summary": {"handles": len(internals.get_process_handles(pid)), "modules": len(internals.get_process_libs(pid))},
-            "strings": {"total": len(strings), "hits": hits[:25]},
-            "yara": {
-                "provider": "YARAify",
-                "result": yara_lookup,
-                "matches": yara_matches,
-                "local_result": local_yara,
-                "local_matches": local_yara.get("matched_rules", []) if isinstance(local_yara, dict) else [],
-            },
-            "sandbox": trace,
-            "memory": memory_result,
-            "ai_analyst": analyst,
-            "threat_intel": intel,
-            "fusion": fused_verdict,
-            "triage_summary": triage_summary,
-            "response_plan": response_plan,
-        }
+            response_plan = response_service.build_triage_response_plan(
+                profile=profile,
+                fusion=fused_verdict,
+                local_yara=local_yara,
+                memory=memory_result,
+            )
+            triage_summary = {
+                "confidence": fused_verdict.get("confidence", "low"),
+                "severity": fused_verdict.get("severity", "low"),
+                "top_reasons": list(fused_verdict.get("reasons", []))[:5],
+                "remote_yara_hits": yara_matches[:10],
+                "local_yara_hits": local_yara.get("matched_rules", [])[:10] if isinstance(local_yara, dict) else [],
+                "inceptor_hits": [rule for rule in (local_yara.get("matched_rules", []) if isinstance(local_yara, dict) else []) if str(rule).startswith("Inceptor_")],
+                "static_pe_verdict": (
+                    static_pe.get("combined_static", {}).get("verdict", "")
+                    or static_pe.get("static_analysis", {}).get("verdict", "")
+                ) if isinstance(static_pe, dict) else "",
+                "static_pe_indicators": (
+                    static_pe.get("combined_static", {}).get("suspicious_indicators", [])
+                    or static_pe.get("static_analysis", {}).get("suspicious_indicators", [])
+                )[:6] if isinstance(static_pe, dict) else [],
+                "memory_verdict": memory_result.get("analysis", {}).get("verdict", "") if isinstance(memory_result, dict) else "",
+                "memory_confidence": memory_result.get("analysis", {}).get("fusion", {}).get("confidence", "low") if isinstance(memory_result, dict) else "low",
+                "parent_name": profile.get("parent_name", ""),
+                "child_process_count": len(profile.get("child_processes", []) or []),
+                "loaded_module_count": int(profile.get("loaded_module_count", 0) or 0),
+                "open_file_count": int(profile.get("open_file_count", 0) or 0),
+                "execution_context": profile.get("execution_context", {}),
+                "suspicious_chain_matches": profile.get("execution_context", {}).get("suspicious_chain_matches", [])[:5] if isinstance(profile.get("execution_context"), dict) else [],
+            }
+            observability_service.log_event("triage_completed", pid=pid, confidence=fused_verdict.get("confidence", "low"))
+            return {
+                "profile": profile,
+                "internals_summary": {"handles": len(internals.get_process_handles(pid)), "modules": len(internals.get_process_libs(pid))},
+                "strings": {"total": len(strings), "hits": hits[:25]},
+                "yara": {
+                    "provider": "YARAify",
+                    "result": yara_lookup,
+                    "matches": yara_matches,
+                    "local_result": local_yara,
+                    "local_matches": local_yara.get("matched_rules", []) if isinstance(local_yara, dict) else [],
+                },
+                "sandbox": trace,
+                "memory": memory_result,
+                "static_pe": static_pe,
+                "ai_analyst": analyst,
+                "threat_intel": intel,
+                "fusion": fused_verdict,
+                "triage_summary": triage_summary,
+                "response_plan": response_plan,
+            }
     except HTTPException:
         raise
     except Exception as exc:
+        observability_service.log_event("triage_failed", pid=pid, detail=str(exc))
         raise HTTPException(status_code=500, detail=f"Triage failed for PID {pid}: {exc}") from exc
 
 
 @app.post("/triage/{pid}/respond", dependencies=[Depends(require_admin), Depends(ensure_dangerous_actions_enabled)])
 def triage_respond(request: Request, pid: int, payload: TriageRespondRequest) -> dict[str, Any]:
     _require_enterprise_approval(request, action_name="triage:respond")
-    profile = process_intel_service.profile_process(pid)
-    process_name = str(profile.get("name") or payload.process_name or "process").strip()
-    enforce_process_action_policy(request, process_name)
-    executable_path = str(profile.get("exe") or "")
-    intel = scan_process({"exe": executable_path, "pid": pid, "name": process_name}) if executable_path else {}
-    memory_result = __import__("plugins.memory_forensics", fromlist=["run_analysis"]).run_analysis(pid, process_name)
-    local_yara = (intel or {}).get("local_yara", {}) if isinstance(intel, dict) else {}
-    fusion = fuse_detection_verdict(
-        yaraify_result=(intel or {}).get("yaraify", {}) if isinstance(intel, dict) else {},
-        local_yara_result=local_yara,
-        virustotal_result=(intel or {}).get("virustotal", {}) if isinstance(intel, dict) else {},
-        malwarebazaar_result=(intel or {}).get("malwarebazaar", {}) if isinstance(intel, dict) else {},
-        memory_result=memory_result,
-    )
-    response_plan = response_service.build_triage_response_plan(
-        profile=profile,
-        fusion=fusion,
-        local_yara=local_yara,
-        memory=memory_result,
-    )
-    applied = response_service.apply_triage_response_plan(
-        pid=pid,
-        process_name=process_name,
-        executable_path=executable_path,
-        plan=response_plan,
-    )
-    if executable_path and any(item.get("action") == "quarantine" for item in applied.get("executed", [])):
-        conn = db.create_connection()
-        if conn:
-            try:
-                for item in applied.get("executed", []):
-                    if item.get("action") == "quarantine":
-                        db.log_quarantine(conn, pid, process_name, executable_path, item.get("result", {}).get("path", ""), "active")
-                        break
-            finally:
-                conn.close()
-        integrity_service.refresh_manifest()
-    return {
-        "pid": pid,
-        "process_name": process_name,
-        "fusion": fusion,
-        "response_plan": response_plan,
-        "applied": applied,
-    }
+    observability_service.log_event("triage_respond_requested", pid=pid)
+    with observability_service.span(f"triage.respond.pid.{pid}"):
+        profile = process_intel_service.profile_process(pid)
+        process_name = str(profile.get("name") or payload.process_name or "process").strip()
+        enforce_process_action_policy(request, process_name)
+        executable_path = str(profile.get("exe") or "")
+        intel = scan_process({"exe": executable_path, "pid": pid, "name": process_name}) if executable_path else {}
+        memory_result = __import__("plugins.memory_forensics", fromlist=["run_analysis"]).run_analysis(pid, process_name)
+        local_yara = (intel or {}).get("local_yara", {}) if isinstance(intel, dict) else {}
+        static_pe = (intel or {}).get("static_pe", {}) if isinstance(intel, dict) else {}
+        fusion = fuse_detection_verdict(
+            yaraify_result=(intel or {}).get("yaraify", {}) if isinstance(intel, dict) else {},
+            local_yara_result=local_yara,
+            virustotal_result=(intel or {}).get("virustotal", {}) if isinstance(intel, dict) else {},
+            malwarebazaar_result=(intel or {}).get("malwarebazaar", {}) if isinstance(intel, dict) else {},
+            static_result=static_pe,
+            memory_result=memory_result,
+        )
+        response_plan = response_service.build_triage_response_plan(
+            profile=profile,
+            fusion=fusion,
+            local_yara=local_yara,
+            memory=memory_result,
+        )
+        applied = response_service.apply_triage_response_plan(
+            pid=pid,
+            process_name=process_name,
+            executable_path=executable_path,
+            plan=response_plan,
+        )
+        if executable_path and any(item.get("action") == "quarantine" for item in applied.get("executed", [])):
+            conn = db.create_connection()
+            if conn:
+                try:
+                    for item in applied.get("executed", []):
+                        if item.get("action") == "quarantine":
+                            db.log_quarantine(conn, pid, process_name, executable_path, item.get("result", {}).get("path", ""), "active")
+                            break
+                finally:
+                    conn.close()
+            integrity_service.refresh_manifest()
+        observability_service.log_event("triage_respond_completed", pid=pid, executed=len(applied.get("executed", [])))
+        return {
+            "pid": pid,
+            "process_name": process_name,
+            "fusion": fusion,
+            "static_pe": static_pe,
+            "response_plan": response_plan,
+            "applied": applied,
+        }
 
 
 @app.post("/scenario/run", dependencies=[Depends(require_admin)])
@@ -2368,7 +2423,7 @@ def run_scenario(payload: ScenarioRequest) -> dict[str, Any]:
     return {"status": "started", "profile": payload.profile, "duration": payload.duration}
 
 
-@app.get("/network/connections")
+@app.get("/network/connections", dependencies=[Depends(require_analyst_or_admin)])
 def network_connections() -> list[dict[str, Any]]:
     return monitor_core.get_network_connections()
 
@@ -2385,7 +2440,7 @@ def network_sniff(payload: SnifferRequest) -> dict[str, Any]:
     return result
 
 
-@app.get("/artifacts")
+@app.get("/artifacts", dependencies=[Depends(require_analyst_or_admin)])
 def list_artifacts() -> dict[str, str]:
     return _artifact_manifest()
 
@@ -2712,20 +2767,20 @@ def whids_scheduler_status() -> dict[str, Any]:
     return hids_integration_service.whids_scheduler_status()
 
 
-@app.get("/artifacts/{filename}")
+@app.get("/artifacts/{filename}", dependencies=[Depends(require_analyst_or_admin)])
 def download_artifact(filename: str):
     target = safe_child_path(OUT_DIR, filename, allowed_suffixes={".csv", ".json", ".html", ".pdf"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="Artifact not found")
-    return FileResponse(target)
+    return _safe_file_response(target)
 
 
-@app.get("/reports/html")
+@app.get("/reports/html", dependencies=[Depends(require_analyst_or_admin)])
 def html_report():
-    target = OUT_DIR / "ShadowLab_Report.html"
+    target = safe_child_path(OUT_DIR, "ShadowLab_Report.html", allowed_suffixes={".html"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="HTML report not found")
-    return FileResponse(target)
+    return _safe_file_response(target)
 
 
 @app.post("/deception/honeypot/deploy", dependencies=[Depends(require_admin), Depends(ensure_deception_enabled)])
@@ -2926,6 +2981,14 @@ def _artifact_manifest() -> dict[str, str]:
     }
 
 
+def _safe_file_response(target: Path, *, filename: str | None = None) -> FileResponse:
+    response = FileResponse(target, filename=filename or target.name)
+    if target.suffix.lower() == ".html":
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename or target.name}"'
+        response.headers["X-Download-Options"] = "noopen"
+    return response
+
+
 def _load_scenario_runner():
     try:
         spec = importlib.util.spec_from_file_location("scenario_profiles", BASE_DIR / "plugins" / "scenario_profiles.py")
@@ -2995,6 +3058,9 @@ def _validated_incident_id(value: str) -> str:
 def _validate_startup_security_posture() -> None:
     profile = get_active_policy_name()
     issues: list[str] = []
+    bind_host = (os.environ.get("SHADOWLAB_HOST", "127.0.0.1") or "127.0.0.1").strip().lower()
+    if not security_settings.auth_required and bind_host not in {"127.0.0.1", "localhost", "::1"}:
+        issues.append("authentication-disabled mode must bind to loopback only")
     if profile in {"corp", "prod"} and not security_settings.auth_required:
         issues.append("authentication must be enabled")
     if profile in {"corp", "prod"} and any(origin.strip() == "*" for origin in security_settings.allowed_origins):

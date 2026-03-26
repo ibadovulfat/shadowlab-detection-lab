@@ -32,9 +32,12 @@ def main() -> None:
             "database.py",
             "api/main.py",
             "desktop/main.py",
+            "services/malware_analyst_service.py",
+            "services/static_pe_service.py",
             "scripts/backup_shadowlab_data.py",
             "scripts/restore_shadowlab_data.py",
             "scripts/smoke_test_postgres_runtime.py",
+            "scripts/validate_detection_corpus.py",
         ]
     )
     run(
@@ -49,7 +52,27 @@ def main() -> None:
             "tests.test_telemetry_bridge",
             "tests.test_database_maintenance",
             "tests.test_api_e2e",
+        ]
+    )
+    run(
+        [
+            sys.executable,
+            "-m",
+            "unittest",
             "tests.test_api_load",
+            "tests.test_detection_service",
+            "tests.test_malware_analyst",
+            "tests.test_detection_validation_corpus",
+        ]
+    )
+    run(
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "tests.test_static_pe_service",
+            "tests.test_sandbox",
+            "tests.test_threat_intelligence",
             "tests.test_ops_scripts",
             "tests.test_graph_service",
         ]

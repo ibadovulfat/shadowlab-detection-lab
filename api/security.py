@@ -246,13 +246,23 @@ def require_api_key(
 ) -> SecurityContext:
     if request.url.path in {"/health"}:
         return SecurityContext(token="", role="public")
+    provided = x_api_key or _extract_bearer_token(authorization)
     if not security_settings.auth_required:
+        if provided:
+            resolved = _resolve_context(provided)
+            if resolved is not None:
+                request.state.security_context = resolved
+                _log_auth_event("auth_success", "allowed", resolved.role, _client_ip(request), request.url.path, "authenticated (auth disabled)")
+                return resolved
+            context = SecurityContext(token="", role="viewer")
+            request.state.security_context = context
+            _log_auth_event("auth_failure", "denied", context.role, _client_ip(request), request.url.path, "invalid_api_key_auth_disabled")
+            return context
         context = SecurityContext(token="", role="admin")
         request.state.security_context = context
         return context
 
     _enforce_auth_failure_limit(request)
-    provided = x_api_key or _extract_bearer_token(authorization)
     if not provided:
         _record_auth_failure(request, detail="missing_api_key")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")

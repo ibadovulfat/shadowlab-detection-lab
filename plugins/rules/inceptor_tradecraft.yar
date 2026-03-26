@@ -155,3 +155,61 @@ rule Inceptor_APC_Remote_Thread_Tradecraft
     condition:
         4 of them
 }
+
+rule Inceptor_PE_Load_Loader_Template
+{
+    meta:
+        description = "Detects Inceptor PE load templates that manually map images and transfer control to the loaded entry point"
+        author = "ShadowLab"
+        source = "inceptor-main"
+        severity = "critical"
+    strings:
+        $p1 = "PELoader pe = new PELoader(decoded);" ascii wide
+        $p2 = "Preferred Load Address" ascii wide
+        $p3 = "BaseRelocationTable" ascii wide
+        $p4 = "LoadModuleFromDisk" ascii wide
+        $p5 = "GetLibraryAddress" ascii wide
+        $p6 = "CreateThread" ascii wide
+        $p7 = "WaitForSingleObject" ascii wide
+    condition:
+        4 of them
+}
+
+rule Inceptor_InstallUtil_Remote_Injection_Template
+{
+    meta:
+        description = "Detects Inceptor InstallUtil templates that allocate remote memory and launch injected threads"
+        author = "ShadowLab"
+        source = "inceptor-main"
+        severity = "critical"
+    strings:
+        $i1 = "[System.ComponentModel.RunInstaller(true)]" ascii wide
+        $i2 = "public override void Uninstall(System.Collections.IDictionary savedState)" ascii wide
+        $i3 = "VirtualAllocEx" ascii wide
+        $i4 = "WriteProcessMemory" ascii wide
+        $i5 = "CreateRemoteThread" ascii wide
+        $i6 = "ProcessAccessFlags.All" ascii wide
+        $i7 = "CommandLineToArgvW" ascii wide
+    condition:
+        5 of them
+}
+
+rule Inceptor_Nodebug_AntiAnalysis_Template
+{
+    meta:
+        description = "Detects Inceptor anti-debug templates that combine managed and native debugger checks with NtQueryInformationProcess"
+        author = "ShadowLab"
+        source = "inceptor-main"
+        severity = "high"
+    strings:
+        $n1 = "CheckRemoteDebuggerPresent" ascii wide
+        $n2 = "IsDebuggerPresent" ascii wide
+        $n3 = "NtQueryInformationProcess" ascii wide
+        $n4 = "NtRemoveProcessDebug" ascii wide
+        $n5 = "NtSetInformationDebugObject" ascii wide
+        $n6 = "ProcessDebugPort" ascii wide
+        $n7 = "ProcessDebugObjectHandle" ascii wide
+        $n8 = "CheckKernelDebugInformation" ascii wide
+    condition:
+        5 of them
+}

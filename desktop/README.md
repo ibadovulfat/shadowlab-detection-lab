@@ -11,6 +11,7 @@ The desktop is the main operator console and currently exposes:
 - process investigation, deep hunt, and response workflows
 - persistence review and remediation controls
 - threat-intel lookups
+- static analysis with Detect It Easy and structural PE review
 - network, hosts, graph, timeline, quarantine, history, and artifact views
 - deception and scenario workflows
 - enterprise case operations and investigation intelligence views
@@ -58,6 +59,8 @@ The enterprise ATT&CK panels show:
 - case-level ATT&CK enrichment
 
 Large tabs use local scrolling instead of forcing the full window to grow beyond the screen.
+
+Current desktop screenshots live in the top-level `images/` folder and the section-by-section walkthrough is maintained in [docs/PLATFORM_GUIDE.md](../docs/PLATFORM_GUIDE.md).
 
 ## Auth And Roles
 
@@ -110,6 +113,13 @@ python desktop\main.py
 pip install pyinstaller
 desktop\build_exe.ps1
 ```
+
+`die-python` is now the preferred Detect It Easy backend for Static Analysis. If you still want a subprocess fallback, you can provide `diec.exe` or `die.exe` via `SHADOWLAB_DIEC_PATH` or `PATH`.
+
+Operational notes:
+
+- the desktop keeps the most recent Static Analysis summary and raw DiE output when you refresh readiness/status
+- native DiE scans are isolated away from the main API process to reduce crash impact during malicious-sample handling
 
 Packaging assets:
 

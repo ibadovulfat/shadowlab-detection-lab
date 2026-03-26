@@ -1,0 +1,37 @@
+lolbins:
+  - certutil.exe
+  - rundll32.exe
+  - regsvr32.exe
+  - mshta.exe
+  - bitsadmin.exe
+  - wmic.exe
+  - cmstp.exe
+  - msbuild.exe
+  - installutil.exe
+  - regasm.exe
+
+suspicious_patterns:
+  - parent: cmd.exe
+    child: powershell.exe
+    description: "PowerShell execution from command prompt"
+  - parent: explorer.exe
+    child: cmd.exe
+    description: "Command prompt launched directly from explorer"
+  - parent: winword.exe
+    child: cmd.exe
+    description: "Command prompt launched from Word"
+  - parent: excel.exe
+    child: powershell.exe
+    description: "PowerShell launched from Excel"
+  - parent: outlook.exe
+    child: cmd.exe
+    description: "Command prompt launched from Outlook"
+  - parent: chrome.exe
+    child: powershell.exe
+    description: "Browser-to-PowerShell execution chain"
+  - parent: msedge.exe
+    child: powershell.exe
+    description: "Edge-to-PowerShell execution chain"
+  - parent: firefox.exe
+    child: cmd.exe
+    description: "Browser-to-command-shell execution chain"

@@ -1,0 +1,1 @@
+CheckRemoteDebuggerPresent IsDebuggerPresent NtQueryInformationProcess NtRemoveProcessDebug NtSetInformationDebugObject ProcessDebugPort ProcessDebugObjectHandle

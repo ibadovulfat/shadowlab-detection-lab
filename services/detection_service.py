@@ -15,6 +15,12 @@ class DetectionOrchestrator:
         self.scorer = DetectionScorer()
         self.rule_engine = RuleEngine()
 
+    def _event_count(self, mapping: dict[str, Any], *labels: str) -> float:
+        for label in labels:
+            if label in mapping:
+                return float(mapping.get(label, 0) or 0)
+        return 0.0
+
     def compute_metrics(
         self,
         telemetry_rows: list[dict[str, Any]],
@@ -30,9 +36,28 @@ class DetectionOrchestrator:
                 "avg_bytes_recv_rate": 0.0,
                 "defender_total": float(defender_summary.get("total", 0)),
                 "sysmon_total": float(sysmon_summary.get("total", 0)),
+                "sysmon_dns_queries": 0.0,
+                "sysmon_create_remote_thread": 0.0,
+                "sysmon_process_create": 0.0,
+                "sysmon_image_load": 0.0,
+                "sysmon_process_access": 0.0,
+                "sysmon_file_create": 0.0,
+                "sysmon_registry_add": 0.0,
+                "sysmon_registry_set": 0.0,
+                "defender_remediation_failed": 0.0,
             }
 
         total = float(len(telemetry_rows))
+        defender_by_id = defender_summary.get("by_id", {}) or {}
+        sysmon_by_id = sysmon_summary.get("by_id", {}) or {}
+        dns_queries = self._event_count(sysmon_by_id, "DNS query")
+        remote_threads = self._event_count(sysmon_by_id, "CreateRemoteThread")
+        process_creates = self._event_count(sysmon_by_id, "Process Create", "Process creation")
+        image_loads = self._event_count(sysmon_by_id, "Image loaded")
+        process_accesses = self._event_count(sysmon_by_id, "Process accessed")
+        file_creates = self._event_count(sysmon_by_id, "File create")
+        registry_adds = self._event_count(sysmon_by_id, "Registry add")
+        registry_sets = self._event_count(sysmon_by_id, "Registry set")
         return {
             "avg_cpu": sum(float(row.get("cpu", 0.0)) for row in telemetry_rows) / total,
             "avg_threads": sum(float(row.get("proc_threads", 0.0)) for row in telemetry_rows) / total,
@@ -42,12 +67,21 @@ class DetectionOrchestrator:
             "defender_total": float(defender_summary.get("total", 0)),
             "sysmon_total": float(sysmon_summary.get("total", 0)),
             "defender_signal": float(
-                (defender_summary.get("by_id", {}) or {}).get("Malware detected (scan)", 0)
-            ) + float((defender_summary.get("by_id", {}) or {}).get("Malware detected (on-access)", 0))
-            + float((defender_summary.get("by_id", {}) or {}).get("Remediation failed", 0)),
-            "sysmon_signal": float((sysmon_summary.get("by_id", {}) or {}).get("Network connection", 0))
-            + float((sysmon_summary.get("by_id", {}) or {}).get("DNS query", 0))
-            + (float((sysmon_summary.get("by_id", {}) or {}).get("CreateRemoteThread", 0)) * 2.0),
+                defender_by_id.get("Malware detected (scan)", 0)
+            ) + float(defender_by_id.get("Malware detected (on-access)", 0))
+            + float(defender_by_id.get("Remediation failed", 0)),
+            "defender_remediation_failed": float(defender_by_id.get("Remediation failed", 0)),
+            "sysmon_signal": float(sysmon_by_id.get("Network connection", 0))
+            + dns_queries
+            + (remote_threads * 2.0),
+            "sysmon_dns_queries": dns_queries,
+            "sysmon_create_remote_thread": remote_threads,
+            "sysmon_process_create": process_creates,
+            "sysmon_image_load": image_loads,
+            "sysmon_process_access": process_accesses,
+            "sysmon_file_create": file_creates,
+            "sysmon_registry_add": registry_adds,
+            "sysmon_registry_set": registry_sets,
         }
 
     def incremental_score(

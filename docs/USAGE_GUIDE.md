@@ -33,9 +33,12 @@ Typical desktop flow:
 2. enter an API key when auth is enabled
 3. inspect dashboards, `WHIDS`, `HIDS`, and overview
 4. investigate suspicious processes
-5. triage, enrich, and review graph or timeline context
-6. open or work an enterprise case if needed
-7. export findings or reports
+5. use `Static Analysis` when file-oriented malware review is needed
+6. triage, enrich, and review graph or timeline context
+7. open or work an enterprise case if needed
+8. export findings or reports
+
+Current desktop screenshots and section descriptions are documented in [PLATFORM_GUIDE.md](PLATFORM_GUIDE.md).
 
 ## WHIDS And HIDS Workflow
 

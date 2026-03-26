@@ -113,6 +113,7 @@ class ResponseOrchestrator:
         remote_ips = self.extract_remote_ips(profile)
         actions: list[dict[str, Any]] = []
         manual_required: list[dict[str, Any]] = []
+        execution_context = profile.get("execution_context", {}) if isinstance(profile.get("execution_context"), dict) else {}
 
         if confidence == "high":
             actions.append({"action": "suspend", "mode": "auto", "reason": f"High-confidence fused verdict for {process_name}."})
@@ -144,6 +145,38 @@ class ResponseOrchestrator:
         if isinstance(memory, dict):
             analysis = memory.get("analysis", {}) if isinstance(memory.get("analysis"), dict) else {}
             memory_fusion = analysis.get("fusion", {}) if isinstance(analysis.get("fusion"), dict) else {}
+        if execution_context.get("suspicious"):
+            manual_required.append(
+                {
+                    "action": "execution-context-review",
+                    "mode": "manual",
+                    "reason": "Execution context looks suspicious: " + "; ".join(execution_context.get("reasons", [])[:3]),
+                }
+            )
+        if execution_context.get("suspicious_chain_matches"):
+            manual_required.append(
+                {
+                    "action": "suspicious-chain-review",
+                    "mode": "manual",
+                    "reason": "Sigma-style suspicious chain matched: " + "; ".join(execution_context.get("suspicious_chain_matches", [])[:3]),
+                }
+            )
+        if profile.get("child_processes"):
+            manual_required.append(
+                {
+                    "action": "lineage-review",
+                    "mode": "manual",
+                    "reason": f"Process spawned {len(profile.get('child_processes', []) or [])} direct child process(es).",
+                }
+            )
+        if memory_fusion.get("confidence") == "high" and confidence != "high":
+            manual_required.append(
+                {
+                    "action": "priority-memory-review",
+                    "mode": "manual",
+                    "reason": "Memory analysis produced high-confidence indicators even though fused verdict is not high-confidence.",
+                }
+            )
         return {
             "confidence": confidence,
             "severity": severity,

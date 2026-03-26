@@ -1,0 +1,37 @@
+{
+  "description": "ShadowLab validation corpus for static, YARA, and memory-oriented detection checks.",
+  "samples": [
+    {
+      "id": "inceptor_bypass_dinvoke_dll",
+      "path": "C:\\Users\\ulfat\\Documents\\inceptor-main\\inceptor\\libs\\public\\x64\\BYPASS-DINVOKE.dll",
+      "kind": "file",
+      "yara_pack": "inceptor",
+      "expected_rules_any": [
+        "Inceptor_DInvoke_ManualMap_Tradecraft",
+        "Inceptor_Process_Injection_Syscall_Chain"
+      ],
+      "expected_static_min_score": 4
+    },
+    {
+      "id": "inceptor_manual_mapping_dll",
+      "path": "C:\\Users\\ulfat\\Documents\\inceptor-main\\inceptor\\libs\\public\\x64\\BYPASS-DINVOKE_MANUAL_MAPPING.dll",
+      "kind": "file",
+      "yara_pack": "inceptor",
+      "expected_rules_any": [
+        "Inceptor_DInvoke_PE_Manual_Map_Extended",
+        "Inceptor_APC_Remote_Thread_Tradecraft"
+      ],
+      "expected_static_min_score": 4
+    },
+    {
+      "id": "inceptor_syscalls_asm",
+      "path": "C:\\Users\\ulfat\\Documents\\inceptor-main\\inceptor\\syscalls\\syswhispers\\example-output\\syscalls.asm",
+      "kind": "memory_like",
+      "yara_pack": "inceptor",
+      "expected_rules_any": [
+        "Inceptor_SysWhispers_Direct_Syscalls"
+      ],
+      "expected_static_min_score": 0
+    }
+  ]
+}

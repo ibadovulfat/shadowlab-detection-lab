@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import hashlib
 import logging
 import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 from plugins import yara_scanner
+from services.malware_analyst_service import MalwareAnalystService
 
 ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
 MALWAREBAZAAR_AUTH_KEY = os.environ.get("MALWAREBAZAAR_AUTH_KEY")
@@ -223,6 +226,29 @@ def run_local_yara_scan(filepath: str, pack: str = "enterprise", context: dict[s
     return yara_scanner.scan_file(filepath, pack=pack, context=context)
 
 
+@lru_cache(maxsize=1)
+def _malware_analyst_service() -> MalwareAnalystService:
+    return MalwareAnalystService(Path(__file__).resolve().parent)
+
+
+def run_static_pe_analysis(filepath: str) -> dict[str, Any]:
+    if not filepath:
+        return {"status": "skipped", "summary": "No executable path provided for static PE analysis."}
+    result = _malware_analyst_service().analyze_file(filepath)
+    die_static = result.get("static_analysis", {}) if isinstance(result.get("static_analysis"), dict) else {}
+    pe_structure = result.get("pe_structure", {}) if isinstance(result.get("pe_structure"), dict) else {}
+    pe_risk = pe_structure.get("risk", {}) if isinstance(pe_structure.get("risk"), dict) else {}
+    combined_score = min(100, int(die_static.get("score", 0) or 0) + int(pe_risk.get("score", 0) or 0))
+    result["combined_static"] = {
+        "score": combined_score,
+        "confidence": "high" if combined_score >= 55 else "medium" if combined_score >= 25 else "low",
+        "severity": "critical" if combined_score >= 75 else "high" if combined_score >= 50 else "medium" if combined_score >= 25 else "low",
+        "verdict": "suspicious" if combined_score >= 25 else "informational",
+        "suspicious_indicators": list(die_static.get("suspicious_indicators", []) or []) + list(pe_risk.get("reasons", []) or []),
+    }
+    return result
+
+
 def _should_run_local_yara(yaraify_result: dict[str, Any] | None) -> bool:
     if not isinstance(yaraify_result, dict):
         return True
@@ -254,6 +280,7 @@ def fuse_detection_verdict(
     local_yara_result: dict[str, Any] | None = None,
     virustotal_result: dict[str, Any] | None = None,
     malwarebazaar_result: dict[str, Any] | None = None,
+    static_result: dict[str, Any] | None = None,
     memory_result: dict[str, Any] | None = None,
     behavior_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -291,6 +318,19 @@ def fuse_detection_verdict(
             vt_score = min(25, malicious * 3 + suspicious * 2)
             score += vt_score
             reasons.append(f"VirusTotal reported malicious={malicious}, suspicious={suspicious}.")
+
+    if isinstance(static_result, dict):
+        static_analysis = static_result.get("combined_static", {}) if isinstance(static_result.get("combined_static"), dict) else {}
+        if not static_analysis:
+            static_analysis = static_result.get("static_analysis", {}) if isinstance(static_result.get("static_analysis"), dict) else {}
+        static_score = int(static_analysis.get("score", 0) or 0)
+        static_indicators = static_analysis.get("suspicious_indicators", []) if isinstance(static_analysis.get("suspicious_indicators"), list) else []
+        if static_score > 0 and static_indicators:
+            addition = min(30, 8 + int(static_score * 0.4))
+            score += addition
+            reasons.append(
+                f"Static PE analysis found {len(static_indicators)} suspicious indicator(s) with {static_analysis.get('confidence', 'low')} confidence."
+            )
 
     if isinstance(memory_result, dict):
         analysis = memory_result.get("analysis", {}) if isinstance(memory_result.get("analysis"), dict) else memory_result
@@ -339,6 +379,7 @@ def scan_process(
     vt_result = check_file_vt(file_hash, virustotal_api_key)
     malwarebazaar_result = check_file_malwarebazaar(file_hash, malwarebazaar_auth_key)
     yaraify_result = check_file_yaraify(file_hash, yaraify_auth_key)
+    static_result = run_static_pe_analysis(exe_path)
     if _should_run_local_yara(yaraify_result):
         local_yara_result = run_local_yara_scan(
             exe_path,
@@ -359,6 +400,7 @@ def scan_process(
         local_yara_result=local_yara_result,
         virustotal_result=vt_result,
         malwarebazaar_result=malwarebazaar_result,
+        static_result=static_result,
     )
     return {
         "process": proc_info.get("name"),
@@ -369,5 +411,6 @@ def scan_process(
         "malwarebazaar": malwarebazaar_result,
         "yaraify": yaraify_result,
         "local_yara": local_yara_result,
+        "static_pe": static_result,
         "fusion": fusion,
     }

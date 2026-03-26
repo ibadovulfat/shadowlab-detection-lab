@@ -29,6 +29,8 @@ class ApiE2ETests(unittest.TestCase):
         self.assertIn("integrity", report.json())
         self.assertIn("database", report.json())
         self.assertIn("by_type", summary.json())
+        self.assertIn("etwtrace_available", summary.json())
+        self.assertIn("etwtrace_active", summary.json())
         self.assertIn("production_notes", db_readiness.json())
         self.assertIn("overall_risk", graph.json()["summary"])
 

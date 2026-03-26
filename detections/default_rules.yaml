@@ -82,3 +82,144 @@
   score: 0.15
   tags: [exfiltration]
 
+- id: remote_thread_injection_chain
+  title: Remote Thread Injection Chain
+  severity: critical
+  summary: Sysmon remote-thread and process-access telemetry align with process injection behavior.
+  attack_tactics: [Defense Evasion, Privilege Escalation]
+  mitre_techniques: [T1055]
+  dedup_key: remote_thread_chain
+  when:
+    all:
+      - metric: sysmon_create_remote_thread
+        gte: 1
+      - metric: sysmon_process_access
+        gte: 2
+  score: 0.22
+  tags: [defense-evasion, injection, sysmon]
+
+- id: dns_beaconing_process_spawn
+  title: DNS Beaconing With Process Spawn
+  severity: high
+  summary: DNS-heavy telemetry plus process creation and outbound connectivity suggests staged execution or beaconing.
+  attack_tactics: [Command and Control, Execution]
+  mitre_techniques: [T1071.004, T1059]
+  dedup_key: dns_spawn_chain
+  when:
+    all:
+      - metric: sysmon_dns_queries
+        gte: 5
+      - metric: sysmon_process_create
+        gte: 2
+      - metric: avg_tcp_conns
+        gte: 3
+  score: 0.16
+  tags: [command-and-control, execution, dns]
+
+- id: image_load_injection_profile
+  title: Injection-Oriented Image Load Profile
+  severity: high
+  summary: High thread volume with heavy image loading and suspicious process access resembles loader or unhooking activity.
+  attack_tactics: [Defense Evasion]
+  mitre_techniques: [T1055, T1562]
+  dedup_key: image_load_injection
+  when:
+    all:
+      - metric: avg_threads
+        gte: 30
+      - metric: sysmon_image_load
+        gte: 8
+      - metric: sysmon_process_access
+        gte: 2
+  score: 0.14
+  tags: [defense-evasion, loader, image-load]
+
+- id: defender_failure_with_sysmon_injection
+  title: Defender Failure With Injection Signals
+  severity: critical
+  summary: Defender remediation failures combined with injection telemetry suggest active evasion or post-detection persistence.
+  attack_tactics: [Defense Evasion, Persistence]
+  mitre_techniques: [T1562, T1055]
+  dedup_key: defender_injection_failure
+  when:
+    all:
+      - metric: defender_remediation_failed
+        gte: 1
+      - metric: sysmon_create_remote_thread
+        gte: 1
+  score: 0.20
+  tags: [defense-evasion, persistence, defender]
+
+- id: staged_payload_drop_and_execution
+  title: Staged Payload Drop And Execution
+  severity: high
+  summary: File-drop, DNS activity, and process creation together resemble staged download-and-execute behavior.
+  attack_tactics: [Execution, Command and Control]
+  mitre_techniques: [T1105, T1059]
+  dedup_key: staged_drop_exec
+  when:
+    all:
+      - metric: sysmon_file_create
+        gte: 2
+      - metric: sysmon_process_create
+        gte: 2
+      - metric: sysmon_dns_queries
+        gte: 3
+  score: 0.15
+  tags: [execution, staging, dns, file-drop]
+
+- id: persistence_registry_with_spawn
+  title: Registry Persistence With Process Spawn
+  severity: high
+  summary: Registry persistence events followed by process creation suggest autorun or LOLBin-driven execution chains.
+  attack_tactics: [Persistence, Execution]
+  mitre_techniques: [T1547, T1218]
+  dedup_key: registry_spawn_chain
+  when:
+    all:
+      - metric: sysmon_process_create
+        gte: 2
+      - any:
+          - metric: sysmon_registry_add
+            gte: 1
+          - metric: sysmon_registry_set
+            gte: 1
+  score: 0.14
+  tags: [persistence, registry, execution]
+
+- id: registry_backed_beaconing
+  title: Registry-Backed Beaconing Pattern
+  severity: high
+  summary: Registry writes combined with DNS and outbound network activity suggest staged beacon configuration or startup persistence.
+  attack_tactics: [Persistence, Command and Control]
+  mitre_techniques: [T1547, T1071.004]
+  dedup_key: registry_beaconing
+  when:
+    all:
+      - metric: avg_tcp_conns
+        gte: 3
+      - metric: sysmon_dns_queries
+        gte: 4
+      - metric: sysmon_registry_set
+        gte: 1
+  score: 0.12
+  tags: [persistence, command-and-control, registry, dns]
+
+- id: high_load_injection_sequence
+  title: High-Load Injection Sequence
+  severity: critical
+  summary: Remote-thread activity plus heavy image-load and process-access volume resemble unhooking, patching, or reflective loader behavior.
+  attack_tactics: [Defense Evasion, Execution]
+  mitre_techniques: [T1055, T1562]
+  dedup_key: high_load_injection
+  when:
+    all:
+      - metric: sysmon_create_remote_thread
+        gte: 1
+      - metric: sysmon_image_load
+        gte: 10
+      - metric: sysmon_process_access
+        gte: 3
+  score: 0.18
+  tags: [defense-evasion, injection, unhooking, image-load]
+

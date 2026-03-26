@@ -84,6 +84,23 @@ DEFAULT_ALLOWLIST_PATH_PREFIXES = (
     "C:\\Program Files\\",
     "C:\\Program Files (x86)\\",
 )
+POLICY_LIST_KEYS = {
+    "allowlist_hashes",
+    "allowlist_path_prefixes",
+    "allowlist_rule_patterns",
+    "suppressed_rule_patterns",
+    "file_allowlist_rule_patterns",
+    "file_suppressed_rule_patterns",
+    "memory_allowlist_rule_patterns",
+    "memory_suppressed_rule_patterns",
+}
+POLICY_MAP_KEYS = {
+    "boost_rule_patterns",
+    "file_boost_rule_patterns",
+    "memory_boost_rule_patterns",
+}
+MAX_POLICY_PATTERN_LENGTH = 256
+MAX_POLICY_ITEMS_PER_KEY = 512
 
 
 def _dedupe_paths(paths: list[Path]) -> list[Path]:
@@ -190,8 +207,55 @@ def load_policy() -> dict[str, Any]:
     return dict(_load_policy())
 
 
+def _normalized_policy_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values[:MAX_POLICY_ITEMS_PER_KEY]:
+        item = str(raw).strip()
+        if not item:
+            continue
+        item = item[:MAX_POLICY_PATTERN_LENGTH]
+        lowered = item.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(item)
+    return normalized
+
+
+def _normalized_policy_map(values: Any) -> dict[str, int]:
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for raw_key, raw_value in values.items():
+        key = str(raw_key).strip()[:MAX_POLICY_PATTERN_LENGTH]
+        if not key:
+            continue
+        try:
+            value = int(raw_value)
+        except Exception:
+            continue
+        normalized[key] = max(0, min(20, value))
+    return normalized
+
+
+def _normalize_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in POLICY_LIST_KEYS:
+        values = _normalized_policy_list((policy or {}).get(key, []))
+        if values:
+            normalized[key] = values
+    for key in POLICY_MAP_KEYS:
+        values = _normalized_policy_map((policy or {}).get(key, {}))
+        if values:
+            normalized[key] = values
+    return normalized
+
+
 def save_policy(policy: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(policy or {})
+    normalized = _normalize_policy(policy)
     POLICY_PATH.write_text(json.dumps(normalized, indent=2, ensure_ascii=False), encoding="utf-8")
     _load_policy.cache_clear()
     return load_policy()
@@ -229,6 +293,7 @@ def _scope_boost_patterns(scope: str) -> dict[str, int]:
     return {str(key).lower(): int(value) for key, value in raw.items() if str(key).strip()}
 
 
+@lru_cache(maxsize=1)
 def _registry_rule_overrides() -> dict[str, dict[str, Any]]:
     try:
         import database as db
@@ -263,6 +328,10 @@ def _registry_rule_overrides() -> dict[str, dict[str, Any]]:
         return overrides
     except Exception:
         return {}
+
+
+def clear_registry_rule_override_cache() -> None:
+    _registry_rule_overrides.cache_clear()
 
 
 def _path_matches_any(value: str, patterns: list[str]) -> bool:
@@ -370,7 +439,7 @@ def _apply_boost(match: dict[str, Any]) -> dict[str, Any]:
         match["severity"] = "critical"
     elif boosted >= 24 and SEVERITY_ORDER.get(str(match.get("severity", "low")), 1) < SEVERITY_ORDER["high"]:
         match["severity"] = "high"
-    match["confidence"] = _confidence_label(boosted)
+    match["confidence"] = _match_confidence_label(boosted)
     match["boosted"] = True
     match["boost_delta"] = delta
     return match
@@ -426,6 +495,14 @@ def _confidence_label(score: int) -> str:
     if score >= 85:
         return "high"
     if score >= 50:
+        return "medium"
+    return "low"
+
+
+def _match_confidence_label(score: int) -> str:
+    if score >= 30:
+        return "high"
+    if score >= 18:
         return "medium"
     return "low"
 
@@ -502,7 +579,10 @@ def available_packs() -> dict[str, list[Path]]:
 def _file_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
     signature: list[tuple[str, int, int]] = []
     for path in paths:
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
         signature.append((str(path), int(stat.st_mtime), stat.st_size))
     return tuple(signature)
 
@@ -546,7 +626,15 @@ def scan_file(path: str | Path, pack: str = "enterprise", context: dict[str, Any
     if not chosen:
         return {"status": "skipped", "reason": "No local YARA packs available", "matches": []}
 
-    compiled, loaded_rules, errors = _compile_cached(_file_signature(chosen))
+    signature = _file_signature(chosen)
+    if not signature:
+        return {
+            "status": "error",
+            "reason": "No readable YARA rule files were available",
+            "matches": [],
+            "errors": ["No readable YARA rule files were available"],
+        }
+    compiled, loaded_rules, errors = _compile_cached(signature)
     if compiled is None:
         return {
             "status": "error",
@@ -609,7 +697,7 @@ def scan_file(path: str | Path, pack: str = "enterprise", context: dict[str, Any
             "source_path": str(resolved_path) if source_path else "",
             "severity": severity,
             "score": score,
-            "confidence": _confidence_label(score),
+            "confidence": _match_confidence_label(score),
             "tags": tags,
             "meta": meta,
             "strings": strings,
