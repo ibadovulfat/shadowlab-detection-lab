@@ -187,6 +187,11 @@ Related files:
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [TOP10_ROADMAP.md](TOP10_ROADMAP.md)
 
+## Licensing
+
+The repository's primary licensing and usage restrictions are defined in [LICENSE](LICENSE).
+An Apache 2.0 text copy is also included in [LICENSE-APACHE](LICENSE-APACHE) for future dual-licensing or component-specific use, but it does not override the repository-wide terms in [LICENSE](LICENSE) unless explicitly stated for a specific file, component, or release.
+
 ## Screenshots
 
 ![Overview Incident Brief](images/overview-incident-brief.png)
