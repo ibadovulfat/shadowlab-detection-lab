@@ -15,7 +15,7 @@ class ApiE2ETests(unittest.TestCase):
         self.client = TestClient(api.main.app)
 
     def test_security_ops_report_and_observability_summary(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(api.main, "security_settings", settings):
             with mock.patch.object(security, "security_settings", settings):
                 report = self.client.get("/enterprise/report/security-ops")
@@ -35,7 +35,7 @@ class ApiE2ETests(unittest.TestCase):
         self.assertIn("overall_risk", graph.json()["summary"])
 
     def test_investigation_workspace_and_saved_views_endpoints(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(api.main, "security_settings", settings):
             with mock.patch.object(security, "security_settings", settings):
                 create_view = self.client.post(

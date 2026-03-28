@@ -44,13 +44,13 @@ That process workflow now also includes local YARA fallback, memory YARA enrichm
 
 `Threat Intel` manages hash and IP enrichment flows. It connects local findings to providers such as VirusTotal, MalwareBazaar, AbuseIPDB, and YARAify-backed intelligence workflows.
 
-`Static Analysis` provides the Detect It Easy and structural PE-analysis surface. It gives the operator a dedicated place to inspect file-oriented malware-analysis results separate from live process triage.
+`Static Analysis` provides the Detect It Easy and structural PE-analysis surface. It gives the operator a dedicated place to inspect file-oriented malware-analysis results separate from live process triage. The workspace prefers the native `die-python` backend, shows native runtime readiness correctly in the desktop, and falls back to subprocess or PE-structure inspection only when necessary.
 
 `Deception` handles lab-oriented baiting and detection workflows such as honeypots and canaries.
 
 `Network`, `Hosts`, `Graph`, and `Timeline` help the operator understand events in a wider context. These sections expose relationships, host inventory, graph correlation, and chronological event views.
 
-`Quarantine`, `History`, and `Artifacts` are key sections for storing the outcome of investigation and response work. They make it possible to track what happened, what was contained, and which materials were collected.
+`Quarantine`, `History`, and `Artifacts` are key sections for storing the outcome of investigation and response work. They make it possible to track what happened, what was contained, and which materials were collected. Report output in `Artifacts` is now fuller and includes executive summary, analyst findings, telemetry context, event highlights, and artifact inventory.
 
 `Enterprise` behaves as a separate investigation suite. It is split into two internal workspaces. `Enterprise Ops` manages case-centric workflow, while `Enterprise Intel` focuses on the intelligence and correlation side of case work.
 

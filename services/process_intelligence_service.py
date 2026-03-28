@@ -211,13 +211,30 @@ class ProcessIntelligenceService:
         lolbin = lowered_name in self.lolbins
         script_like = any(token in lowered_cmd for token in ("-enc", "frombase64string", "downloadstring", "iex ", "invoke-expression"))
         suspicious_chain_matches = self._match_suspicious_patterns(lowered_parent, lowered_name)
-        suspicious = user_writable_path or browser_parent or office_parent or proxy_execution or lolbin or script_like or bool(suspicious_chain_matches)
+        browser_assisted_execution = browser_parent and any(
+            [
+                user_writable_path,
+                proxy_execution,
+                lolbin,
+                script_like,
+                bool(suspicious_chain_matches),
+            ]
+        )
+        suspicious = (
+            user_writable_path
+            or office_parent
+            or proxy_execution
+            or lolbin
+            or script_like
+            or bool(suspicious_chain_matches)
+            or browser_assisted_execution
+        )
 
         reasons: list[str] = []
         if user_writable_path:
             reasons.append("Executable path is user-writable or launch-prone.")
-        if browser_parent:
-            reasons.append("Parent process is a browser.")
+        if browser_assisted_execution:
+            reasons.append("Browser-spawned process also matches additional execution-risk signals.")
         if office_parent:
             reasons.append("Parent process is an Office application.")
         if proxy_execution:

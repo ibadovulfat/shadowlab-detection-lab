@@ -7,6 +7,7 @@ import sys
 import time
 import hashlib
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import requests
 from requests import Response
@@ -675,10 +676,18 @@ class ShadowLabDesktop(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         dlg.resize(1180, 760)
+        dlg.setModal(False)
+        dlg.setWindowModality(Qt.NonModal)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.addWidget(body)
+        def _cleanup_panel_window(*_args) -> None:
+            self.panel_windows = [window for window in self.panel_windows if window is not dlg]
+        dlg.destroyed.connect(_cleanup_panel_window)
         dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         self.panel_windows.append(dlg)
 
     def _clone_table(self, source: QTableWidget) -> QTableWidget:
@@ -944,11 +953,11 @@ class ShadowLabDesktop(QMainWindow):
         actions = QWidget(); ar = QHBoxLayout(actions)
         process_capabilities = {
             "Auto Triage": "can_run_triage",
-            "Threat Scan": "can_run_hunt",
+            "Executable Scan": "can_run_hunt",
             "Memory Analysis": "can_run_hunt",
             "Internals": "can_run_hunt",
             "Strings": "can_run_hunt",
-            "YARA": "can_run_hunt",
+            "Executable YARA": "can_run_hunt",
             "Sandbox": "can_run_hunt",
             "Process Tree": "can_run_hunt",
             "AI Analyst": "can_run_hunt",
@@ -959,7 +968,7 @@ class ShadowLabDesktop(QMainWindow):
             "Kill Tree": "can_manage_process_actions",
             "Quarantine": "can_manage_process_actions",
         }
-        for text, fn in [("Auto Triage", self.run_auto_triage),("Threat Scan", self.scan_selected_process),("Memory Analysis", self.run_memory_analysis),("Internals", self.load_selected_internals),("Strings", self.run_strings_analysis),("YARA", self.run_yara_scan),("Sandbox", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis),("Triage Respond", self.run_triage_response),("Suspend", lambda: self.process_action("suspend")),("Resume", lambda: self.process_action("resume")),("Kill", lambda: self.process_action("kill")),("Kill Tree", lambda: self.process_action("kill-tree")),("Quarantine", lambda: self.process_action("quarantine"))]:
+        for text, fn in [("Auto Triage", self.run_auto_triage),("Executable Scan", self.scan_selected_process),("Memory Analysis", self.run_memory_analysis),("Internals", self.load_selected_internals),("Strings", self.run_strings_analysis),("Executable YARA", self.run_yara_scan),("Sandbox", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis),("Triage Respond", self.run_triage_response),("Suspend", lambda: self.process_action("suspend")),("Resume", lambda: self.process_action("resume")),("Kill", lambda: self.process_action("kill")),("Kill Tree", lambda: self.process_action("kill-tree")),("Quarantine", lambda: self.process_action("quarantine"))]:
             b = QPushButton(text)
             b.clicked.connect(fn)
             self._bind_capability(b, process_capabilities[text])
@@ -981,7 +990,7 @@ class ShadowLabDesktop(QMainWindow):
         actions = QWidget(); ar = QHBoxLayout(actions)
         ar.setContentsMargins(0, 0, 0, 0)
         ar.setSpacing(8)
-        for text, fn in [("Load Internals", self.load_selected_internals),("Extract Strings", self.run_strings_analysis),("Run YARA", self.run_yara_scan),("Sandbox Trace", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis)]:
+        for text, fn in [("Load Internals", self.load_selected_internals),("Extract Strings", self.run_strings_analysis),("Run Executable YARA", self.run_yara_scan),("Sandbox Trace", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis)]:
             btn = QPushButton(text); btn.clicked.connect(fn); self._bind_capability(btn, "can_run_hunt"); ar.addWidget(btn)
         ar.addStretch(1)
         l.addWidget(actions)
@@ -1054,7 +1063,7 @@ class ShadowLabDesktop(QMainWindow):
         auto_ip = QPushButton("Use Selected Process IP"); auto_ip.clicked.connect(self.use_selected_process_ip)
         hash_btn = QPushButton("Lookup Hash"); hash_btn.clicked.connect(self.lookup_hash)
         ip_btn = QPushButton("Lookup IP"); ip_btn.clicked.connect(self.lookup_ip)
-        scan_btn = QPushButton("Scan Selected Process"); scan_btn.clicked.connect(self.scan_selected_process); self._bind_capability(scan_btn, "can_run_hunt")
+        scan_btn = QPushButton("Scan Selected Executable"); scan_btn.clicked.connect(self.scan_selected_process); self._bind_capability(scan_btn, "can_run_hunt")
         for btn in [auto_hash, auto_ip, hash_btn, ip_btn, scan_btn]:
             cr.addWidget(btn)
         cr.addStretch(1)
@@ -1079,7 +1088,7 @@ class ShadowLabDesktop(QMainWindow):
 
     def _malware_analyst_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(10)
-        self._tab_header(l, "Static Analysis Workspace", "Detect It Easy-backed static binary analysis for file inspection and selected-process executable triage.")
+        self._tab_header(l, "Static Analysis Workspace", "Detect It Easy-backed static binary analysis for file inspection and selected-process executable triage. This workspace analyzes files on disk, not live process memory.")
 
         status_row = QWidget(); sr = QHBoxLayout(status_row)
         sr.setContentsMargins(0, 0, 0, 0); sr.setSpacing(8)
@@ -1106,7 +1115,7 @@ class ShadowLabDesktop(QMainWindow):
         use_process_btn.clicked.connect(self.use_selected_process_for_malware_analysis)
         analyze_file_btn = QPushButton("Analyze File")
         analyze_file_btn.clicked.connect(self.run_malware_analyst_file_scan)
-        analyze_process_btn = QPushButton("Analyze Selected Process")
+        analyze_process_btn = QPushButton("Analyze Selected Executable")
         analyze_process_btn.clicked.connect(self.run_malware_analyst_process_scan)
         refresh_btn = QPushButton("Refresh DIE Status")
         refresh_btn.clicked.connect(self.refresh_malware_analyst_status)
@@ -1724,17 +1733,63 @@ class ShadowLabDesktop(QMainWindow):
         except Exception:
             return
 
-    def _auth_headers(self) -> dict[str, str]:
-        api_key = self.api_key.text().strip()
-        return {"X-API-Key": api_key} if api_key and self.auth_active else {}
+    def _api_key_value(self) -> str:
+        return self.api_key.text().strip()
 
-    def _signed_headers(self, method: str, path: str) -> dict[str, str]:
-        api_key = self.api_key.text().strip()
-        if not self.auth_active or not api_key or method.upper() not in {"POST", "PATCH", "DELETE"}:
+    def _auth_headers(self) -> dict[str, str]:
+        api_key = self._api_key_value()
+        return {"X-API-Key": api_key} if api_key else {}
+
+    def _canonical_request_components(self, path: str, kwargs: dict) -> tuple[str, str, str]:
+        split = urlsplit(path)
+        query_pairs = parse_qsl(split.query, keep_blank_values=True)
+        params = kwargs.get("params")
+        if isinstance(params, dict):
+            for key, value in params.items():
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        query_pairs.append((str(key), "" if item is None else str(item)))
+                else:
+                    query_pairs.append((str(key), "" if value is None else str(value)))
+        elif isinstance(params, (list, tuple)):
+            for key, value in params:
+                query_pairs.append((str(key), "" if value is None else str(value)))
+        query_pairs.sort()
+        canonical_query = "&".join(f"{key}={value}" for key, value in query_pairs)
+
+        body_bytes = b""
+        if "json" in kwargs and kwargs["json"] is not None:
+            body_bytes = json.dumps(kwargs["json"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        elif "data" in kwargs and kwargs["data"] is not None:
+            data = kwargs["data"]
+            if isinstance(data, bytes):
+                body_bytes = data
+            elif isinstance(data, str):
+                body_bytes = data.encode("utf-8")
+            elif isinstance(data, dict):
+                body_pairs: list[tuple[str, str]] = []
+                for key, value in data.items():
+                    if isinstance(value, (list, tuple)):
+                        for item in value:
+                            body_pairs.append((str(key), "" if item is None else str(item)))
+                    else:
+                        body_pairs.append((str(key), "" if value is None else str(value)))
+                body_pairs.sort()
+                body_bytes = "&".join(f"{key}={value}" for key, value in body_pairs).encode("utf-8")
+            else:
+                body_bytes = str(data).encode("utf-8")
+        body_hash = hashlib.sha256(body_bytes).hexdigest()
+        return split.path or path, canonical_query, body_hash
+
+    def _signed_headers(self, method: str, path: str, kwargs: dict | None = None) -> dict[str, str]:
+        api_key = self._api_key_value()
+        if not api_key or method.upper() not in {"POST", "PATCH", "DELETE"}:
             return {}
+        request_kwargs = kwargs or {}
+        canonical_path, canonical_query, body_hash = self._canonical_request_components(path, request_kwargs)
         timestamp = str(int(time.time()))
         nonce = hashlib.sha256(f"{timestamp}:{path}:{time.time_ns()}".encode("utf-8")).hexdigest()[:24]
-        payload = "\n".join([method.upper(), path, timestamp, nonce])
+        payload = "\n".join([method.upper(), canonical_path, canonical_query, body_hash, timestamp, nonce])
         signature = hmac.new(api_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
         return {
             "X-ShadowLab-Timestamp": timestamp,
@@ -1770,7 +1825,7 @@ class ShadowLabDesktop(QMainWindow):
         should_raise = kwargs.pop("raise_for_status", True)
         headers = dict(kwargs.pop("headers", {}) or {})
         headers.update(self._auth_headers())
-        headers.update(self._signed_headers(method, path))
+        headers.update(self._signed_headers(method, path, kwargs))
         headers.update(self._approval_headers(method))
         response = requests.request(
             method,
@@ -1788,6 +1843,18 @@ class ShadowLabDesktop(QMainWindow):
     def _put(self, path: str, **kwargs): return self._request("PUT", path, **kwargs)
     def _patch(self, path: str, **kwargs): return self._request("PATCH", path, **kwargs)
     def _delete(self, path: str, **kwargs): return self._request("DELETE", path, **kwargs)
+
+    def _malware_analyst_runtime_status(self, payload: dict | None) -> tuple[str, str]:
+        result = payload if isinstance(payload, dict) else {}
+        backend = str(result.get("backend", "") or "").strip().lower()
+        diec_path = str(result.get("diec_path", "") or "").strip()
+        native_db = str(result.get("native_database_path", "") or "").strip()
+        if backend == "native" or bool(result.get("native_binding_available")):
+            location = native_db or "Bundled die-python database"
+            return ("Runtime: ready (native)", location)
+        if diec_path:
+            return ("Runtime: ready (subprocess)", diec_path)
+        return ("Runtime: missing", "Not configured")
 
     def _json_response(self, response):
         response.raise_for_status()
@@ -2964,6 +3031,15 @@ class ShadowLabDesktop(QMainWindow):
                         self.statusBar().showMessage("Backend auth is disabled. Viewer mode active until you press OK.")
                     self.refresh_overview()
                     return
+                api_key = self._api_key_value()
+                if api_key:
+                    self.auth_active = True
+                    self.local_role_mode_active = False
+                    self._apply_auth_context(payload)
+                    role = str(self.auth_context.get("role", "unknown"))
+                    self.statusBar().showMessage(f"Connected to backend. {role} mode active.")
+                    self.refresh_overview()
+                    return
                 if not self.auth_active:
                     self._apply_auth_context(self._viewer_mode_payload())
                     role = str(payload.get("role", "unknown"))
@@ -3149,6 +3225,9 @@ class ShadowLabDesktop(QMainWindow):
             self._show_error(self.hunt_out, "YARA scan failed", exc)
             return
         self.hunt_out.setPlainText(self._format_yara_summary(result))
+        exe_path = str(result.get("exe", "") or "")
+        if exe_path:
+            self.statusBar().showMessage(f"Executable YARA completed for on-disk image: {exe_path}")
         self._switch_to_tab("Advanced Hunt")
 
     def run_sandbox_trace(self) -> None:
@@ -3378,16 +3457,17 @@ class ShadowLabDesktop(QMainWindow):
             return
         inventory = result.get("signature_inventory", {}) if isinstance(result, dict) else {}
         guidance = result.get("guidance", []) if isinstance(result.get("guidance", []), list) else []
+        runtime_badge, runtime_location = self._malware_analyst_runtime_status(result)
         self.ma_status_badge.setText(f"DIE Status: {result.get('status', 'unknown')}")
         self.ma_repo_badge.setText(f"Repo: {'ready' if result.get('die_repo_path') else 'missing'}")
-        self.ma_runtime_badge.setText(f"Runtime: {'ready' if result.get('diec_path') else 'missing'}")
+        self.ma_runtime_badge.setText(runtime_badge)
         if "Static Analysis Result" not in self.ma_summary.toPlainText():
             self.ma_summary.setHtml(
                 "<h3>Detect It Easy Integration Status</h3>"
                 f"<p><b>Status:</b> {html.escape(str(result.get('status', 'unknown')))}"
                 f"<br><b>MIT License:</b> {html.escape(str(result.get('mit_license_detected', False)))}"
                 f"<br><b>Repo Path:</b> {html.escape(str(result.get('die_repo_path', '') or 'Not detected'))}"
-                f"<br><b>diec Path:</b> {html.escape(str(result.get('diec_path', '') or 'Not detected'))}"
+                f"<br><b>Runtime Location:</b> {html.escape(runtime_location)}"
                 f"<br><b>DB Signatures:</b> {html.escape(str(inventory.get('db_signatures', 0)))}"
                 f"<br><b>PEiD Rule Files:</b> {html.escape(str(inventory.get('peid_rule_files', 0)))}"
                 f"<br><b>YARA Rule Files:</b> {html.escape(str(inventory.get('yara_rule_files', 0)))}</p>"
@@ -3419,7 +3499,7 @@ class ShadowLabDesktop(QMainWindow):
         except Exception as exc:
             self._show_error(self.ma_output, "Static Analysis process scan failed", exc)
             return
-        self._render_malware_analyst_result(result, source="process", value=f"{name} ({pid})")
+        self._render_malware_analyst_result(result, source="process executable", value=f"{name} ({pid})")
 
     def _render_malware_analyst_result(self, result: dict, *, source: str, value: str) -> None:
         die = result.get("die", {}) if isinstance(result.get("die"), dict) else {}
@@ -3429,6 +3509,7 @@ class ShadowLabDesktop(QMainWindow):
         combined_static = result.get("combined_static", {}) if isinstance(result.get("combined_static"), dict) else {}
         pe_structure = result.get("pe_structure", {}) if isinstance(result.get("pe_structure"), dict) else {}
         suspicious_indicators = static_analysis.get("suspicious_indicators", []) if isinstance(static_analysis.get("suspicious_indicators"), list) else []
+        runtime_badge, runtime_location = self._malware_analyst_runtime_status(die)
         self.ma_highlights.setRowCount(len(highlights[:20]))
         for row, item in enumerate(highlights[:20]):
             self.ma_highlights.setItem(row, 0, QTableWidgetItem(str(item.get("category", ""))))
@@ -3437,6 +3518,7 @@ class ShadowLabDesktop(QMainWindow):
             "<h3>Static Analysis Result</h3>"
             f"<p><b>Source:</b> {html.escape(source)}"
             f"<br><b>Value:</b> {html.escape(value)}"
+            f"<br><b>Analysis Scope:</b> {html.escape('On-disk executable image' if source == 'process executable' else 'Selected file on disk')}"
             f"<br><b>Status:</b> {html.escape(str(result.get('status', 'unknown')))}"
             f"<br><b>Summary:</b> {html.escape(str(result.get('summary', '')))}"
             f"<br><b>Static Verdict:</b> {html.escape(str(static_analysis.get('verdict', 'unknown')))}"
@@ -3444,7 +3526,8 @@ class ShadowLabDesktop(QMainWindow):
             f"<br><b>Static Score:</b> {html.escape(str(static_analysis.get('score', 0)))}"
             f"<br><b>PE Structure Score:</b> {html.escape(str(pe_structure.get('risk', {}).get('score', 0) if isinstance(pe_structure.get('risk'), dict) else 0))}"
             f"<br><b>Combined Static Score:</b> {html.escape(str(combined_static.get('score', 0)))}"
-            f"<br><b>DIE Runtime:</b> {html.escape(str(die.get('diec_path', '') or 'Not configured'))}</p>"
+            f"<br><b>DIE Runtime:</b> {html.escape(runtime_location)}</p>"
+            f"<p><b>Operator Note:</b> This result is based on the executable file tied to the process, not a live memory dump.</p>"
             f"{'<p><b>Process:</b> ' + html.escape(str(process.get('name', ''))) + ' | <b>SHA256:</b> ' + html.escape(str(process.get('sha256', '') or 'n/a')) + '</p>' if process else ''}"
             f"<p><b>Highlights:</b> {html.escape(str(len(highlights)))}"
             f"<br><b>Suspicious Indicators:</b> {html.escape(', '.join(str(item) for item in suspicious_indicators[:6]) or 'None')}</p>"
@@ -3452,7 +3535,7 @@ class ShadowLabDesktop(QMainWindow):
         self._show_json(self.ma_output, result)
         self.ma_status_badge.setText(f"DIE Status: {die.get('status', result.get('status', 'unknown'))}")
         self.ma_repo_badge.setText(f"Repo: {'ready' if die.get('die_repo_path') else 'missing'}")
-        self.ma_runtime_badge.setText(f"Runtime: {'ready' if die.get('diec_path') else 'missing'}")
+        self.ma_runtime_badge.setText(runtime_badge)
         self._record_threat_history("malware-analyst", value, "Detect It Easy", result)
         self._switch_to_tab("Static Analysis")
 

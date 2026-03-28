@@ -68,6 +68,57 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUT_DIR = BASE_DIR / "shadowlab_out"
 OUT_DIR.mkdir(exist_ok=True, parents=True)
+WHIDS_IMPORT_ROOT = OUT_DIR / "whids"
+WHIDS_IMPORT_ROOT.mkdir(exist_ok=True, parents=True)
+
+
+def _configured_ossec_roots() -> list[Path]:
+    configured_home = (os.environ.get("SHADOWLAB_OSSEC_HOME", "") or "").strip()
+    candidates = [
+        Path(configured_home).expanduser() if configured_home else None,
+        Path.home() / "Documents" / "ossec-hids-main",
+        Path("C:/Users/ulfat/Documents/ossec-hids-main"),
+        BASE_DIR.parent / "ossec-hids-main",
+    ]
+    roots: list[Path] = []
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _allowed_integration_import_roots(kind: str) -> list[Path]:
+    roots = [OUT_DIR, WHIDS_IMPORT_ROOT]
+    if kind == "ossec":
+        for ossec_root in _configured_ossec_roots():
+            roots.append(ossec_root)
+            roots.append(ossec_root / "logs")
+    deduped: list[Path] = []
+    for root in roots:
+        if root not in deduped:
+            deduped.append(root)
+    return deduped
+
+
+def _validate_integration_import_path(value: str, *, kind: str) -> str:
+    path = Path(value).expanduser()
+    if not str(path).strip():
+        raise ValueError("File path is required")
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError as exc:
+        raise ValueError(f"Invalid file path: {exc}") from exc
+    for root in _allowed_integration_import_roots(kind):
+        try:
+            resolved_root = root.expanduser().resolve(strict=False)
+        except OSError:
+            continue
+        if resolved == resolved_root or resolved_root in resolved.parents:
+            return str(resolved)
+    allowed_roots = ", ".join(str(root) for root in _allowed_integration_import_roots(kind))
+    raise ValueError(f"File path must stay within approved {kind.upper()} import roots: {allowed_roots}")
 
 
 def load_config() -> dict[str, Any]:
@@ -376,10 +427,17 @@ class IntegrationFileImportRequest(BaseModel):
     @field_validator("file_path")
     @classmethod
     def _validate_file_path(cls, value: str) -> str:
-        path = Path(value).expanduser()
-        if not str(path).strip():
-            raise ValueError("File path is required")
-        return str(path)
+        return _validate_integration_import_path(value, kind="whids")
+
+
+class OssecFileImportRequest(BaseModel):
+    file_path: str
+    limit: int = Field(default=200, ge=1, le=2000)
+
+    @field_validator("file_path")
+    @classmethod
+    def _validate_file_path(cls, value: str) -> str:
+        return _validate_integration_import_path(value, kind="ossec")
 
 
 class WhidsManagerImportRequest(BaseModel):
@@ -424,10 +482,7 @@ class OssecLiveIngestRequest(BaseModel):
     @field_validator("file_path")
     @classmethod
     def _validate_live_file_path(cls, value: str) -> str:
-        path = Path(value).expanduser()
-        if not str(path).strip():
-            raise ValueError("File path is required")
-        return str(path)
+        return _validate_integration_import_path(value, kind="ossec")
 
 
 class IncidentResponseOrchestrationRequest(BaseModel):
@@ -2580,7 +2635,7 @@ def download_whids_artifacts(payload: WhidsArtifactsRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/ossec/import/file", dependencies=[Depends(require_admin)])
-def import_ossec_file(payload: IntegrationFileImportRequest) -> dict[str, Any]:
+def import_ossec_file(payload: OssecFileImportRequest) -> dict[str, Any]:
     try:
         return hids_integration_service.import_ossec_file(payload.file_path, limit=payload.limit)
     except FileNotFoundError as exc:
@@ -3061,6 +3116,18 @@ def _validate_startup_security_posture() -> None:
     bind_host = (os.environ.get("SHADOWLAB_HOST", "127.0.0.1") or "127.0.0.1").strip().lower()
     if not security_settings.auth_required and bind_host not in {"127.0.0.1", "localhost", "::1"}:
         issues.append("authentication-disabled mode must bind to loopback only")
+    if (
+        not security_settings.auth_required
+        and security_settings.noauth_default_role != "viewer"
+        and profile != "lab"
+    ):
+        issues.append("non-viewer auth-disabled defaults are only allowed in the lab policy profile")
+    if (
+        not security_settings.auth_required
+        and security_settings.noauth_default_role != "viewer"
+        and bind_host not in {"127.0.0.1", "localhost", "::1"}
+    ):
+        issues.append("non-viewer auth-disabled defaults require loopback binding")
     if profile in {"corp", "prod"} and not security_settings.auth_required:
         issues.append("authentication must be enabled")
     if profile in {"corp", "prod"} and any(origin.strip() == "*" for origin in security_settings.allowed_origins):

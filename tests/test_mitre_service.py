@@ -83,6 +83,7 @@ def make_settings() -> security.SecuritySettings:
     return security.SecuritySettings(
         api_key="",
         api_key_sha256="",
+        api_key_role="viewer",
         api_keys={},
         api_keys_sha256={},
         auth_required=False,
@@ -92,6 +93,7 @@ def make_settings() -> security.SecuritySettings:
         allowed_origins=["http://127.0.0.1", "http://localhost"],
         protected_process_names=["lsass.exe", "wininit.exe"],
         policy_profile="lab",
+        noauth_default_role="admin",
     )
 
 

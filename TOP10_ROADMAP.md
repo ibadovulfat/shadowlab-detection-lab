@@ -1,90 +1,60 @@
 # ShadowLab Roadmap
 
-This roadmap is updated for the current product state. A large part of the original core build is already in place, so the next wave is more about depth, resilience, and operator polish than basic capability coverage.
+The core platform is already in place. The next stage is less about adding tabs and more about making the existing workflow deeper, faster, and more reliable.
 
-## Completed Foundation
+## Already In Place
 
-These are already present in the project:
-
-- FastAPI backend with RBAC and feature gating
+- FastAPI backend with RBAC and policy gates
 - PySide6 desktop client
-- WHIDS and OSSEC/HIDS integration layer
-- process investigation and auto triage
-- persistence review and remediation workflow
-- graph, timeline, host, artifact, and history surfaces
+- `WHIDS` and `OSSEC/HIDS` integration layer
+- process investigation and triage
+- persistence review and remediation
+- graph, timeline, host, artifact, and history views
 - deception, evidence, and quarantine workflows
-- enterprise case workflow with assignments, tasks, notes, stories, pins, timeline, notifications, and report export
-- enterprise MITRE ATT&CK lifecycle, coverage, Navigator export, Workbench export, and technique-aware response mapping
-- security-ops workspace with integrity, observability, readiness, secrets, and reporting
-- deployment validation, RBAC smoke testing, live integration smoke testing, and performance/dedupe probes
-- layered local YARA pipeline with `YARAify` fallback, community pack curation, memory scan support, telemetry, and policy tuning
+- enterprise case workflow
+- ATT&CK lifecycle and export support
+- security-operations posture and reporting
+- validation helpers for runtime, auth, integrations, and performance
+- layered local YARA with telemetry and tuning
 
 ## Next 10 Priorities
 
-## 1. Real-Time Event Delivery
+### 1. Real-Time Event Delivery
 
-- move from timed refresh to event-driven updates where practical
-- reduce full workspace reloads
-- improve operator awareness during active investigations
+Move more of the operator experience from polling to event-driven refresh where it makes sense.
 
-## 2. Stronger Entity Relationship Modeling
+### 2. Better Entity Modeling
 
-- formalize links between case, incident, task, note, story, pin, host, process, IP, and hash
-- make linked-entity views more precise
-- improve case-scoped graph quality
+Tighten the links between cases, incidents, hosts, processes, hashes, IPs, tasks, and evidence so graph and timeline output becomes more precise.
 
-## 3. Richer Executive Reporting
+### 3. Reporting Quality
 
-- improve PDF and HTML layout quality
-- add clearer management summary sections
-- tighten language for handoff and review use cases
+Improve PDF and HTML exports so they read better in handoff and leadership review.
 
-## 4. Advanced Search And Filter UX
+### 4. Search And Filter UX
 
-- deepen enterprise filtering beyond simple text matches
-- add safer structured query options
-- improve fast drill-down on large case/task/activity datasets
+Make large enterprise datasets easier to work with through safer and more expressive filtering.
 
-## 5. Notification Routing
+### 5. Notification Routing
 
-- extend local notification center into alert routing and escalation paths
-- support richer connector-aware notifications
-- distinguish informational, warning, and urgent items more clearly
+Extend the local notification model into clearer alerting and escalation paths.
 
-## 6. State Persistence And Workspace Recall
+### 6. Workspace Recall
 
-- remember more desktop context between sessions
-- preserve preferred layouts and filters
-- shorten resume time for repeat operators
+Remember more desktop state between sessions so operators can resume work faster.
 
-## 7. Performance Hardening
+### 7. Performance Hardening
 
-- reduce expensive UI refresh paths
-- optimize large table population and graph rendering
-- make enterprise-heavy workflows smoother on lower-end systems
+Reduce heavy refresh paths and improve rendering of large tables and graphs.
 
-## 8. Database Maturity
+### 8. Database Maturity
 
-- deepen PostgreSQL runtime validation
-- tighten migration tooling and data consistency checks
-- prepare for larger investigation datasets
+Deepen PostgreSQL validation and keep migration tooling predictable as datasets grow.
 
-## 9. Packaging And Release Hardening
+### 9. Packaging And Release Hardening
 
-- finalize cleaner EXE shipping path
-- improve packaging diagnostics and version metadata
-- document safer local installation and update flows
+Improve EXE packaging, diagnostics, versioning, and local update guidance.
 
-## 10. Test Coverage Expansion
+### 10. Test Coverage Expansion
 
-- add more regression coverage around enterprise workflows
-- broaden auth and approval tests
-- add UI smoke coverage where practical
-
-## Recommended Build Order
-
-1. Real-Time Event Delivery
-2. Stronger Entity Relationship Modeling
-3. Performance Hardening
-4. Richer Executive Reporting
-5. Test Coverage Expansion
+Broaden regression coverage around enterprise workflows, security-sensitive paths, and desktop behavior.

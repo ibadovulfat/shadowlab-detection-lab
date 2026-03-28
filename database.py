@@ -312,6 +312,26 @@ def create_table(conn):
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS rate_limit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bucket TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS request_nonce_log (
+                nonce_key TEXT PRIMARY KEY,
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS action_audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
@@ -784,6 +804,20 @@ def _create_table_postgres(conn) -> None:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS rate_limit_log (
+            id BIGSERIAL PRIMARY KEY,
+            bucket TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS request_nonce_log (
+            nonce_key TEXT PRIMARY KEY,
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS action_audit_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
@@ -1055,6 +1089,8 @@ def _create_table_postgres(conn) -> None:
 def _ensure_indexes(conn) -> None:
     statements = [
         "CREATE INDEX IF NOT EXISTS idx_auth_log_created_at ON auth_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_rate_limit_bucket_subject_created_at ON rate_limit_log(bucket, subject, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_request_nonce_created_at ON request_nonce_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_action_audit_created_at ON action_audit_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_external_request_created_at ON external_request_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_alert_log_created_at ON alert_log(created_at DESC)",
@@ -1334,6 +1370,64 @@ def log_auth_event(
 
 def get_auth_logs(conn) -> pd.DataFrame:
     return _read_sql_query(conn, "SELECT * FROM auth_log ORDER BY created_at DESC")
+
+
+def record_rate_limit_hit(conn, bucket: str, subject: str, created_at: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO rate_limit_log (bucket, subject, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (bucket, subject, float(created_at)),
+    )
+    conn.commit()
+
+
+def prune_rate_limit_hits(conn, bucket: str, subject: str, cutoff: float) -> None:
+    conn.execute(
+        """
+        DELETE FROM rate_limit_log
+        WHERE bucket = ? AND subject = ? AND created_at < ?
+        """,
+        (bucket, subject, float(cutoff)),
+    )
+    conn.commit()
+
+
+def count_rate_limit_hits(conn, bucket: str, subject: str, cutoff: float) -> int:
+    cursor = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM rate_limit_log
+        WHERE bucket = ? AND subject = ? AND created_at >= ?
+        """,
+        (bucket, subject, float(cutoff)),
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def reserve_request_nonce(conn, nonce_key: str, created_at: float) -> bool:
+    cursor = conn.execute(
+        _insert_ignore_sql("request_nonce_log", ["nonce_key", "created_at"], getattr(conn, "backend", "sqlite")),
+        (nonce_key, float(created_at)),
+    )
+    conn.commit()
+    rowcount = getattr(cursor, "rowcount", None)
+    if rowcount is None:
+        return True
+    return int(rowcount) > 0
+
+
+def prune_request_nonces(conn, cutoff: float) -> None:
+    conn.execute(
+        """
+        DELETE FROM request_nonce_log
+        WHERE created_at < ?
+        """,
+        (float(cutoff),),
+    )
+    conn.commit()
 
 
 def log_action_audit(

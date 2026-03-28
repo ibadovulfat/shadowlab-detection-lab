@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import parse_qsl
 
+import database as db
 from fastapi import Depends, Header, HTTPException, Request, status
 
 
@@ -15,6 +18,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 class SecuritySettings:
     api_key: str
     api_key_sha256: str
+    api_key_role: str
     api_keys: dict[str, str]
     api_keys_sha256: dict[str, str]
     auth_required: bool
@@ -24,6 +28,7 @@ class SecuritySettings:
     allowed_origins: list[str]
     protected_process_names: list[str]
     policy_profile: str
+    noauth_default_role: str
 
 
 @dataclass(frozen=True)
@@ -33,7 +38,7 @@ class SecurityContext:
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
-DEFAULT_ROLE = "admin"
+DEFAULT_ROLE = "viewer"
 ALLOWED_ROLES = {"viewer", "analyst", "admin"}
 ALLOWED_POLICY_PROFILES = {"lab", "corp", "prod"}
 AUTH_FAILURE_LIMIT = 8
@@ -127,12 +132,16 @@ def _validate_settings(settings: SecuritySettings) -> SecuritySettings:
         raise ValueError("Use raw API keys or SHA-256 API keys, not both at the same time")
     if settings.api_key_sha256 and not _is_sha256_hex(settings.api_key_sha256):
         raise ValueError("SHADOWLAB_API_KEY_SHA256 must be a valid 64-character SHA-256 digest")
+    if settings.api_key_role not in ALLOWED_ROLES:
+        raise ValueError("SHADOWLAB_API_KEY_ROLE must be one of: viewer, analyst, admin")
     if settings.auth_required and not any(
         [settings.api_key, settings.api_key_sha256, settings.api_keys, settings.api_keys_sha256]
     ):
         raise ValueError("SHADOWLAB_REQUIRE_AUTH=true requires at least one API key configuration")
     if settings.policy_profile not in ALLOWED_POLICY_PROFILES:
         raise ValueError("SHADOWLAB_POLICY_PROFILE must be one of: lab, corp, prod")
+    if settings.noauth_default_role not in ALLOWED_ROLES:
+        raise ValueError("SHADOWLAB_NOAUTH_DEFAULT_ROLE must be one of: viewer, analyst, admin")
     return settings
 
 
@@ -140,6 +149,7 @@ def load_security_settings() -> SecuritySettings:
     settings = SecuritySettings(
         api_key=os.environ.get("SHADOWLAB_API_KEY", "").strip(),
         api_key_sha256=os.environ.get("SHADOWLAB_API_KEY_SHA256", "").strip().lower(),
+        api_key_role=os.environ.get("SHADOWLAB_API_KEY_ROLE", DEFAULT_ROLE).strip().lower() or DEFAULT_ROLE,
         api_keys=_parse_role_keys(os.environ.get("SHADOWLAB_API_KEYS"), field_name="SHADOWLAB_API_KEYS"),
         api_keys_sha256=_parse_role_keys(
             os.environ.get("SHADOWLAB_API_KEYS_SHA256"),
@@ -153,6 +163,7 @@ def load_security_settings() -> SecuritySettings:
         allowed_origins=_normalize_origins(os.environ.get("SHADOWLAB_ALLOWED_ORIGINS")),
         protected_process_names=_normalize_process_names(os.environ.get("SHADOWLAB_PROTECTED_PROCESS_NAMES")),
         policy_profile=os.environ.get("SHADOWLAB_POLICY_PROFILE", "lab").strip().lower() or "lab",
+        noauth_default_role=os.environ.get("SHADOWLAB_NOAUTH_DEFAULT_ROLE", DEFAULT_ROLE).strip().lower() or DEFAULT_ROLE,
     )
     auth_required = _as_bool(
         os.environ.get("SHADOWLAB_REQUIRE_AUTH"),
@@ -162,6 +173,7 @@ def load_security_settings() -> SecuritySettings:
         SecuritySettings(
             api_key=settings.api_key,
             api_key_sha256=settings.api_key_sha256,
+            api_key_role=settings.api_key_role,
             api_keys=settings.api_keys,
             api_keys_sha256=settings.api_keys_sha256,
             auth_required=auth_required,
@@ -171,6 +183,7 @@ def load_security_settings() -> SecuritySettings:
             allowed_origins=settings.allowed_origins,
             protected_process_names=settings.protected_process_names,
             policy_profile=settings.policy_profile,
+            noauth_default_role=settings.noauth_default_role,
         )
     )
 
@@ -258,7 +271,7 @@ def require_api_key(
             request.state.security_context = context
             _log_auth_event("auth_failure", "denied", context.role, _client_ip(request), request.url.path, "invalid_api_key_auth_disabled")
             return context
-        context = SecurityContext(token="", role="admin")
+        context = SecurityContext(token="", role=security_settings.noauth_default_role)
         request.state.security_context = context
         return context
 
@@ -277,7 +290,7 @@ def require_api_key(
     return context
 
 
-def require_analyst_or_admin(
+async def require_analyst_or_admin(
     request: Request,
     context: SecurityContext = Depends(require_api_key),
 ) -> SecurityContext:
@@ -291,10 +304,12 @@ def require_analyst_or_admin(
             "Analyst or admin role required",
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analyst or admin role required")
+    if request.method.upper() in {"POST", "PATCH", "DELETE"}:
+        await _require_signed_request(request, context)
     return context
 
 
-def require_admin(
+async def require_admin(
     request: Request,
     context: SecurityContext = Depends(require_api_key),
 ) -> SecurityContext:
@@ -309,7 +324,7 @@ def require_admin(
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
     if request.method.upper() in {"POST", "PATCH", "DELETE"}:
-        _require_signed_request(request, context)
+        await _require_signed_request(request, context)
     return context
 
 
@@ -347,11 +362,6 @@ def ensure_dangerous_actions_enabled(request: Request) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Dangerous actions are disabled by active policy profile: {get_active_policy_name()}",
         )
-    context = getattr(request.state, "security_context", None)
-    if isinstance(context, SecurityContext):
-        _require_signed_request(request, context)
-
-
 def ensure_network_warfare_enabled(request: Request) -> None:
     _enforce_request_rate_limit(
         request,
@@ -467,10 +477,10 @@ def _resolve_context(provided: str) -> SecurityContext | None:
         return None
 
     if security_settings.api_key_sha256 and hmac.compare_digest(provided_sha256, security_settings.api_key_sha256):
-        return SecurityContext(token=provided, role=DEFAULT_ROLE)
+        return SecurityContext(token=provided, role=security_settings.api_key_role)
 
     if security_settings.api_key and hmac.compare_digest(provided, security_settings.api_key):
-        return SecurityContext(token=provided, role=DEFAULT_ROLE)
+        return SecurityContext(token=provided, role=security_settings.api_key_role)
 
     return None
 
@@ -507,6 +517,15 @@ def _bucket_key(bucket: str, subject: str) -> str:
 
 def _prune_rate_limit(bucket: str, subject: str, window_seconds: int) -> list[float]:
     now = time.time()
+    cutoff = now - window_seconds
+    conn = db.create_connection()
+    if conn is not None:
+        try:
+            db.prune_rate_limit_hits(conn, bucket, subject, cutoff)
+            count = db.count_rate_limit_hits(conn, bucket, subject, cutoff)
+            return [now] * count
+        finally:
+            conn.close()
     key = _bucket_key(bucket, subject)
     values = [ts for ts in _RATE_LIMIT_BUCKETS.get(key, []) if now - ts < window_seconds]
     _RATE_LIMIT_BUCKETS[key] = values
@@ -514,9 +533,17 @@ def _prune_rate_limit(bucket: str, subject: str, window_seconds: int) -> list[fl
 
 
 def _record_rate_limit_hit(bucket: str, subject: str) -> None:
+    now = time.time()
+    conn = db.create_connection()
+    if conn is not None:
+        try:
+            db.record_rate_limit_hit(conn, bucket, subject, now)
+            return
+        finally:
+            conn.close()
     key = _bucket_key(bucket, subject)
     hits = _RATE_LIMIT_BUCKETS.setdefault(key, [])
-    hits.append(time.time())
+    hits.append(now)
 
 
 def _enforce_request_rate_limit(
@@ -571,7 +598,7 @@ def _log_auth_event(event_type: str, outcome: str, role: str, client_ip: str, pa
         return
 
 
-def _require_signed_request(request: Request, context: SecurityContext) -> None:
+async def _require_signed_request(request: Request, context: SecurityContext) -> None:
     if not security_settings.auth_required or not context.token:
         return
     timestamp = (request.headers.get("X-ShadowLab-Timestamp") or "").strip()
@@ -612,20 +639,12 @@ def _require_signed_request(request: Request, context: SecurityContext) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Signed request timestamp expired")
     nonce_key = f"{context.role}:{nonce}"
     _prune_signature_nonces(now)
-    if nonce_key in _SIGNATURE_NONCES:
-        _log_auth_event(
-            "signature_replay",
-            "denied",
-            context.role,
-            _client_ip(request),
-            request.url.path,
-            "Replayed signed request nonce",
-        )
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Signed request nonce has already been used")
     payload = "\n".join(
         [
             request.method.upper(),
             request.url.path,
+            _canonical_query_string(request),
+            _request_body_sha256(await request.body()),
             timestamp,
             nonce,
         ]
@@ -641,11 +660,58 @@ def _require_signed_request(request: Request, context: SecurityContext) -> None:
             "Signed request HMAC mismatch",
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signed request signature")
-    _SIGNATURE_NONCES[nonce_key] = float(now)
+    conn = db.create_connection()
+    if conn is not None:
+        try:
+            reserved = db.reserve_request_nonce(conn, nonce_key, float(now))
+        finally:
+            conn.close()
+    else:
+        reserved = nonce_key not in _SIGNATURE_NONCES
+        if reserved:
+            _SIGNATURE_NONCES[nonce_key] = float(now)
+    if not reserved:
+        _log_auth_event(
+            "signature_replay",
+            "denied",
+            context.role,
+            _client_ip(request),
+            request.url.path,
+            "Replayed signed request nonce",
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Signed request nonce has already been used")
+
+
+def _canonical_query_string(request: Request) -> str:
+    raw_query = request.scope.get("query_string", b"")
+    if not raw_query:
+        return ""
+    pairs = parse_qsl(raw_query.decode("utf-8", errors="strict"), keep_blank_values=True)
+    pairs.sort()
+    return "&".join(f"{key}={value}" for key, value in pairs)
+
+
+def _request_body_sha256(body: bytes) -> str:
+    if not body:
+        return hashlib.sha256(b"").hexdigest()
+    try:
+        loaded = json.loads(body)
+    except (TypeError, ValueError):
+        canonical = body
+    else:
+        canonical = json.dumps(loaded, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _prune_signature_nonces(now: int | None = None) -> None:
     current = float(now or int(time.time()))
+    conn = db.create_connection()
+    if conn is not None:
+        try:
+            db.prune_request_nonces(conn, current - SIGNED_REQUEST_WINDOW_SECONDS)
+            return
+        finally:
+            conn.close()
     stale = [
         key
         for key, timestamp in _SIGNATURE_NONCES.items()

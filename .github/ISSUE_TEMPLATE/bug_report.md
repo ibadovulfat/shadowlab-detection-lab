@@ -31,6 +31,6 @@ What should have happened?
 
 What happened instead?
 
-## Logs / Screenshots
+## Logs Or Screenshots
 
-Add relevant output, traceback, or screenshots.
+Add traceback output, request details, or screenshots if they help.

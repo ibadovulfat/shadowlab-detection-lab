@@ -20,7 +20,7 @@ class ApiLoadTests(unittest.TestCase):
         self.client = TestClient(api.main.app)
 
     def test_health_endpoint_handles_parallel_requests(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(api.main, "security_settings", settings):
             with mock.patch.object(security, "security_settings", settings):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -28,7 +28,7 @@ class ApiLoadTests(unittest.TestCase):
         self.assertTrue(all(status == 200 for status in responses))
 
     def test_local_yara_health_endpoint_loads(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(api.main, "security_settings", settings):
             with mock.patch.object(security, "security_settings", settings):
                 response = self.client.get("/yara/local/health")
@@ -38,7 +38,7 @@ class ApiLoadTests(unittest.TestCase):
         self.assertIn("pack_counts", payload)
 
     def test_local_yara_policy_roundtrip_and_analytics(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         policy = {
             "allowlist_hashes": [],
             "allowlist_path_prefixes": [],
@@ -68,7 +68,7 @@ class ApiLoadTests(unittest.TestCase):
         self.assertIn("sources", analytics)
 
     def test_local_yara_rule_tuning_and_update_workflow_endpoints(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(api.main, "security_settings", settings):
             with mock.patch.object(security, "security_settings", settings):
                 tuning_response = self.client.post(

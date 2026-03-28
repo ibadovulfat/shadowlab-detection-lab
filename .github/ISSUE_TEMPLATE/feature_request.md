@@ -20,8 +20,8 @@ Describe the workflow, UI, API, or capability you want.
 
 ## Alternatives Considered
 
-List any alternatives you considered.
+List any alternatives you looked at.
 
 ## Extra Context
 
-Add screenshots, references, or example flows if useful.
+Add screenshots, references, or example workflows if useful.

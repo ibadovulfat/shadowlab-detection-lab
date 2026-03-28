@@ -1,62 +1,50 @@
-# Detect It Easy (DiE) Integration
+# Detect It Easy Integration
 
-> ShadowLab uses Detect It Easy for automated packer, cryptor, and compiler detection inside the `Static Analysis` workspace.
+ShadowLab uses Detect It Easy in the `Static Analysis` workspace for packer, cryptor, compiler, and structural file inspection.
 
-## Backend Priority
+## Backend Order
 
-| Priority | Backend | Source | Requires |
-|----------|---------|--------|----------|
+| Priority | Backend | Source | Requirement |
+|----------|---------|--------|-------------|
 | 1 | Native binding | `die-python` | `pip install die-python` |
-| 2 | Subprocess | `diec.exe` / `die.exe` | `SHADOWLAB_DIEC_PATH` or `PATH` |
-| 3 | pefile-only | `pefile` | Always available |
+| 2 | Subprocess | `diec.exe` or `die.exe` | `SHADOWLAB_DIEC_PATH` or `PATH` |
+| 3 | Fallback | `pefile` | built-in fallback |
 
-The system automatically selects the highest-priority backend available. If the native binding fails mid-scan, ShadowLab falls back to subprocess, then to `pefile`.
+ShadowLab always tries the highest-priority backend available.
 
 ## Native Binding
 
-The preferred backend uses `die-python`, which provides:
+The preferred path is `die-python`, which provides:
 
-- bundled native DiE library
-- bundled DiE signature database
-- Python API access without requiring an external `.exe`
-- worker-isolated execution so the main API process is not taken down by native binding faults
+- an embedded native DiE library
+- the DiE signature database
+- direct Python access without an external executable
+- worker-isolated execution so a native fault does not take down the main API process
 
-Installation:
+Install it with:
 
 ```powershell
 pip install die-python
 ```
 
-ShadowLab wraps the binding in [services/die_binding_service.py](/C:/Users/ulfat/Documents/shadowlab-detection-lab/services/die_binding_service.py).
+Implementation lives in [services/die_binding_service.py](/C:/Users/ulfat/Documents/shadowlab-detection-lab/services/die_binding_service.py).
 
-## Optional Subprocess Backend
+## Optional CLI Backend
 
-If you still want to use the CLI backend, set `SHADOWLAB_DIEC_PATH` or place `diec.exe` / `die.exe` on `PATH`.
-
-Discovery order:
-
-1. `SHADOWLAB_DIEC_PATH`
-2. `diec` / `die` on `PATH`
-3. `%LocalAppData%\Programs\Detect It Easy\diec.exe`
-4. `C:\Program Files\Detect It Easy\diec.exe`
+If you still want the external binary path, provide `diec.exe` or `die.exe` through `SHADOWLAB_DIEC_PATH` or `PATH`.
 
 ## Status Endpoint
 
 `GET /malware-analyst/status` reports:
 
-- overall `status`
-- selected `backend`
+- current status
+- selected backend
 - native binding availability
 - native database path
 - optional subprocess path
 
-## Packaging
+In the desktop client, a native-ready state is shown as `Runtime: ready (native)`. That is expected even when `diec.exe` is not installed, because the preferred path is the native binding rather than the external CLI.
 
-[desktop/shadowlab.spec](/C:/Users/ulfat/Documents/shadowlab-detection-lab/desktop/shadowlab.spec) bundles the `die-python` database automatically when the package is installed.
+## Packaging Notes
 
-No `tools/die/` companion folder is required anymore.
-
-## Reliability Notes
-
-- the desktop `Refresh DIE Status` action now preserves the last analysis result instead of overwriting the summary/output panes
-- embedded marker scanning is streamed in chunks instead of loading the entire target file into memory at once
+[desktop/shadowlab.spec](/C:/Users/ulfat/Documents/shadowlab-detection-lab/desktop/shadowlab.spec) bundles the `die-python` database when the package is installed.

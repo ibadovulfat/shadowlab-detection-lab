@@ -2,43 +2,44 @@
 
 ## Supported Use
 
-ShadowLab is intended for owned, isolated, lab environments. Do not use it against systems, networks, or assets you do not own or explicitly control.
+ShadowLab is intended for owned, isolated lab environments. Do not run it against systems, networks, or data you do not own or explicitly control.
 
 ## Reporting A Vulnerability
 
-Please do not open public issues for suspected security vulnerabilities that could expose users or systems.
+Please do not open public issues for vulnerabilities that could expose users, secrets, or systems.
 
 Instead:
 
-1. open a private security advisory on GitHub if available
-2. or contact the repository owner directly through GitHub
+1. open a private security advisory on GitHub if that option is available
+2. or contact the repository owner through GitHub
 3. include clear reproduction details, impact, and affected files or routes
 
 Helpful report content:
 
-- vulnerability summary
-- affected component or route
+- summary of the issue
+- affected route, file, or feature
 - reproduction steps
-- expected vs actual behavior
+- expected behavior
+- actual behavior
 - impact assessment
-- suggested mitigation if known
+- any suggested mitigation
 
 ## Response Goals
 
 The project will try to:
 
-- acknowledge valid reports reasonably quickly
+- acknowledge valid reports in a reasonable time
 - reproduce and scope the issue
 - prepare a fix or mitigation
 - publish a coordinated update when appropriate
 
 ## Sensitive Content
 
-Please do not include:
+Do not include:
 
 - raw secrets or tokens
 - private keys
 - real production data
-- sensitive personal data
+- sensitive personal information
 
-If a secret has already been exposed, rotate it immediately before reporting.
+If a secret is already exposed, rotate it before reporting the issue.

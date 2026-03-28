@@ -11,5 +11,5 @@
 
 ## Notes
 
-- config, migration, or rollout notes
+- config, rollout, or migration notes
 - screenshots for UI changes if relevant

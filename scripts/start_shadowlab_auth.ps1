@@ -1,8 +1,46 @@
+param(
+    [string]$ApiKeysSha256 = "",
+    [switch]$EnableDangerousActions,
+    [bool]$StartDesktop = $true
+)
+
+function New-ShadowLabApiKey {
+    $bytes = New-Object byte[] 24
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    return $token
+}
+
+function Get-ShadowLabSha256([string]$Value) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    $hash = [System.Security.Cryptography.SHA256]::HashData($bytes)
+    return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
 $env:SHADOWLAB_REQUIRE_AUTH = "true"
 $env:SHADOWLAB_POLICY_PROFILE = "lab"
-$env:SHADOWLAB_ENABLE_DANGEROUS_ACTIONS = "true"
-$env:SHADOWLAB_API_KEYS_SHA256 = "viewer:464f8b8bd93e5c6441114ec9b69eb309ed583500ac1ee3f1e63e46d2ee9dfada,analyst:c5853663c2321613ad1b166e9f30bd5204d2fea87acba2b0fd750e54909915f3,admin:3b79d32f5098ac32d07b191cd9dc4a32fdf143e531c5db303981d31b9c118e91"
+$env:SHADOWLAB_ENABLE_DANGEROUS_ACTIONS = $(if ($EnableDangerousActions) { "true" } else { "false" })
 
-Start-Process python -ArgumentList '-m','uvicorn','api.main:app','--host','127.0.0.1','--port','8000' -WorkingDirectory 'C:\Users\ulfat\Documents\shadowlab-detection-lab'
+if ([string]::IsNullOrWhiteSpace($ApiKeysSha256)) {
+    $viewerKey = New-ShadowLabApiKey
+    $analystKey = New-ShadowLabApiKey
+    $adminKey = New-ShadowLabApiKey
+    $ApiKeysSha256 = "viewer:$(Get-ShadowLabSha256 $viewerKey),analyst:$(Get-ShadowLabSha256 $analystKey),admin:$(Get-ShadowLabSha256 $adminKey)"
+
+    Write-Host ""
+    Write-Host "ShadowLab generated fresh API keys for this session:" -ForegroundColor Cyan
+    Write-Host "viewer:  $viewerKey"
+    Write-Host "analyst: $analystKey"
+    Write-Host "admin:   $adminKey"
+    Write-Host ""
+    Write-Host "Store these keys securely. Only the SHA-256 values are exported to the backend." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+$env:SHADOWLAB_API_KEYS_SHA256 = $ApiKeysSha256
+
+Start-Process python -ArgumentList '-m', 'uvicorn', 'api.main:app', '--host', '127.0.0.1', '--port', '8000' -WorkingDirectory 'C:\Users\ulfat\Documents\shadowlab-detection-lab'
 Start-Sleep -Seconds 3
-Start-Process python -ArgumentList 'desktop/main.py' -WorkingDirectory 'C:\Users\ulfat\Documents\shadowlab-detection-lab'
+if ($StartDesktop) {
+    Start-Process python -ArgumentList 'desktop/main.py' -WorkingDirectory 'C:\Users\ulfat\Documents\shadowlab-detection-lab'
+}

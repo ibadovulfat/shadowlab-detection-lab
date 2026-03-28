@@ -1,66 +1,27 @@
 # ShadowLab Desktop Client
 
-This folder contains the PySide6 desktop client for the local ShadowLab API.
+This folder contains the PySide6 desktop client for ShadowLab.
 
-## What The Desktop Covers
+## What The Desktop Does
 
-The desktop is the main operator console and currently exposes:
+The desktop is the main operator console. It covers:
 
-- dashboards and overview telemetry views
-- WHIDS and HIDS integration workspaces
-- process investigation, deep hunt, and response workflows
-- persistence review and remediation controls
-- threat-intel lookups
-- static analysis with Detect It Easy and structural PE review
-- network, hosts, graph, timeline, quarantine, history, and artifact views
-- deception and scenario workflows
-- enterprise case operations and investigation intelligence views
-- enterprise ATT&CK lifecycle, ATT&CK coverage, Navigator export, and Workbench export views
-- security-ops posture and reporting controls
-- local YARA policy, health, analytics, and error review from `Security Ops`
+- dashboards and overview views
+- `WHIDS` and `HIDS` integration workspaces
+- process investigation and advanced hunt
+- persistence, threat-intel, and static-analysis workflows
+- deception, network, hosts, graph, and timeline views
+- quarantine, history, artifacts, and evidence handling
+- enterprise case operations and investigation intelligence
+- ATT&CK coverage, Navigator export, and Workbench export
+- security-operations posture, YARA health, and reporting
 
 ## Enterprise Layout
 
 The `Enterprise` tab is split into:
 
 - `Enterprise Ops`
-  - case controls
-  - case board
-  - assignments
-  - tasks
-  - activity feed
-  - notifications
-  - report export
 - `Enterprise Intel`
-  - critical assets
-  - detection lifecycle
-  - ATT&CK coverage and bundle lifecycle
-  - case ATT&CK rollup
-  - notes
-  - stories
-  - timeline
-  - entity links
-  - graph correlation
-
-ATT&CK-specific desktop actions now include:
-
-- `Load ATT&CK`
-- `ATT&CK Layer`
-- `Workbench`
-
-The enterprise ATT&CK panels show:
-
-- discovered bundle candidates
-- loaded bundle metadata
-- bundle diff summary
-- tactic heat and tactic progression
-- parent and sub-technique rollup
-- telemetry cue hotspots
-- case-level ATT&CK enrichment
-
-Large tabs use local scrolling instead of forcing the full window to grow beyond the screen.
-
-Current desktop screenshots live in the top-level `images/` folder and the section-by-section walkthrough is maintained in [docs/PLATFORM_GUIDE.md](../docs/PLATFORM_GUIDE.md).
 
 ## Auth And Roles
 
@@ -74,62 +35,52 @@ Supported roles:
 
 The client:
 
-- shows role-aware actions
-- hides or disables unavailable controls
-- does not treat auth-disabled backends as implicit admin anymore
-- keeps `WHIDS` and `HIDS` controls locked for non-admin roles
-- still allows analysts to move into enterprise case work where capability policy permits it
+- shows or hides controls based on capabilities
+- signs authenticated write requests automatically
+- attaches approval IDs when needed
+- does not assume admin access just because backend auth is disabled
+- activates role-aware API access from a valid key without requiring separate manual header setup
 
-Current YARA-related desktop usage:
-
-- inspect triage summaries that merge `YARAify`, local YARA, memory YARA, and fused confidence
-- use `Security Ops` to review YARA health, policy, analytics, and compile errors
-- use `Triage Respond` for policy-aware response planning after high-confidence hits
-
-For local role-based testing, use:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
-python desktop\main.py
-```
-
-## Run Locally
+## Local Run
 
 ```powershell
 python app.py
 python desktop\main.py
 ```
 
-Auth-enabled local start:
+Auth-enabled local run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
 python desktop\main.py
 ```
 
-## Build EXE
+## Build
 
 ```powershell
 pip install pyinstaller
 desktop\build_exe.ps1
 ```
 
-`die-python` is now the preferred Detect It Easy backend for Static Analysis. If you still want a subprocess fallback, you can provide `diec.exe` or `die.exe` via `SHADOWLAB_DIEC_PATH` or `PATH`.
-
-Operational notes:
-
-- the desktop keeps the most recent Static Analysis summary and raw DiE output when you refresh readiness/status
-- native DiE scans are isolated away from the main API process to reduce crash impact during malicious-sample handling
-
-Packaging assets:
+Packaging files:
 
 - `desktop\shadowlab.spec`
 - `desktop\shadowlab.iss`
 - `desktop\version_info.txt`
 
-## Related Docs
+## Detect It Easy Notes
+
+The preferred backend for `Static Analysis` is `die-python`. If you still want the external CLI path, provide `diec.exe` or `die.exe` through `SHADOWLAB_DIEC_PATH` or `PATH`.
+
+The runtime badge in the desktop reflects native and subprocess backends separately. A healthy native binding appears as `Runtime: ready (native)` even if no external `diec.exe` path exists.
+
+## Reporting Notes
+
+The desktop `Artifacts` and export flows now surface fuller monitor reports. Generated PDF and HTML reports include analyst findings, telemetry context, event highlights, and an artifact manifest suitable for handoff.
+
+## Related Documentation
 
 - [README.md](../README.md)
+- [docs/PLATFORM_GUIDE.md](../docs/PLATFORM_GUIDE.md)
 - [docs/USAGE_GUIDE.md](../docs/USAGE_GUIDE.md)
 - [docs/PRODUCTION_RUNBOOK.md](../docs/PRODUCTION_RUNBOOK.md)
-- [docs/PLATFORM_GUIDE.md](../docs/PLATFORM_GUIDE.md)

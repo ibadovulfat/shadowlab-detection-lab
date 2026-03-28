@@ -31,9 +31,6 @@ SUSPICIOUS_IMPORTS = {
     "AmsiScanBuffer": 10,
     "EtwEventWrite": 10,
     "WldpQueryDynamicCodeTrust": 10,
-    "LoadLibraryA": 4,
-    "LoadLibraryW": 4,
-    "GetProcAddress": 4,
     "WinExec": 6,
     "ShellExecuteA": 6,
     "ShellExecuteW": 6,
@@ -105,9 +102,12 @@ class StaticPEAnalysisService:
             score += min(14, 6 + len(odd_sections) * 2)
             reasons.append(f"Suspicious section name(s): {', '.join(odd_sections[:4])}")
 
-        if overlay_size > 0:
+        if overlay_size >= 8192:
             score += 6
             reasons.append(f"Overlay detected ({overlay_size} bytes)")
+        elif overlay_size > 0:
+            score += 2
+            reasons.append(f"Small overlay detected ({overlay_size} bytes)")
 
         if entry_in_last_section:
             score += 8
@@ -129,7 +129,7 @@ class StaticPEAnalysisService:
             score += min(14, 4 + len(dotnet_info["high_risk_imports"]) * 2)
             reasons.append(f".NET high-risk imports: {', '.join(dotnet_info['high_risk_imports'][:5])}")
 
-        if resource_info["count"] == 0 and not resource_info["has_version"]:
+        if resource_info["count"] == 0 and not resource_info["has_version"] and not str(signature.get("status", "")).startswith("Valid"):
             score += 3
             reasons.append("No version/resource metadata present")
 
@@ -141,7 +141,7 @@ class StaticPEAnalysisService:
         score = min(100, score)
         confidence = "high" if score >= 55 else "medium" if score >= 25 else "low"
         severity = "critical" if score >= 75 else "high" if score >= 50 else "medium" if score >= 25 else "low"
-        verdict = "suspicious" if score >= 25 else "informational"
+        verdict = "suspicious" if score >= 35 else "informational"
 
         return {
             "status": "ok",

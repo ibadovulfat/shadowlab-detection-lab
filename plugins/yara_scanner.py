@@ -354,9 +354,9 @@ def _normalize_context(context: dict[str, Any] | None, target: Path) -> dict[str
 def _is_high_signal_match(source: str, severity: str, tags: list[str], meta: dict[str, Any]) -> bool:
     lowered_tags = {str(tag).lower() for tag in tags}
     description = str(meta.get("description", "")).lower()
-    if source in {"inceptor", "shadowlab"}:
-        return True
     if severity == "critical":
+        return True
+    if source == "inceptor" and severity in {"high", "critical"}:
         return True
     return any(tag in lowered_tags for tag in HIGH_RISK_TAGS) or any(
         marker in description for marker in ("manual map", "syscall", "unhook", "amsi", "etw")
@@ -365,6 +365,8 @@ def _is_high_signal_match(source: str, severity: str, tags: list[str], meta: dic
 
 def _suppression_reasons(match: dict[str, Any], context: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    explicit_reasons: list[str] = []
+    policy_reasons: list[str] = []
     source = str(match.get("source", "unknown"))
     severity = str(match.get("severity", "low"))
     tags = list(match.get("tags", []) or [])
@@ -378,23 +380,24 @@ def _suppression_reasons(match: dict[str, Any], context: dict[str, Any]) -> list
     registry = _registry_rule_overrides().get(rule_name, {})
     suppressions = registry.get("suppressions", {}) if isinstance(registry, dict) else {}
 
-    if _is_high_signal_match(source, severity, tags, meta):
-        if not bool(suppressions.get("force")):
-            return reasons
     if bool(suppressions.get("disabled")):
-        reasons.append("rule disabled by registry tuning")
+        explicit_reasons.append("rule disabled by registry tuning")
     if _path_matches_any(rule_name, _allowlisted_rule_patterns()) or _path_matches_any(source_path, _allowlisted_rule_patterns()):
-        reasons.append("rule pattern allowlisted")
+        explicit_reasons.append("rule pattern allowlisted")
     if _path_matches_any(rule_name, _scope_rule_patterns(scope, "allowlist_rule_patterns")) or _path_matches_any(source_path, _scope_rule_patterns(scope, "allowlist_rule_patterns")):
-        reasons.append(f"{scope} rule pattern allowlisted")
+        explicit_reasons.append(f"{scope} rule pattern allowlisted")
     if _path_matches_any(rule_name, _suppressed_rule_patterns()) or _path_matches_any(source_path, _suppressed_rule_patterns()):
-        reasons.append("rule pattern suppressed by local policy")
+        policy_reasons.append("rule pattern suppressed by local policy")
     if _path_matches_any(rule_name, _scope_rule_patterns(scope, "suppressed_rule_patterns")) or _path_matches_any(source_path, _scope_rule_patterns(scope, "suppressed_rule_patterns")):
-        reasons.append(f"{scope} rule pattern suppressed by local policy")
+        policy_reasons.append(f"{scope} rule pattern suppressed by local policy")
     if sha256 and sha256 in _trusted_hashes():
-        reasons.append("known-good hash allowlisted")
+        explicit_reasons.append("known-good hash allowlisted")
     if signature_status == "valid" and any(path_value.startswith(prefix.lower()) for prefix in _trusted_path_prefixes()):
-        reasons.append("trusted path with valid signature")
+        explicit_reasons.append("trusted path with valid signature")
+    if _is_high_signal_match(source, severity, tags, meta) and not bool(suppressions.get("force")) and not explicit_reasons:
+        return reasons
+    reasons.extend(explicit_reasons)
+    reasons.extend(policy_reasons)
     return reasons
 
 

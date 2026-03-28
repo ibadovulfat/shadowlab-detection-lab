@@ -21,6 +21,7 @@ def make_settings(**overrides) -> SecuritySettings:
     base = SecuritySettings(
         api_key="",
         api_key_sha256="",
+        api_key_role="viewer",
         api_keys={},
         api_keys_sha256={},
         auth_required=True,
@@ -30,6 +31,7 @@ def make_settings(**overrides) -> SecuritySettings:
         allowed_origins=["http://127.0.0.1", "http://localhost"],
         protected_process_names=["lsass.exe", "wininit.exe"],
         policy_profile="lab",
+        noauth_default_role="viewer",
     )
     return SecuritySettings(**{**base.__dict__, **overrides})
 
@@ -60,6 +62,19 @@ class SecurityValidationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 security.load_security_settings()
 
+    def test_load_security_settings_rejects_invalid_single_key_role(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SHADOWLAB_REQUIRE_AUTH": "true",
+                "SHADOWLAB_API_KEY_SHA256": hashlib.sha256(b"single-secret").hexdigest(),
+                "SHADOWLAB_API_KEY_ROLE": "operator",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(ValueError):
+                security.load_security_settings()
+
     def test_build_capabilities_respects_prod_policy_profile(self) -> None:
         settings = make_settings(
             policy_profile="prod",
@@ -77,6 +92,17 @@ class SecurityValidationTests(unittest.TestCase):
 class AuthApiTests(unittest.TestCase):
     def setUp(self) -> None:
         security._RATE_LIMIT_BUCKETS.clear()
+        security._SIGNATURE_NONCES.clear()
+        db = __import__("database")
+        db.init_db()
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            conn.execute("DELETE FROM rate_limit_log")
+            conn.execute("DELETE FROM request_nonce_log")
+            conn.commit()
+        finally:
+            conn.close()
         self._secret_env = mock.patch.dict(os.environ, {"SHADOWLAB_SECRET_KEY": "unit-test-secret-key"}, clear=False)
         self._secret_env.start()
         self.client = TestClient(api.main.app)
@@ -84,6 +110,7 @@ class AuthApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._secret_env.stop()
         security._RATE_LIMIT_BUCKETS.clear()
+        security._SIGNATURE_NONCES.clear()
 
     def test_auth_context_reports_viewer_capabilities(self) -> None:
         viewer_key = "viewer-secret"
@@ -114,6 +141,34 @@ class AuthApiTests(unittest.TestCase):
         self.assertTrue(payload["capabilities"]["can_run_hunt"])
         self.assertFalse(payload["capabilities"]["can_manage_process_actions"])
 
+    def test_single_key_defaults_to_viewer_role(self) -> None:
+        viewer_key = "single-viewer-secret"
+        settings = make_settings(
+            api_key_sha256=hashlib.sha256(viewer_key.encode("utf-8")).hexdigest(),
+            api_key_role="viewer",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context", headers={"X-API-Key": viewer_key})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["role"], "viewer")
+        self.assertFalse(payload["capabilities"]["can_run_hunt"])
+
+    def test_single_key_can_be_explicitly_scoped_to_admin(self) -> None:
+        admin_key = "single-admin-secret"
+        settings = make_settings(
+            api_key_sha256=hashlib.sha256(admin_key.encode("utf-8")).hexdigest(),
+            api_key_role="admin",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context", headers={"X-API-Key": admin_key})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["role"], "admin")
+        self.assertTrue(payload["capabilities"]["can_run_hunt"])
+
     def test_auth_context_returns_viewer_for_invalid_key_when_auth_disabled(self) -> None:
         settings = make_settings(
             auth_required=False,
@@ -126,6 +181,30 @@ class AuthApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["role"], "viewer")
         self.assertFalse(payload["capabilities"]["can_run_hunt"])
+
+    def test_auth_context_defaults_to_viewer_when_auth_disabled_and_no_key_is_provided(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            api_keys_sha256={"admin": hashlib.sha256(b"admin-secret").hexdigest()},
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["role"], "viewer")
+        self.assertFalse(payload["capabilities"]["can_manage_process_actions"])
+
+    def test_auth_context_can_use_explicit_noauth_admin_override(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            noauth_default_role="admin",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["role"], "admin")
 
     def test_admin_only_endpoint_blocks_viewer(self) -> None:
         viewer_key = "viewer-secret"
@@ -173,6 +252,26 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertIn("Signed request headers are required", response.text)
 
+    def test_signed_analyst_request_is_required_for_mutations(self) -> None:
+        analyst_key = "analyst-secret"
+        settings = make_settings(
+            api_keys_sha256={"analyst": hashlib.sha256(analyst_key.encode("utf-8")).hexdigest()},
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.post(
+                "/enterprise/investigations/notes",
+                headers={"X-API-Key": analyst_key},
+                json={
+                    "note_text": "Signed analyst request required.",
+                    "item_type": "incident",
+                    "item_title": "Test note",
+                    "author": "tester",
+                },
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("Signed request headers are required", response.text)
+
     def test_signed_admin_request_replay_is_blocked(self) -> None:
         admin_key = "admin-secret"
         settings = make_settings(
@@ -181,7 +280,16 @@ class AuthApiTests(unittest.TestCase):
         )
         timestamp = str(int(time.time()))
         nonce = "nonce-123456"
-        payload = "\n".join(["POST", "/integrations/telemetry-fabric/start", timestamp, nonce])
+        payload = "\n".join(
+            [
+                "POST",
+                "/integrations/telemetry-fabric/start",
+                "",
+                hashlib.sha256(b"").hexdigest(),
+                timestamp,
+                nonce,
+            ]
+        )
         signature = hmac.new(admin_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
         headers = {
             "X-API-Key": admin_key,
@@ -196,8 +304,43 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertIn("nonce has already been used", second.text)
 
+    def test_signed_admin_request_rejects_query_tampering(self) -> None:
+        admin_key = "admin-secret"
+        settings = make_settings(
+            api_keys_sha256={"admin": hashlib.sha256(admin_key.encode("utf-8")).hexdigest()},
+            enable_dangerous_actions=True,
+        )
+        timestamp = str(int(time.time()))
+        nonce = "nonce-query-123456"
+        payload = "\n".join(
+            [
+                "POST",
+                "/processes/321/actions/kill",
+                "process_name=calc.exe",
+                hashlib.sha256(b"").hexdigest(),
+                timestamp,
+                nonce,
+            ]
+        )
+        signature = hmac.new(admin_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        headers = {
+            "X-API-Key": admin_key,
+            "X-ShadowLab-Timestamp": timestamp,
+            "X-ShadowLab-Nonce": nonce,
+            "X-ShadowLab-Signature": signature,
+        }
+        with mock.patch.object(security, "security_settings", settings):
+            with mock.patch.object(
+                api.main.process_intel_service,
+                "profile_process",
+                return_value={"pid": 321, "name": "notepad.exe", "exe": "C:\\Temp\\notepad.exe"},
+            ):
+                response = self.client.post("/processes/321/actions/kill?process_name=evil.exe", headers=headers)
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("Invalid signed request signature", response.text)
+
     def test_process_action_rejects_process_name_mismatch(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(security, "security_settings", settings):
             with mock.patch.object(api.main.process_intel_service, "profile_process", return_value={"pid": 321, "name": "lsass.exe", "exe": "C:\\Windows\\System32\\lsass.exe"}):
                 response = self.client.post("/processes/321/actions/kill", params={"process_name": "notepad.exe"})
@@ -205,11 +348,49 @@ class AuthApiTests(unittest.TestCase):
         self.assertIn("Process name mismatch", response.text)
 
     def test_purple_replay_rejects_paths_outside_artifact_directory(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(security, "security_settings", settings):
             response = self.client.post("/enterprise/purple/replay", json={"artifact_path": "C:\\Windows\\win.ini"})
         self.assertEqual(response.status_code, 400)
         self.assertIn("shadowlab_out", response.text)
+
+    def test_whids_file_import_rejects_paths_outside_approved_roots(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.post("/integrations/whids/import/file", json={"file_path": "C:\\Windows\\win.ini"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("approved WHIDS import roots", response.text)
+
+    def test_ossec_file_import_rejects_paths_outside_approved_roots(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.post("/integrations/ossec/import/file", json={"file_path": "C:\\Windows\\win.ini"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("approved OSSEC import roots", response.text)
+
+    def test_ossec_live_ingest_rejects_paths_outside_approved_roots(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.post("/integrations/ossec/live/start", json={"file_path": "C:\\Windows\\win.ini"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("approved OSSEC import roots", response.text)
+
+    def test_whids_file_import_accepts_paths_within_shadowlab_ingest_root(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        approved_path = Path(api.main.WHIDS_IMPORT_ROOT) / "unit-whids.json"
+        approved_path.write_text("[]", encoding="utf-8")
+        try:
+            with mock.patch.object(security, "security_settings", settings):
+                with mock.patch.object(
+                    api.main.hids_integration_service,
+                    "import_whids_file",
+                    return_value={"integration": "whids", "count": 0},
+                ) as import_mock:
+                    response = self.client.post("/integrations/whids/import/file", json={"file_path": str(approved_path)})
+            self.assertEqual(response.status_code, 200)
+            import_mock.assert_called_once_with(str(approved_path.resolve(strict=False)), limit=200)
+        finally:
+            approved_path.unlink(missing_ok=True)
 
     def test_threat_hash_lookup_rejects_invalid_sha256(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True)
@@ -218,7 +399,7 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_connector_configuration_rejects_invalid_name(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(security, "security_settings", settings):
             response = self.client.post(
                 "/enterprise/connectors",
@@ -249,11 +430,34 @@ class AuthApiTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         api.main._validate_startup_security_posture()
 
+    def test_startup_security_validation_rejects_noauth_admin_override_outside_lab(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            policy_profile="corp",
+            noauth_default_role="admin",
+        )
+        with mock.patch.dict(os.environ, {"SHADOWLAB_HOST": "127.0.0.1"}, clear=False):
+            with mock.patch.object(api.main, "security_settings", settings):
+                with mock.patch.object(security, "security_settings", settings):
+                    with self.assertRaises(RuntimeError):
+                        api.main._validate_startup_security_posture()
+
+    def test_startup_security_validation_allows_noauth_admin_override_in_lab_on_loopback(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            policy_profile="lab",
+            noauth_default_role="admin",
+        )
+        with mock.patch.dict(os.environ, {"SHADOWLAB_HOST": "127.0.0.1"}, clear=False):
+            with mock.patch.object(api.main, "security_settings", settings):
+                with mock.patch.object(security, "security_settings", settings):
+                    api.main._validate_startup_security_posture()
+
     def test_html_artifact_download_is_forced_as_attachment(self) -> None:
         artifact_path = Path(api.main.OUT_DIR) / "SecurityOps_Report.html"
         artifact_path.write_text("<html><body>report</body></html>", encoding="utf-8")
         try:
-            settings = make_settings(auth_required=False, policy_profile="lab")
+            settings = make_settings(auth_required=False, policy_profile="lab", noauth_default_role="admin")
             with mock.patch.object(api.main, "security_settings", settings):
                 with mock.patch.object(security, "security_settings", settings):
                     response = self.client.get("/artifacts/SecurityOps_Report.html")
@@ -329,7 +533,7 @@ class AuthApiTests(unittest.TestCase):
     def test_alert_configuration_persists_encrypted_webhook(self) -> None:
         db = __import__("database")
         db.init_db()
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         with mock.patch.object(api.main, "security_settings", settings):
             with mock.patch.object(security, "security_settings", settings):
                 response = self.client.post(
@@ -346,7 +550,7 @@ class AuthApiTests(unittest.TestCase):
         self.assertTrue(stored.startswith("enc:v1:"))
 
     def test_triage_respond_executes_policy_plan(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True, policy_profile="lab")
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, policy_profile="lab", noauth_default_role="admin")
         profile = {"pid": 321, "name": "evil.exe", "exe": "C:\\Temp\\evil.exe"}
         intel = {
             "yaraify": {"status": "ok", "matches": []},

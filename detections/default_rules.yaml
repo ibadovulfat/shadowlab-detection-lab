@@ -223,3 +223,75 @@
   score: 0.18
   tags: [defense-evasion, injection, unhooking, image-load]
 
+- id: bursty_connection_exfil_sequence
+  title: Bursty Connection Exfiltration Sequence
+  severity: high
+  summary: Short-lived connection bursts plus strongly outbound traffic can indicate staged exfiltration designed to stay under average thresholds.
+  attack_tactics: [Exfiltration, Command and Control]
+  mitre_techniques: [T1041, T1071]
+  dedup_key: bursty_exfil
+  when:
+    all:
+      - metric: connection_burst_ratio
+        gte: 2.0
+      - metric: max_tcp_conns
+        gte: 6
+      - metric: outbound_dominance_ratio
+        gte: 3
+  score: 0.14
+  tags: [exfiltration, burst, command-and-control]
+
+- id: low_and_slow_dns_beacon
+  title: Low-and-Slow DNS Beacon
+  severity: high
+  summary: Repeated DNS-heavy activity with low connection counts and a stable remote peer profile can indicate throttled beaconing.
+  attack_tactics: [Command and Control]
+  mitre_techniques: [T1071.004]
+  dedup_key: low_slow_dns
+  when:
+    all:
+      - metric: avg_tcp_conns
+        lte: 3
+      - metric: sysmon_dns_queries
+        gte: 6
+      - metric: stable_remote_fraction
+        gte: 0.6
+  score: 0.13
+  tags: [command-and-control, dns, low-and-slow]
+
+- id: remote_ip_churn_staging_profile
+  title: Remote IP Churn Staging Profile
+  severity: high
+  summary: DNS activity, process creation, and rapid remote-IP turnover can indicate staging through rotating infrastructure.
+  attack_tactics: [Command and Control, Execution]
+  mitre_techniques: [T1105, T1071]
+  dedup_key: remote_ip_churn
+  when:
+    all:
+      - metric: remote_ip_churn
+        gte: 4
+      - metric: sysmon_dns_queries
+        gte: 4
+      - metric: sysmon_process_create
+        gte: 2
+  score: 0.12
+  tags: [command-and-control, staging, infrastructure]
+
+- id: cpu_thread_spike_injection_profile
+  title: CPU And Thread Spike Injection Profile
+  severity: high
+  summary: Sudden CPU and thread jumps combined with process-access telemetry can indicate bursty injection or unpacking behavior.
+  attack_tactics: [Defense Evasion, Execution]
+  mitre_techniques: [T1055]
+  dedup_key: cpu_thread_spike
+  when:
+    all:
+      - metric: cpu_spike_delta
+        gte: 25
+      - metric: thread_spike_delta
+        gte: 15
+      - metric: sysmon_process_access
+        gte: 2
+  score: 0.11
+  tags: [defense-evasion, injection, burst]
+

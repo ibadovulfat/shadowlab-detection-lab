@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from itertools import chain
 from typing import Any
 
@@ -30,10 +31,19 @@ class DetectionOrchestrator:
         if not telemetry_rows:
             return {
                 "avg_cpu": 0.0,
+                "max_cpu": 0.0,
+                "cpu_spike_delta": 0.0,
                 "avg_threads": 0.0,
+                "max_threads": 0.0,
+                "thread_spike_delta": 0.0,
                 "avg_tcp_conns": 0.0,
+                "max_tcp_conns": 0.0,
+                "connection_burst_ratio": 0.0,
                 "avg_bytes_sent_rate": 0.0,
                 "avg_bytes_recv_rate": 0.0,
+                "outbound_dominance_ratio": 0.0,
+                "remote_ip_churn": 0.0,
+                "stable_remote_fraction": 0.0,
                 "defender_total": float(defender_summary.get("total", 0)),
                 "sysmon_total": float(sysmon_summary.get("total", 0)),
                 "sysmon_dns_queries": 0.0,
@@ -48,6 +58,18 @@ class DetectionOrchestrator:
             }
 
         total = float(len(telemetry_rows))
+        cpu_values = [float(row.get("cpu", 0.0)) for row in telemetry_rows]
+        thread_values = [float(row.get("proc_threads", 0.0)) for row in telemetry_rows]
+        tcp_values = [float(row.get("tcp_conns", 0.0)) for row in telemetry_rows]
+        sent_values = [float(row.get("bytes_sent_rate", 0.0)) for row in telemetry_rows]
+        recv_values = [float(row.get("bytes_recv_rate", 0.0)) for row in telemetry_rows]
+        remote_ip_counter: Counter[str] = Counter()
+        total_remote_ip_observations = 0
+        for row in telemetry_rows:
+            row_remote_ips = row.get("remote_ips", []) or []
+            unique_row_ips = [str(ip).strip() for ip in row_remote_ips if str(ip).strip()]
+            remote_ip_counter.update(unique_row_ips)
+            total_remote_ip_observations += len(unique_row_ips)
         defender_by_id = defender_summary.get("by_id", {}) or {}
         sysmon_by_id = sysmon_summary.get("by_id", {}) or {}
         dns_queries = self._event_count(sysmon_by_id, "DNS query")
@@ -58,12 +80,25 @@ class DetectionOrchestrator:
         file_creates = self._event_count(sysmon_by_id, "File create")
         registry_adds = self._event_count(sysmon_by_id, "Registry add")
         registry_sets = self._event_count(sysmon_by_id, "Registry set")
+        avg_tcp_conns = sum(tcp_values) / total
+        avg_sent_rate = sum(sent_values) / total
+        avg_recv_rate = sum(recv_values) / total
+        max_remote_observations = max(remote_ip_counter.values()) if remote_ip_counter else 0
         return {
-            "avg_cpu": sum(float(row.get("cpu", 0.0)) for row in telemetry_rows) / total,
-            "avg_threads": sum(float(row.get("proc_threads", 0.0)) for row in telemetry_rows) / total,
-            "avg_tcp_conns": sum(float(row.get("tcp_conns", 0.0)) for row in telemetry_rows) / total,
-            "avg_bytes_sent_rate": sum(float(row.get("bytes_sent_rate", 0.0)) for row in telemetry_rows) / total,
-            "avg_bytes_recv_rate": sum(float(row.get("bytes_recv_rate", 0.0)) for row in telemetry_rows) / total,
+            "avg_cpu": sum(cpu_values) / total,
+            "max_cpu": max(cpu_values),
+            "cpu_spike_delta": max(cpu_values) - min(cpu_values),
+            "avg_threads": sum(thread_values) / total,
+            "max_threads": max(thread_values),
+            "thread_spike_delta": max(thread_values) - min(thread_values),
+            "avg_tcp_conns": avg_tcp_conns,
+            "max_tcp_conns": max(tcp_values),
+            "connection_burst_ratio": (max(tcp_values) / avg_tcp_conns) if avg_tcp_conns > 0 else 0.0,
+            "avg_bytes_sent_rate": avg_sent_rate,
+            "avg_bytes_recv_rate": avg_recv_rate,
+            "outbound_dominance_ratio": (avg_sent_rate / max(avg_recv_rate, 1.0)) if avg_sent_rate > 0 else 0.0,
+            "remote_ip_churn": float(len(remote_ip_counter)),
+            "stable_remote_fraction": (max_remote_observations / total_remote_ip_observations) if total_remote_ip_observations else 0.0,
             "defender_total": float(defender_summary.get("total", 0)),
             "sysmon_total": float(sysmon_summary.get("total", 0)),
             "defender_signal": float(
