@@ -14,6 +14,10 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,6 +34,33 @@ jobs:
 
       - name: Verify backend suite
         run: python scripts/ci_verify.py
+
+      - name: Build CI evidence bundle
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p ci_artifacts
+          {
+            echo "workflow=${{ github.workflow }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "run_attempt=${{ github.run_attempt }}"
+            echo "sha=${{ github.sha }}"
+            echo "ref=${{ github.ref }}"
+            echo "generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > ci_artifacts/verify-evidence.txt
+
+      - name: Upload CI evidence artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-evidence
+          path: ci_artifacts/verify-evidence.txt
+          if-no-files-found: error
+
+      - name: Attest CI evidence artifact
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ci_artifacts/verify-evidence.txt
 
   postgres-smoke:
     runs-on: ubuntu-latest
