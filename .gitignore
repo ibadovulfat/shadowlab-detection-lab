@@ -213,3 +213,5 @@ shadowlab_out/
 shadowlab_quarantine/
 .obsidian/
 evidence_locker/
+*.tmp
+.tmp*
