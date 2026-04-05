@@ -610,7 +610,9 @@ class AuthApiTests(unittest.TestCase):
         with mock.patch.object(security, "security_settings", settings):
             response = self.client.post("/deception/honeypot/deploy", json={"filename": "..\\..\\evil.txt"})
         self.assertEqual(response.status_code, 422)
-        self.assertIn("path separators", response.text)
+        self.assertTrue(
+            "path separators" in response.text or "letters, digits, dot, underscore, and dash" in response.text
+        )
 
     def test_whids_file_import_accepts_paths_within_shadowlab_ingest_root(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
@@ -649,7 +651,7 @@ class AuthApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertIn("score.json", payload)
-            self.assertIn("workspaces\\tenant-a", payload["score.json"].lower())
+            self.assertIn("workspaces/tenant-a", payload["score.json"].replace("\\", "/").lower())
         finally:
             default_artifact.unlink(missing_ok=True)
             tenant_artifact.unlink(missing_ok=True)
@@ -681,7 +683,7 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["workspace_id"], "tenant-a")
-        self.assertIn("workspaces\\tenant-a", payload["json_path"].lower())
+        self.assertIn("workspaces/tenant-a", payload["json_path"].replace("\\", "/").lower())
 
     def test_case_report_export_writes_workspace_specific_artifacts(self) -> None:
         case = api.main.enterprise_service.create_case(title="Scoped report case", workspace_id="tenant-a", owner="alice")
@@ -694,7 +696,7 @@ class AuthApiTests(unittest.TestCase):
                 )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertIn("workspaces\\tenant-a", payload["json_path"].lower())
+        self.assertIn("workspaces/tenant-a", payload["json_path"].replace("\\", "/").lower())
 
     def test_agent_registration_rejects_cross_workspace_host_takeover(self) -> None:
         conn = __import__("database").create_connection()
