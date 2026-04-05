@@ -6,7 +6,10 @@ from pathlib import Path
 
 class FileHoneypot:
     def __init__(self, filename="passwords.txt"):
-        self.filename = filename
+        candidate = Path(str(filename or "").strip()).name
+        if not candidate or candidate != str(filename or "").strip():
+            raise ValueError("Honeypot filename must be a simple file name")
+        self.filename = candidate
         # Default to a safe temp location or user home if needed. 
         # For lab, let's put it in the current directory or a 'honey' subdir.
         self.honey_dir = Path("honey")

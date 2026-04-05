@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import importlib.util
 import ipaddress
 import json
@@ -28,6 +29,9 @@ from plugins import yara_scanner
 from api.security import (
     SecurityContext,
     build_auth_context_payload,
+    can_approve_workspace,
+    current_actor,
+    current_subject,
     ensure_deception_enabled,
     enforce_process_action_policy,
     ensure_dangerous_actions_enabled,
@@ -55,10 +59,11 @@ from services.malware_analyst_service import MalwareAnalystService
 from services.migration_service import MigrationService
 from services.mitre_service import MitreAttackService
 from services.observability_service import ObservabilityService
+from services.identity_provider import identity_provider
 from services.outbound_security import normalize_outbound_url
 from services.process_intelligence_service import ProcessIntelligenceService
 from services.response_service import ResponseOrchestrator
-from services.secret_store import secret_store
+from services.secret_store import is_encrypted_secret, secret_store
 from services.telemetry_service import CollectorTelemetryBridge, TelemetryMonitoringService
 from services.timeline_service import TimelineService
 from threat_intelligence import check_file_malwarebazaar, check_file_vt, check_file_yaraify, check_ip, fuse_detection_verdict, run_local_yara_scan, scan_process
@@ -70,6 +75,8 @@ OUT_DIR = BASE_DIR / "shadowlab_out"
 OUT_DIR.mkdir(exist_ok=True, parents=True)
 WHIDS_IMPORT_ROOT = OUT_DIR / "whids"
 WHIDS_IMPORT_ROOT.mkdir(exist_ok=True, parents=True)
+MITRE_IMPORT_ROOT = OUT_DIR / "mitre"
+MITRE_IMPORT_ROOT.mkdir(exist_ok=True, parents=True)
 
 
 def _configured_ossec_roots() -> list[Path]:
@@ -95,6 +102,10 @@ def _allowed_integration_import_roots(kind: str) -> list[Path]:
         for ossec_root in _configured_ossec_roots():
             roots.append(ossec_root)
             roots.append(ossec_root / "logs")
+    elif kind == "mitre":
+        roots.append(MITRE_IMPORT_ROOT)
+        roots.append(BASE_DIR)
+        roots.append(Path.home() / "Downloads")
     deduped: list[Path] = []
     for root in roots:
         if root not in deduped:
@@ -145,6 +156,7 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-ShadowLab-Approval-Id",
+        "X-ShadowLab-Workspace",
         "X-ShadowLab-Timestamp",
         "X-ShadowLab-Nonce",
         "X-ShadowLab-Signature",
@@ -152,8 +164,17 @@ app.add_middleware(
 )
 
 
+def _request_is_secure(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    return forwarded_proto == "https"
+
+
 @app.middleware("http")
 async def add_security_headers(request, call_next):
+    if security_settings.require_tls and not _request_is_secure(request) and request.url.path not in {"/health"}:
+        raise HTTPException(status_code=400, detail="HTTPS is required for this endpoint")
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -161,7 +182,8 @@ async def add_security_headers(request, call_next):
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    if request.url.scheme == "https":
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    if _request_is_secure(request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.method.upper() in {"POST", "PATCH", "DELETE"} and request.url.path not in {"/health"}:
         _consume_pending_approval(request, response.status_code)
@@ -198,7 +220,7 @@ canary_alerts: list[str] = []
 network_warfare_instance = None
 _raw_alert_webhook = os.environ.get("SHADOWLAB_ALERT_WEBHOOK", "")
 try:
-    alert_webhook_url = secret_store.decrypt_text(_raw_alert_webhook) if _raw_alert_webhook.startswith("enc:v1:") else _raw_alert_webhook
+    alert_webhook_url = secret_store.decrypt_text(_raw_alert_webhook) if is_encrypted_secret(_raw_alert_webhook) else _raw_alert_webhook
 except Exception:
     alert_webhook_url = ""
 if not alert_webhook_url:
@@ -221,6 +243,23 @@ SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
 INCIDENT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{0,128}$")
 CONNECTOR_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _request_workspace_id(request: Request) -> str:
+    return str(getattr(request.state, "workspace_id", "default") or "default")
+
+
+def _require_default_workspace_for_global_scope(request: Request, feature_name: str) -> None:
+    workspace_id = _request_workspace_id(request)
+    profile = str(getattr(security_module.security_settings, "policy_profile", "lab") or "lab").strip().lower() or "lab"
+    if profile in {"corp", "prod"} and workspace_id != "default":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"{feature_name} is not fully tenant-scoped yet; "
+                f"use the default workspace or a tenant-scoped endpoint in the {profile} profile"
+            ),
+        )
 
 
 class CasePriority(StrEnum):
@@ -329,9 +368,33 @@ class SandboxTraceRequest(BaseModel):
 class HoneypotRequest(BaseModel):
     filename: str = Field(default="passwords.txt")
 
+    @field_validator("filename")
+    @classmethod
+    def _validate_honeypot_filename(cls, value: str) -> str:
+        candidate = (value or "").strip()
+        if not candidate:
+            raise ValueError("filename is required")
+        if Path(candidate).name != candidate:
+            raise ValueError("filename must not include path separators")
+        if len(candidate) > 120:
+            raise ValueError("filename must be 120 characters or fewer")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", candidate):
+            raise ValueError("filename may contain only letters, digits, dot, underscore, and dash")
+        return candidate
+
 
 class EvidenceRequest(BaseModel):
     alert_name: str = Field(default="incident")
+
+    @field_validator("alert_name")
+    @classmethod
+    def _validate_alert_name(cls, value: str) -> str:
+        candidate = (value or "").strip() or "incident"
+        if len(candidate) > 80:
+            raise ValueError("alert_name must be 80 characters or fewer")
+        if not re.fullmatch(r"[A-Za-z0-9._ -]+", candidate):
+            raise ValueError("alert_name may contain only letters, digits, space, dot, underscore, and dash")
+        return candidate
 
 
 class NetworkScanRequest(BaseModel):
@@ -569,10 +632,7 @@ class MitreBundleLoadRequest(BaseModel):
     @field_validator("file_path")
     @classmethod
     def _validate_bundle_path(cls, value: str) -> str:
-        path = Path(value).expanduser()
-        if not str(path).strip():
-            raise ValueError("Bundle path is required")
-        return str(path)
+        return _validate_integration_import_path(value, kind="mitre")
 
     @field_validator("source")
     @classmethod
@@ -618,10 +678,7 @@ class MitrePathRequest(BaseModel):
     @field_validator("file_path")
     @classmethod
     def _validate_mitre_path(cls, value: str) -> str:
-        path = Path(value).expanduser()
-        if not str(path).strip():
-            raise ValueError("File path is required")
-        return str(path)
+        return _validate_integration_import_path(value, kind="mitre")
 
 
 class CaseCreateRequest(BaseModel):
@@ -833,6 +890,18 @@ class ApprovalResolveRequest(BaseModel):
     approver: str = ""
 
 
+class IdentityRevokeRequest(BaseModel):
+    subject: str = ""
+    token_id: str = ""
+    reason: str = ""
+    expires_at: float = 0.0
+
+    @field_validator("subject", "token_id", "reason")
+    @classmethod
+    def _normalize_identity_fields(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
 class DetectionLifecycleRequest(BaseModel):
     rule_id: str
     version: str = "1.0.0"
@@ -980,6 +1049,88 @@ def auth_context(
     return build_auth_context_payload(context, request)
 
 
+@app.get("/auth/oidc/status", dependencies=[Depends(require_admin)])
+def auth_oidc_status() -> dict[str, Any]:
+    settings = identity_provider.settings()
+    metadata: dict[str, Any] = {}
+    error = ""
+    if settings.enabled:
+        try:
+            discovered = identity_provider.discovery_metadata(settings)
+            metadata = {
+                "issuer": str(discovered.get("issuer", settings.issuer_url) or settings.issuer_url),
+                "jwks_uri": str(discovered.get("jwks_uri", settings.jwks_url) or settings.jwks_url),
+                "authorization_endpoint": str(discovered.get("authorization_endpoint", "") or ""),
+                "token_endpoint": str(discovered.get("token_endpoint", "") or ""),
+            }
+        except Exception as exc:
+            error = str(exc)
+    return {
+        "enabled": settings.enabled,
+        "issuer_url": settings.issuer_url,
+        "audience": settings.audience,
+        "client_id": settings.client_id,
+        "workspace_claim": settings.workspace_claim,
+        "role_claim": settings.role_claim,
+        "approver_claim": settings.approver_claim,
+        "metadata": metadata,
+        "error": error,
+    }
+
+
+@app.post("/auth/identity/revoke", dependencies=[Depends(require_admin)])
+def revoke_identity_session(request: Request, payload: IdentityRevokeRequest) -> dict[str, Any]:
+    workspace_id = _request_workspace_id(request)
+    actor = current_actor(request)
+    subject = payload.subject or current_subject(request)
+    if not subject:
+        raise HTTPException(status_code=400, detail="subject is required")
+    if not can_approve_workspace(request, workspace_id):
+        raise HTTPException(status_code=403, detail="Current identity may not manage approvals for this workspace")
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        revocation_id = db.revoke_identity_token(
+            conn,
+            issuer=identity_provider.settings().issuer_url,
+            subject=subject,
+            token_id=payload.token_id,
+            workspace_id=workspace_id,
+            actor=actor,
+            reason=payload.reason,
+            expires_at=float(payload.expires_at or 0),
+        )
+    finally:
+        conn.close()
+    return {
+        "revocation_id": revocation_id,
+        "workspace_id": workspace_id,
+        "subject": subject,
+        "token_id": payload.token_id,
+        "actor": actor,
+        "reason": payload.reason,
+    }
+
+
+@app.get("/auth/identity/revocations", dependencies=[Depends(require_admin)])
+def list_identity_revocations(request: Request, subject: str = "") -> list[dict[str, Any]]:
+    workspace_id = _request_workspace_id(request)
+    conn = db.create_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        rows = db.get_identity_revocations(
+            conn,
+            workspace_id=workspace_id,
+            subject=str(subject or "").strip(),
+            issuer=identity_provider.settings().issuer_url,
+        ).fillna("").to_dict(orient="records")
+    finally:
+        conn.close()
+    return rows
+
+
 @app.get("/enterprise/policy", dependencies=[Depends(require_admin)])
 def enterprise_policy() -> dict[str, Any]:
     return enterprise_service.get_policy_profiles()
@@ -1006,9 +1157,9 @@ def enterprise_mitre_load_bundle(payload: MitreBundleLoadRequest) -> dict[str, A
 
 
 @app.get("/enterprise/mitre/summary", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_mitre_summary(limit: int = 50) -> dict[str, Any]:
+def enterprise_mitre_summary(request: Request, limit: int = 50) -> dict[str, Any]:
     try:
-        return mitre_service.enterprise_summary(limit=max(1, min(limit, 500)))
+        return mitre_service.enterprise_summary(limit=max(1, min(limit, 500)), workspace_id=_request_workspace_id(request))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1047,9 +1198,9 @@ def enterprise_mitre_technique(attack_id: str) -> dict[str, Any]:
 
 
 @app.get("/enterprise/mitre/incidents/{incident_id}/coverage", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_mitre_incident_coverage(incident_id: str) -> dict[str, Any]:
+def enterprise_mitre_incident_coverage(request: Request, incident_id: str) -> dict[str, Any]:
     try:
-        return mitre_service.incident_coverage(_validated_incident_id(incident_id))
+        return mitre_service.incident_coverage(_validated_incident_id(incident_id), workspace_id=_request_workspace_id(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1057,15 +1208,15 @@ def enterprise_mitre_incident_coverage(incident_id: str) -> dict[str, Any]:
 
 
 @app.get("/enterprise/cases/{case_id}/mitre", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_mitre_case_coverage(case_id: int) -> dict[str, Any]:
+def enterprise_mitre_case_coverage(request: Request, case_id: int) -> dict[str, Any]:
     try:
-        return mitre_service.case_coverage(case_id)
+        return mitre_service.case_coverage(case_id, workspace_id=_request_workspace_id(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/enterprise/mitre/navigator/export", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_mitre_export_navigator(payload: NavigatorExportRequest) -> dict[str, Any]:
+def enterprise_mitre_export_navigator(request: Request, payload: NavigatorExportRequest) -> dict[str, Any]:
     try:
         return mitre_service.export_navigator_layer(
             incident_ids=payload.incident_ids,
@@ -1073,6 +1224,7 @@ def enterprise_mitre_export_navigator(payload: NavigatorExportRequest) -> dict[s
             layer_name=payload.layer_name,
             description=payload.description,
             include_subtechniques=payload.include_subtechniques,
+            workspace_id=_request_workspace_id(request),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1081,9 +1233,9 @@ def enterprise_mitre_export_navigator(payload: NavigatorExportRequest) -> dict[s
 
 
 @app.post("/enterprise/mitre/workbench/export", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_mitre_export_workbench(payload: NavigatorExportRequest) -> dict[str, Any]:
+def enterprise_mitre_export_workbench(request: Request, payload: NavigatorExportRequest) -> dict[str, Any]:
     try:
-        return mitre_service.workbench_export(incident_ids=payload.incident_ids, case_id=payload.case_id)
+        return mitre_service.workbench_export(incident_ids=payload.incident_ids, case_id=payload.case_id, workspace_id=_request_workspace_id(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1091,32 +1243,33 @@ def enterprise_mitre_export_workbench(payload: NavigatorExportRequest) -> dict[s
 
 
 @app.get("/enterprise/triage", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_triage() -> dict[str, Any]:
-    return enterprise_service.triage_dashboard()
+def enterprise_triage(request: Request) -> dict[str, Any]:
+    return enterprise_service.triage_dashboard(workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/cases", dependencies=[Depends(require_analyst_or_admin)])
-def create_enterprise_case(payload: CaseCreateRequest) -> dict[str, Any]:
-    return enterprise_service.create_case(**payload.model_dump())
+def create_enterprise_case(request: Request, payload: CaseCreateRequest) -> dict[str, Any]:
+    return enterprise_service.create_case(workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/cases", dependencies=[Depends(require_analyst_or_admin)])
-def list_enterprise_cases() -> list[dict[str, Any]]:
-    return enterprise_service.list_cases()
+def list_enterprise_cases(request: Request) -> list[dict[str, Any]]:
+    return enterprise_service.list_cases(workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/cases/{case_id}/chain", dependencies=[Depends(require_analyst_or_admin)])
-def add_case_chain_event(case_id: int, payload: ChainOfCustodyRequest) -> dict[str, Any]:
-    return enterprise_service.add_chain_of_custody_event(case_id, payload.event_type, payload.actor, payload.artifact_path, payload.notes)
+def add_case_chain_event(request: Request, case_id: int, payload: ChainOfCustodyRequest) -> dict[str, Any]:
+    return enterprise_service.add_chain_of_custody_event(case_id, payload.event_type, payload.actor, payload.artifact_path, payload.notes, workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/cases/{case_id}/chain", dependencies=[Depends(require_analyst_or_admin)])
-def case_chain(case_id: int) -> list[dict[str, Any]]:
-    return enterprise_service.get_chain_of_custody(case_id)
+def case_chain(request: Request, case_id: int) -> list[dict[str, Any]]:
+    return enterprise_service.get_chain_of_custody(case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/investigations/workspace", dependencies=[Depends(require_analyst_or_admin)])
 def enterprise_investigation_workspace(
+    request: Request,
     query_text: str = "",
     event_types: str = "",
     severities: str = "",
@@ -1126,6 +1279,7 @@ def enterprise_investigation_workspace(
     case_id: int | None = None,
 ) -> dict[str, Any]:
     return investigation_service.workspace(
+        workspace_id=_request_workspace_id(request),
         query_text=query_text,
         event_types=_parse_csv_query_values(event_types),
         severities=_parse_csv_query_values(severities),
@@ -1137,8 +1291,9 @@ def enterprise_investigation_workspace(
 
 
 @app.post("/enterprise/investigations/views", dependencies=[Depends(require_analyst_or_admin)])
-def create_investigation_view(payload: InvestigationViewRequest) -> dict[str, Any]:
+def create_investigation_view(request: Request, payload: InvestigationViewRequest) -> dict[str, Any]:
     return investigation_service.create_saved_view(
+        workspace_id=_request_workspace_id(request),
         name=payload.name,
         description=payload.description,
         query_text=payload.query_text,
@@ -1152,63 +1307,64 @@ def create_investigation_view(payload: InvestigationViewRequest) -> dict[str, An
 
 
 @app.get("/enterprise/investigations/views", dependencies=[Depends(require_analyst_or_admin)])
-def list_investigation_views(case_id: int | None = None) -> list[dict[str, Any]]:
-    return investigation_service.list_saved_views(case_id=case_id)
+def list_investigation_views(request: Request, case_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_saved_views(case_id=case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/investigations/notes", dependencies=[Depends(require_analyst_or_admin)])
-def create_investigation_note(payload: InvestigationNoteRequest) -> dict[str, Any]:
-    return investigation_service.create_note(**payload.model_dump())
+def create_investigation_note(request: Request, payload: InvestigationNoteRequest) -> dict[str, Any]:
+    return investigation_service.create_note(workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/investigations/notes", dependencies=[Depends(require_analyst_or_admin)])
-def list_investigation_notes(case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
-    return investigation_service.list_notes(case_id=case_id, view_id=view_id)
+def list_investigation_notes(request: Request, case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_notes(case_id=case_id, view_id=view_id, workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/investigations/stories", dependencies=[Depends(require_analyst_or_admin)])
-def create_investigation_story(payload: InvestigationStoryRequest) -> dict[str, Any]:
-    return investigation_service.create_story(**payload.model_dump())
+def create_investigation_story(request: Request, payload: InvestigationStoryRequest) -> dict[str, Any]:
+    return investigation_service.create_story(workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/investigations/stories", dependencies=[Depends(require_analyst_or_admin)])
-def list_investigation_stories(case_id: int | None = None) -> list[dict[str, Any]]:
-    return investigation_service.list_stories(case_id=case_id)
+def list_investigation_stories(request: Request, case_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_stories(case_id=case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/investigations/pins", dependencies=[Depends(require_analyst_or_admin)])
-def create_investigation_pin(payload: InvestigationPinRequest) -> dict[str, Any]:
-    return investigation_service.create_pin(**payload.model_dump())
+def create_investigation_pin(request: Request, payload: InvestigationPinRequest) -> dict[str, Any]:
+    return investigation_service.create_pin(workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/investigations/pins", dependencies=[Depends(require_analyst_or_admin)])
-def list_investigation_pins(case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
-    return investigation_service.list_pins(case_id=case_id, view_id=view_id)
+def list_investigation_pins(request: Request, case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
+    return investigation_service.list_pins(case_id=case_id, view_id=view_id, workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/cases/{case_id}/board", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_case_board(case_id: int) -> dict[str, Any]:
-    return investigation_service.case_board(case_id=case_id)
+def enterprise_case_board(request: Request, case_id: int) -> dict[str, Any]:
+    return investigation_service.case_board(case_id=case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/cases/{case_id}/graph", dependencies=[Depends(require_analyst_or_admin)])
-def enterprise_case_graph(case_id: int) -> dict[str, Any]:
+def enterprise_case_graph(request: Request, case_id: int) -> dict[str, Any]:
     conn = db.create_connection()
     if conn is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     try:
-        cases = db.get_case_records(conn).fillna("").to_dict(orient="records")
+        workspace_id = _request_workspace_id(request)
+        cases = db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         case_record = next((item for item in cases if int(item.get("id", 0) or 0) == case_id), None)
         if case_record is None:
             raise HTTPException(status_code=404, detail="Case not found")
         assignments = db.get_case_assignments(conn, case_id).fillna("").to_dict(orient="records")
         tasks = db.get_case_tasks(conn, case_id).fillna("").to_dict(orient="records")
-        activity = db.get_case_activity(conn, case_id).fillna("").to_dict(orient="records")
+        activity = db.get_case_activity(conn, case_id, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         pins = db.get_investigation_pins(conn, case_id=case_id).fillna("").to_dict(orient="records")
         notes = db.get_investigation_notes(conn, case_id=case_id).fillna("").to_dict(orient="records")
         stories = db.get_investigation_stories(conn, case_id=case_id).fillna("").to_dict(orient="records")
-        incidents = db.get_incidents(conn).fillna("").to_dict(orient="records")
-        hosts_data = fleet_service.list_hosts(conn)
+        incidents = db.get_incidents(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+        hosts_data = fleet_service.list_hosts(conn, workspace_id=workspace_id)
     finally:
         conn.close()
     processes = process_intel_service.snapshot_processes(include_deep_fields=False)
@@ -1236,61 +1392,73 @@ def enterprise_case_graph(case_id: int) -> dict[str, Any]:
 
 
 @app.post("/enterprise/cases/{case_id}/assignments", dependencies=[Depends(require_analyst_or_admin)])
-def create_case_assignment(case_id: int, payload: CaseAssignmentRequest) -> dict[str, Any]:
-    return investigation_service.assign_analyst(case_id=case_id, **payload.model_dump())
+def create_case_assignment(request: Request, case_id: int, payload: CaseAssignmentRequest) -> dict[str, Any]:
+    return investigation_service.assign_analyst(case_id=case_id, workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/cases/{case_id}/assignments", dependencies=[Depends(require_analyst_or_admin)])
-def list_case_assignments(case_id: int) -> list[dict[str, Any]]:
-    return investigation_service.list_assignments(case_id=case_id)
+def list_case_assignments(request: Request, case_id: int) -> list[dict[str, Any]]:
+    return investigation_service.list_assignments(case_id=case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/cases/{case_id}/tasks", dependencies=[Depends(require_analyst_or_admin)])
-def create_case_task(case_id: int, payload: CaseTaskRequest) -> dict[str, Any]:
-    return investigation_service.create_task(case_id=case_id, **payload.model_dump())
+def create_case_task(request: Request, case_id: int, payload: CaseTaskRequest) -> dict[str, Any]:
+    return investigation_service.create_task(case_id=case_id, workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/cases/{case_id}/tasks", dependencies=[Depends(require_analyst_or_admin)])
-def list_case_tasks(case_id: int) -> list[dict[str, Any]]:
-    return investigation_service.list_tasks(case_id=case_id)
+def list_case_tasks(request: Request, case_id: int) -> list[dict[str, Any]]:
+    return investigation_service.list_tasks(case_id=case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.patch("/enterprise/cases/{case_id}/tasks/{task_id}", dependencies=[Depends(require_analyst_or_admin)])
-def update_case_task(case_id: int, task_id: int, payload: CaseTaskUpdateRequest) -> dict[str, Any]:
-    return investigation_service.update_task(case_id=case_id, task_id=task_id, **payload.model_dump())
+def update_case_task(request: Request, case_id: int, task_id: int, payload: CaseTaskUpdateRequest) -> dict[str, Any]:
+    return investigation_service.update_task(case_id=case_id, task_id=task_id, workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.get("/enterprise/cases/{case_id}/activity", dependencies=[Depends(require_analyst_or_admin)])
-def list_case_activity(case_id: int) -> list[dict[str, Any]]:
-    return investigation_service.list_activity(case_id=case_id)
+def list_case_activity(request: Request, case_id: int) -> list[dict[str, Any]]:
+    return investigation_service.list_activity(case_id=case_id, workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/cases/{case_id}/investigation-report/export", dependencies=[Depends(require_admin)])
-def export_case_investigation_report(case_id: int) -> dict[str, Any]:
-    result = investigation_service.export_case_report(case_id=case_id, out_dir=str(OUT_DIR))
+def export_case_investigation_report(request: Request, case_id: int) -> dict[str, Any]:
+    workspace_id = _request_workspace_id(request)
+    result = investigation_service.export_case_report(case_id=case_id, out_dir=str(_workspace_artifact_dir(workspace_id)), workspace_id=workspace_id)
     observability_service.log_event(
         "investigation_report_exported",
         case_id=case_id,
         json_path=result.get("json_path", ""),
         html_path=result.get("html_path", ""),
+        workspace_id=workspace_id,
     )
     integrity_service.refresh_manifest()
     return result
 
 
 @app.post("/enterprise/approvals", dependencies=[Depends(require_analyst_or_admin)])
-def request_enterprise_approval(payload: ApprovalRequestModel) -> dict[str, Any]:
-    return enterprise_service.request_approval(**payload.model_dump())
+def request_enterprise_approval(request: Request, payload: ApprovalRequestModel) -> dict[str, Any]:
+    actor = current_actor(request)
+    if actor and payload.requested_by and payload.requested_by.strip().lower() != actor:
+        raise HTTPException(status_code=403, detail="requested_by must match the authenticated actor")
+    return enterprise_service.request_approval(workspace_id=_request_workspace_id(request), **payload.model_dump())
 
 
 @app.patch("/enterprise/approvals/{approval_id}", dependencies=[Depends(require_admin)])
-def resolve_enterprise_approval(approval_id: int, payload: ApprovalResolveRequest) -> dict[str, Any]:
-    return enterprise_service.resolve_approval(approval_id, payload.status, payload.approver)
+def resolve_enterprise_approval(request: Request, approval_id: int, payload: ApprovalResolveRequest) -> dict[str, Any]:
+    actor = current_actor(request)
+    workspace_id = _request_workspace_id(request)
+    if actor and payload.approver and payload.approver.strip().lower() != actor:
+        raise HTTPException(status_code=403, detail="approver must match the authenticated actor")
+    if actor and not can_approve_workspace(request, workspace_id):
+        raise HTTPException(status_code=403, detail="Current identity may not approve actions for this workspace")
+    effective_approver = payload.approver or actor
+    return enterprise_service.resolve_approval(approval_id, payload.status, effective_approver, workspace_id=workspace_id)
 
 
 @app.get("/enterprise/approvals", dependencies=[Depends(require_analyst_or_admin)])
-def list_enterprise_approvals() -> list[dict[str, Any]]:
-    return enterprise_service.list_approvals()
+def list_enterprise_approvals(request: Request) -> list[dict[str, Any]]:
+    return enterprise_service.list_approvals(workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/detections/lifecycle", dependencies=[Depends(require_analyst_or_admin)])
@@ -1309,39 +1477,45 @@ def submit_false_positive(payload: FalsePositiveRequest) -> dict[str, Any]:
 
 
 @app.get("/enterprise/connectors", dependencies=[Depends(require_admin)])
-def list_enterprise_connectors() -> list[dict[str, Any]]:
-    return enterprise_service.list_connectors()
+def list_enterprise_connectors(request: Request) -> list[dict[str, Any]]:
+    return enterprise_service.list_connectors(workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/connectors", dependencies=[Depends(require_admin)])
-def configure_enterprise_connector(payload: ConnectorConfigRequest) -> dict[str, Any]:
-    return enterprise_service.configure_connector(payload.name, payload.kind, payload.enabled, payload.config)
+def configure_enterprise_connector(request: Request, payload: ConnectorConfigRequest) -> dict[str, Any]:
+    try:
+        return enterprise_service.configure_connector(payload.name, payload.kind, payload.enabled, payload.config, workspace_id=_request_workspace_id(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/enterprise/connectors/dispatch", dependencies=[Depends(require_admin)])
 def dispatch_enterprise_connector_event(request: Request, payload: ConnectorDispatchRequest) -> dict[str, Any]:
     _apply_rate_limit(request, bucket="connector_dispatch", detail="Too many connector dispatch attempts. Wait briefly and retry.")
+    _require_enterprise_approval(request, action_name="connector:dispatch")
     return enterprise_service.dispatch_connector_event(
         event_type=payload.event_type,
         payload=payload.payload,
         source=payload.source,
         severity=payload.severity,
+        workspace_id=_request_workspace_id(request),
     )
 
 
 @app.post("/enterprise/connectors/queue/process", dependencies=[Depends(require_admin)])
-def process_enterprise_connector_queue(payload: ConnectorQueueProcessRequest) -> dict[str, Any]:
-    return enterprise_service.process_connector_queue(payload.limit)
+def process_enterprise_connector_queue(request: Request, payload: ConnectorQueueProcessRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="connector:queue:process")
+    return enterprise_service.process_connector_queue(payload.limit, workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/connectors/queue", dependencies=[Depends(require_admin)])
-def enterprise_connector_queue(status: str = "", limit: int = 100) -> list[dict[str, Any]]:
-    return enterprise_service.connector_queue_status(status=status, limit=limit)
+def enterprise_connector_queue(request: Request, status: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    return enterprise_service.connector_queue_status(status=status, limit=limit, workspace_id=_request_workspace_id(request))
 
 
 @app.get("/enterprise/abuse/summary", dependencies=[Depends(require_admin)])
-def enterprise_abuse_summary() -> dict[str, Any]:
-    return enterprise_service.abuse_summary()
+def enterprise_abuse_summary(request: Request) -> dict[str, Any]:
+    return enterprise_service.abuse_summary(workspace_id=_request_workspace_id(request))
 
 
 @app.post("/enterprise/maintenance/retention", dependencies=[Depends(require_admin)])
@@ -1385,21 +1559,25 @@ def enterprise_database_readiness() -> dict[str, Any]:
 
 
 @app.get("/enterprise/report/security-ops", dependencies=[Depends(require_admin)])
-def enterprise_security_ops_report() -> dict[str, Any]:
+def enterprise_security_ops_report(request: Request) -> dict[str, Any]:
+    workspace_id = _request_workspace_id(request)
     return {
-        "integrity": integrity_service.verify_manifest(),
-        "abuse": enterprise_service.abuse_summary(),
+        "integrity": integrity_service.verify_manifest(workspace_id=workspace_id),
+        "abuse": enterprise_service.abuse_summary(workspace_id=workspace_id),
         "observability": observability_service.summary(),
         "database": enterprise_database_readiness(),
-        "artifacts": _artifact_manifest(),
+        "artifacts": _artifact_manifest(workspace_id),
+        "workspace_id": workspace_id,
     }
 
 
 @app.post("/enterprise/report/security-ops/export", dependencies=[Depends(require_admin)])
-def enterprise_security_ops_report_export() -> dict[str, Any]:
-    report = enterprise_security_ops_report()
-    report_json = OUT_DIR / "SecurityOps_Report.json"
-    report_html = OUT_DIR / "SecurityOps_Report.html"
+def enterprise_security_ops_report_export(request: Request) -> dict[str, Any]:
+    report = enterprise_security_ops_report(request)
+    workspace_id = _request_workspace_id(request)
+    target_dir = _workspace_artifact_dir(workspace_id)
+    report_json = target_dir / "SecurityOps_Report.json"
+    report_html = target_dir / "SecurityOps_Report.html"
     report_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
     html_body = (
         "<html><body style='font-family:Segoe UI,Arial,sans-serif;background:#10151d;color:#eef4fb;padding:24px;'>"
@@ -1408,13 +1586,13 @@ def enterprise_security_ops_report_export() -> dict[str, Any]:
         "</body></html>"
     )
     report_html.write_text(html_body, encoding="utf-8")
-    observability_service.log_event("security_ops_report_exported", json_path=str(report_json), html_path=str(report_html))
+    observability_service.log_event("security_ops_report_exported", json_path=str(report_json), html_path=str(report_html), workspace_id=workspace_id)
     integrity_service.refresh_manifest()
-    return {"status": "exported", "json_path": str(report_json), "html_path": str(report_html)}
+    return {"status": "exported", "json_path": str(report_json), "html_path": str(report_html), "workspace_id": workspace_id}
 
 
 @app.post("/enterprise/secrets/rotate", dependencies=[Depends(require_admin)])
-def enterprise_rotate_secrets(payload: SecretRotationRequest) -> dict[str, Any]:
+def enterprise_rotate_secrets(request: Request, payload: SecretRotationRequest) -> dict[str, Any]:
     global alert_webhook_url
     rotated: list[str] = []
     conn = db.create_connection()
@@ -1422,14 +1600,21 @@ def enterprise_rotate_secrets(payload: SecretRotationRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
         if payload.reencrypt_connector_secrets:
-            connectors = db.get_connectors(conn).fillna("").to_dict(orient="records")
+            connectors = db.get_connectors(conn, workspace_id=_request_workspace_id(request)).fillna("").to_dict(orient="records")
             for item in connectors:
                 name = str(item.get("name", "")).strip().lower()
                 raw_config = item.get("config_json", "{}")
                 parsed = json.loads(raw_config or "{}") if isinstance(raw_config, str) else (raw_config or {})
                 revealed = secret_store.reveal_config(parsed)
                 protected = secret_store.protect_config(revealed)
-                db.upsert_connector(conn, name, str(item.get("kind", "")), bool(item.get("enabled")), json.dumps(protected))
+                db.upsert_connector(
+                    conn,
+                    name,
+                    str(item.get("kind", "")),
+                    bool(item.get("enabled")),
+                    json.dumps(protected),
+                    workspace_id=str(item.get("workspace_id", _request_workspace_id(request)) or _request_workspace_id(request)),
+                )
             rotated.append("connector_secrets")
             db.log_secret_rotation(conn, "connector_secrets", "rotate", detail="Connector secrets were re-encrypted")
         if payload.clear_alert_webhook:
@@ -1470,7 +1655,7 @@ def enterprise_secret_status() -> dict[str, Any]:
     return {
         "stored_alert_webhook": stored_webhook,
         "rotation_history": history,
-        "integrity_history": integrity_service.history(limit=20),
+        "integrity_history": integrity_service.history(limit=20, workspace_id=workspace_id),
     }
 
 
@@ -1521,6 +1706,8 @@ def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
     _apply_rate_limit(request, bucket="monitor_run", detail="Too many monitor runs. Wait briefly and retry.")
     observability_service.log_event("monitor_run_requested", duration=payload.duration, interval=payload.interval)
     with observability_service.span("monitor.run"):
+        workspace_id = _request_workspace_id(request)
+        artifact_dir = _workspace_artifact_dir(workspace_id)
         telemetry_service = TelemetryMonitoringService(config)
         telemetry_rows: list[dict[str, Any]] = []
         timeline_scores: list[float] = []
@@ -1537,11 +1724,11 @@ def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
         final = detection_service.final_score(telemetry_rows, defender_summary, sysmon_summary)
         incident = detection_service.build_incident(telemetry_rows, defender_summary, sysmon_summary)
 
-        _write_monitor_artifacts(telemetry_rows, defender_summary, sysmon_summary, final, payload.report_sections, incident)
+        _write_monitor_artifacts(artifact_dir, telemetry_rows, defender_summary, sysmon_summary, final, payload.report_sections, incident)
 
         conn = db.create_connection()
         if conn:
-            db.insert_telemetry(conn, telemetry_rows)
+            db.insert_telemetry(conn, telemetry_rows, workspace_id=workspace_id)
             db.upsert_incident(
                 conn,
                 incident.incident_id,
@@ -1555,8 +1742,9 @@ def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
                 attack_chain=json.dumps(incident.attack_chain),
                 mitre_mapping=json.dumps(incident.mitre_techniques),
                 correlation_story=incident.correlation_story,
+                workspace_id=workspace_id,
             )
-            fleet_service.register_local_host(conn)
+            fleet_service.register_local_host(conn, workspace_id=workspace_id)
             conn.close()
 
         if alert_webhook_url and incident.severity.lower() in {"high", "critical"}:
@@ -1582,6 +1770,7 @@ def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
                         incident.title,
                         alert_result.status,
                         alert_result.detail,
+                        workspace_id=workspace_id,
                     )
                 finally:
                     conn.close()
@@ -1596,7 +1785,7 @@ def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
                 final,
                 incident.to_dict(),
             )
-            _log_collector_exports(collector_export)
+            _log_collector_exports(collector_export, workspace_id=workspace_id)
 
         observability_service.log_event("monitor_run_completed", telemetry_count=len(telemetry_rows), severity=incident.severity)
         return {
@@ -1610,7 +1799,8 @@ def run_monitor(request: Request, payload: MonitorRequest) -> dict[str, Any]:
             "final_score": final,
             "incident": incident.to_dict(),
             "collector_export": collector_export,
-            "artifacts": _artifact_manifest(),
+            "artifacts": _artifact_manifest(workspace_id),
+            "workspace_id": workspace_id,
         }
 
 
@@ -1863,16 +2053,17 @@ def process_action(request: Request, pid: int, action: str, process_name: str) -
         )
     effective_process_name = actual_process_name or requested_process_name
     enforce_process_action_policy(request, effective_process_name)
+    workspace_id = _request_workspace_id(request)
     if action_name == "suspend":
-        result = response_service.suspend(pid, effective_process_name)
+        result = response_service.suspend(pid, effective_process_name, workspace_id=workspace_id)
     elif action_name == "resume":
-        result = response_service.resume(pid, effective_process_name)
+        result = response_service.resume(pid, effective_process_name, workspace_id=workspace_id)
     elif action_name == "kill":
-        result = response_service.kill(pid, effective_process_name)
+        result = response_service.kill(pid, effective_process_name, workspace_id=workspace_id)
     elif action_name == "kill-tree":
-        result = response_service.kill_tree(pid, effective_process_name)
+        result = response_service.kill_tree(pid, effective_process_name, workspace_id=workspace_id)
     elif action_name == "quarantine":
-        result = response_service.quarantine_file(pid, effective_process_name, profile.get("exe"))
+        result = response_service.quarantine_file(pid, effective_process_name, profile.get("exe"), workspace_id=workspace_id)
     else:
         raise HTTPException(status_code=400, detail="Unsupported action")
     if not result["ok"]:
@@ -1881,7 +2072,15 @@ def process_action(request: Request, pid: int, action: str, process_name: str) -
         conn = db.create_connection()
         if conn:
             try:
-                db.log_quarantine(conn, pid, effective_process_name, profile.get("exe"), result.get("path", ""), "active")
+                db.log_quarantine(
+                    conn,
+                    pid,
+                    effective_process_name,
+                    profile.get("exe"),
+                    result.get("path", ""),
+                    "active",
+                    workspace_id=_request_workspace_id(request),
+                )
             finally:
                 conn.close()
         integrity_service.refresh_manifest()
@@ -1914,6 +2113,7 @@ def remediate_persistence(request: Request, payload: PersistenceRemediationReque
                 backup_path=result.get("backup_path", ""),
                 rollback_data=json.dumps(result.get("rollback_data", {})),
                 status="applied",
+                workspace_id=_request_workspace_id(request),
             )
         finally:
             conn.close()
@@ -1930,7 +2130,7 @@ def rollback_persistence(request: Request, remediation_id: int) -> dict[str, Any
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_remediations(conn)
+        frame = db.get_remediations(conn, workspace_id=_request_workspace_id(request))
         row = frame[frame["id"] == remediation_id]
         if row.empty:
             raise HTTPException(status_code=404, detail="Remediation record not found")
@@ -1944,7 +2144,7 @@ def rollback_persistence(request: Request, remediation_id: int) -> dict[str, Any
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("message", "Rollback failed"))
-        db.update_remediation_status(conn, remediation_id, "rolled_back")
+        db.update_remediation_status(conn, remediation_id, "rolled_back", workspace_id=_request_workspace_id(request))
         return {"status": "rolled_back", "remediation_id": remediation_id, "result": result}
     finally:
         conn.close()
@@ -1996,109 +2196,111 @@ def malware_analyst_process(pid: int) -> dict[str, Any]:
 
 
 @app.get("/history/telemetry", dependencies=[Depends(require_analyst_or_admin)])
-def telemetry_history() -> list[dict[str, Any]]:
+def telemetry_history(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        history_df = db.get_historical_data(conn)
+        history_df = db.get_historical_data(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return history_df.to_dict(orient="records")
 
 
 @app.get("/history/responses", dependencies=[Depends(require_analyst_or_admin)])
-def response_history() -> list[dict[str, Any]]:
+def response_history(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        response_df = db.get_response_logs(conn)
+        response_df = db.get_response_logs(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return response_df.to_dict(orient="records")
 
 
 @app.get("/incidents", dependencies=[Depends(require_analyst_or_admin)])
-def incidents() -> list[dict[str, Any]]:
+def incidents(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_incidents(conn)
+        frame = db.get_incidents(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
-    return frame.to_dict(orient="records")
+    workspace_id = _request_workspace_id(request)
+    return [item for item in frame.to_dict(orient="records") if str(item.get("workspace_id", "default")) == workspace_id]
 
 
 @app.get("/history/alerts", dependencies=[Depends(require_analyst_or_admin)])
-def alert_history() -> list[dict[str, Any]]:
+def alert_history(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_alerts(conn)
+        frame = db.get_alerts(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.to_dict(orient="records")
 
 
 @app.get("/history/remediations", dependencies=[Depends(require_analyst_or_admin)])
-def remediation_history() -> list[dict[str, Any]]:
+def remediation_history(request: Request) -> list[dict[str, Any]]:
+    _require_default_workspace_for_global_scope(request, "Remediation history")
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_remediations(conn)
+        frame = db.get_remediations(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.to_dict(orient="records")
 
 
 @app.get("/history/auth", dependencies=[Depends(require_admin)])
-def auth_history() -> list[dict[str, Any]]:
+def auth_history(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_auth_logs(conn)
+        frame = db.get_auth_logs(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.to_dict(orient="records")
 
 
 @app.get("/history/actions", dependencies=[Depends(require_admin)])
-def action_history() -> list[dict[str, Any]]:
+def action_history(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_action_audits(conn)
+        frame = db.get_action_audits(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.to_dict(orient="records")
 
 
 @app.get("/history/external", dependencies=[Depends(require_admin)])
-def external_request_history() -> list[dict[str, Any]]:
+def external_request_history(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_external_requests(conn)
+        frame = db.get_external_requests(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.to_dict(orient="records")
 
 
 @app.get("/history/auth/anomalies", dependencies=[Depends(require_admin)])
-def auth_anomalies() -> list[dict[str, Any]]:
+def auth_anomalies(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        auth_rows = db.get_auth_logs(conn).fillna("").to_dict(orient="records")
-        action_rows = db.get_action_audits(conn).fillna("").to_dict(orient="records")
+        auth_rows = db.get_auth_logs(conn, workspace_id=_request_workspace_id(request)).fillna("").to_dict(orient="records")
+        action_rows = db.get_action_audits(conn, workspace_id=_request_workspace_id(request)).fillna("").to_dict(orient="records")
     finally:
         conn.close()
     return _build_auth_anomalies(auth_rows, action_rows)
@@ -2117,12 +2319,12 @@ def update_incident(incident_id: str, payload: IncidentUpdateRequest) -> dict[st
 
 
 @app.get("/quarantine", dependencies=[Depends(require_analyst_or_admin)])
-def quarantine_items() -> list[dict[str, Any]]:
+def quarantine_items(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_quarantine(conn)
+        frame = db.get_quarantine(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.to_dict(orient="records")
@@ -2135,7 +2337,7 @@ def restore_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_quarantine(conn)
+        frame = db.get_quarantine(conn, workspace_id=_request_workspace_id(request))
         row = frame[frame["id"] == quarantine_id]
         if row.empty:
             raise HTTPException(status_code=404, detail="Quarantine record not found")
@@ -2147,7 +2349,7 @@ def restore_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
             raise HTTPException(status_code=409, detail="Original path already exists; refusing to overwrite during restore")
         target.parent.mkdir(parents=True, exist_ok=True)
         source.replace(target)
-        db.update_quarantine(conn, quarantine_id, "restored")
+        db.update_quarantine(conn, quarantine_id, "restored", workspace_id=_request_workspace_id(request))
         integrity_service.refresh_manifest()
         return {"status": "restored", "path": str(target)}
     finally:
@@ -2161,7 +2363,7 @@ def delete_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_quarantine(conn)
+        frame = db.get_quarantine(conn, workspace_id=_request_workspace_id(request))
         row = frame[frame["id"] == quarantine_id]
         if row.empty:
             raise HTTPException(status_code=404, detail="Quarantine record not found")
@@ -2169,7 +2371,7 @@ def delete_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
         target = _validate_quarantine_file_path(item["quarantine_path"])
         if target.exists():
             target.unlink()
-        db.update_quarantine(conn, quarantine_id, "deleted")
+        db.update_quarantine(conn, quarantine_id, "deleted", workspace_id=_request_workspace_id(request))
         integrity_service.refresh_manifest()
         return {"status": "deleted", "path": str(target)}
     finally:
@@ -2177,48 +2379,50 @@ def delete_quarantine(request: Request, quarantine_id: int) -> dict[str, Any]:
 
 
 @app.get("/timeline", dependencies=[Depends(require_analyst_or_admin)])
-def timeline() -> list[dict[str, Any]]:
+def timeline(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         return []
     try:
+        workspace_id = _request_workspace_id(request)
         return timeline_service.build(
-            telemetry_rows=db.get_historical_data(conn).to_dict(orient="records")[-100:],
-            response_rows=db.get_response_logs(conn).to_dict(orient="records")[:100],
-            incident_rows=db.get_incidents(conn).to_dict(orient="records")[:100],
-            alert_rows=db.get_alerts(conn).to_dict(orient="records")[:100],
-            remediation_rows=db.get_remediations(conn).to_dict(orient="records")[:100],
+            telemetry_rows=db.get_historical_data(conn, workspace_id=workspace_id).to_dict(orient="records")[-100:],
+            response_rows=db.get_response_logs(conn, workspace_id=workspace_id).to_dict(orient="records")[:100],
+            incident_rows=db.get_incidents(conn, workspace_id=workspace_id).to_dict(orient="records")[:100],
+            alert_rows=db.get_alerts(conn, workspace_id=workspace_id).to_dict(orient="records")[:100],
+            remediation_rows=db.get_remediations(conn, workspace_id=workspace_id).to_dict(orient="records")[:100],
         )
     finally:
         conn.close()
 
 
 @app.get("/timeline/graph", dependencies=[Depends(require_analyst_or_admin)])
-def timeline_graph() -> dict[str, Any]:
-    items = timeline()
+def timeline_graph(request: Request) -> dict[str, Any]:
+    items = timeline(request)
     return timeline_service.build_graph(items)
 
 
 @app.get("/hosts", dependencies=[Depends(require_analyst_or_admin)])
-def hosts() -> list[dict[str, Any]]:
+def hosts(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        return fleet_service.list_hosts(conn)
+        return fleet_service.list_hosts(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
 
 
 @app.get("/graph/entity-map", dependencies=[Depends(require_analyst_or_admin)])
-def entity_map(pid: int | None = None) -> dict[str, Any]:
+def entity_map(request: Request, pid: int | None = None) -> dict[str, Any]:
     conn = db.create_connection()
     incidents: list[dict[str, Any]] = []
     hosts_data: list[dict[str, Any]] = []
     if conn:
         try:
-            incidents = db.get_incidents(conn).to_dict(orient="records")
-            hosts_data = fleet_service.list_hosts(conn)
+            workspace_id = _request_workspace_id(request)
+            incidents = db.get_incidents(conn, workspace_id=workspace_id).to_dict(orient="records")
+            hosts_data = fleet_service.list_hosts(conn, workspace_id=workspace_id)
         finally:
             conn.close()
     processes = process_intel_service.snapshot_processes(include_deep_fields=False)
@@ -2249,12 +2453,14 @@ def entity_map_html(pid: int | None = None):
 
 
 @app.post("/agents/register", dependencies=[Depends(require_admin)])
-def register_agent(payload: AgentRegistrationRequest) -> dict[str, Any]:
+def register_agent(request: Request, payload: AgentRegistrationRequest) -> dict[str, Any]:
     conn = db.create_connection()
     if not conn:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        return fleet_service.register_agent(conn, payload.model_dump())
+        return fleet_service.register_agent(conn, payload.model_dump(), workspace_id=_request_workspace_id(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         conn.close()
 
@@ -2277,6 +2483,7 @@ def test_alert_webhook(payload: AlertWebhookRequest) -> dict[str, Any]:
                 "ShadowLab test alert",
                 result.status,
                 result.detail,
+                workspace_id=_request_workspace_id(request),
             )
         finally:
             conn.close()
@@ -2445,6 +2652,7 @@ def triage_respond(request: Request, pid: int, payload: TriageRespondRequest) ->
             pid=pid,
             process_name=process_name,
             executable_path=executable_path,
+            workspace_id=_request_workspace_id(request),
             plan=response_plan,
         )
         if executable_path and any(item.get("action") == "quarantine" for item in applied.get("executed", [])):
@@ -2453,7 +2661,15 @@ def triage_respond(request: Request, pid: int, payload: TriageRespondRequest) ->
                 try:
                     for item in applied.get("executed", []):
                         if item.get("action") == "quarantine":
-                            db.log_quarantine(conn, pid, process_name, executable_path, item.get("result", {}).get("path", ""), "active")
+                            db.log_quarantine(
+                                conn,
+                                pid,
+                                process_name,
+                                executable_path,
+                                item.get("result", {}).get("path", ""),
+                                "active",
+                                workspace_id=_request_workspace_id(request),
+                            )
                             break
                 finally:
                     conn.close()
@@ -2496,25 +2712,25 @@ def network_sniff(payload: SnifferRequest) -> dict[str, Any]:
 
 
 @app.get("/artifacts", dependencies=[Depends(require_analyst_or_admin)])
-def list_artifacts() -> dict[str, str]:
-    return _artifact_manifest()
+def list_artifacts(request: Request) -> dict[str, str]:
+    return _artifact_manifest(_request_workspace_id(request))
 
 
 @app.get("/integrity", dependencies=[Depends(require_analyst_or_admin)])
-def verify_integrity() -> dict[str, Any]:
+def verify_integrity(request: Request) -> dict[str, Any]:
     observability_service.log_event("integrity_verify_requested")
-    return integrity_service.verify_manifest()
+    return integrity_service.verify_manifest(workspace_id=_request_workspace_id(request))
 
 
 @app.get("/integrity/history", dependencies=[Depends(require_admin)])
-def integrity_history() -> list[dict[str, Any]]:
-    return integrity_service.history()
+def integrity_history(request: Request) -> list[dict[str, Any]]:
+    return integrity_service.history(workspace_id=_request_workspace_id(request))
 
 
 @app.post("/integrity/refresh", dependencies=[Depends(require_admin)])
 def refresh_integrity_manifest(request: Request) -> dict[str, Any]:
     _apply_rate_limit(request, bucket="integrity_refresh", detail="Too many integrity refresh requests. Wait briefly and retry.")
-    manifest = integrity_service.refresh_manifest()
+    manifest = integrity_service.refresh_manifest(workspace_id=_request_workspace_id(request))
     observability_service.log_event("integrity_manifest_refreshed", file_count=len(manifest.get("files", {})))
     return {
         "status": "refreshed",
@@ -2535,51 +2751,52 @@ def telemetry_fabric_status() -> dict[str, Any]:
 
 
 @app.post("/integrations/telemetry-fabric/start", dependencies=[Depends(require_admin)])
-def start_telemetry_fabric() -> dict[str, Any]:
+def start_telemetry_fabric(request: Request) -> dict[str, Any]:
     result = collector_bridge.start_collector()
-    _log_single_collector_export("collector_start", result)
+    _log_single_collector_export("collector_start", result, workspace_id=_request_workspace_id(request))
     return result
 
 
 @app.post("/integrations/telemetry-fabric/stop", dependencies=[Depends(require_admin)])
-def stop_telemetry_fabric() -> dict[str, Any]:
+def stop_telemetry_fabric(request: Request) -> dict[str, Any]:
     result = collector_bridge.stop_collector()
-    _log_single_collector_export("collector_stop", result)
+    _log_single_collector_export("collector_stop", result, workspace_id=_request_workspace_id(request))
     return result
 
 
 @app.post("/integrations/telemetry-fabric/export/incidents/{incident_id}", dependencies=[Depends(require_admin)])
-def resend_incident_to_telemetry_fabric(incident_id: str) -> dict[str, Any]:
+def resend_incident_to_telemetry_fabric(request: Request, incident_id: str) -> dict[str, Any]:
+    workspace_id = _request_workspace_id(request)
     conn = db.create_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        incident = db.get_incident_by_id(conn, incident_id)
+        incident = db.get_incident_by_id(conn, incident_id, workspace_id=workspace_id)
     finally:
         conn.close()
     if incident is None:
         raise HTTPException(status_code=404, detail="Incident not found")
     result = collector_bridge.export_incident_record(_normalize_incident_row(incident))
-    _log_single_collector_export("incident_log", result, incident_id=incident_id)
+    _log_single_collector_export("incident_log", result, incident_id=incident_id, workspace_id=workspace_id)
     return result
 
 
 @app.get("/integrations/telemetry-fabric/exports", dependencies=[Depends(require_admin)])
-def list_telemetry_fabric_exports() -> list[dict[str, Any]]:
+def list_telemetry_fabric_exports(request: Request) -> list[dict[str, Any]]:
     conn = db.create_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        frame = db.get_integration_exports(conn)
+        frame = db.get_integration_exports(conn, workspace_id=_request_workspace_id(request))
     finally:
         conn.close()
     return frame.fillna("").to_dict(orient="records")
 
 
 @app.post("/integrations/whids/import/file", dependencies=[Depends(require_admin)])
-def import_whids_file(payload: IntegrationFileImportRequest) -> dict[str, Any]:
+def import_whids_file(request: Request, payload: IntegrationFileImportRequest) -> dict[str, Any]:
     try:
-        return hids_integration_service.import_whids_file(payload.file_path, limit=payload.limit)
+        return hids_integration_service.import_whids_file(payload.file_path, limit=payload.limit, workspace_id=_request_workspace_id(request))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -2587,7 +2804,8 @@ def import_whids_file(payload: IntegrationFileImportRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/whids/import/manager", dependencies=[Depends(require_admin)])
-def import_whids_manager(payload: WhidsManagerImportRequest) -> dict[str, Any]:
+def import_whids_manager(request: Request, payload: WhidsManagerImportRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:import_manager")
     try:
         return hids_integration_service.import_whids_manager(
             payload.manager_url,
@@ -2595,6 +2813,7 @@ def import_whids_manager(payload: WhidsManagerImportRequest) -> dict[str, Any]:
             limit=payload.limit,
             endpoint_uuid=payload.endpoint_uuid,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS manager request failed: {exc}") from exc
@@ -2603,13 +2822,15 @@ def import_whids_manager(payload: WhidsManagerImportRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/whids/reports", dependencies=[Depends(require_admin)])
-def sync_whids_reports(payload: WhidsManagerImportRequest) -> dict[str, Any]:
+def sync_whids_reports(request: Request, payload: WhidsManagerImportRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:reports")
     try:
         return hids_integration_service.sync_whids_reports(
             payload.manager_url,
             payload.api_key,
             endpoint_uuid=payload.endpoint_uuid,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS reports request failed: {exc}") from exc
@@ -2618,7 +2839,8 @@ def sync_whids_reports(payload: WhidsManagerImportRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/whids/artifacts", dependencies=[Depends(require_admin)])
-def download_whids_artifacts(payload: WhidsArtifactsRequest) -> dict[str, Any]:
+def download_whids_artifacts(request: Request, payload: WhidsArtifactsRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:artifacts")
     try:
         return hids_integration_service.download_whids_artifacts(
             payload.manager_url,
@@ -2627,6 +2849,7 @@ def download_whids_artifacts(payload: WhidsArtifactsRequest) -> dict[str, Any]:
             since=payload.since,
             max_files=payload.max_files,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS artifacts request failed: {exc}") from exc
@@ -2635,9 +2858,9 @@ def download_whids_artifacts(payload: WhidsArtifactsRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/ossec/import/file", dependencies=[Depends(require_admin)])
-def import_ossec_file(payload: OssecFileImportRequest) -> dict[str, Any]:
+def import_ossec_file(request: Request, payload: OssecFileImportRequest) -> dict[str, Any]:
     try:
-        return hids_integration_service.import_ossec_file(payload.file_path, limit=payload.limit)
+        return hids_integration_service.import_ossec_file(payload.file_path, limit=payload.limit, workspace_id=_request_workspace_id(request))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -2645,13 +2868,14 @@ def import_ossec_file(payload: OssecFileImportRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/ossec/live/start", dependencies=[Depends(require_admin)])
-def start_ossec_live_ingest(payload: OssecLiveIngestRequest) -> dict[str, Any]:
+def start_ossec_live_ingest(request: Request, payload: OssecLiveIngestRequest) -> dict[str, Any]:
     try:
         return hids_integration_service.start_ossec_live_ingest(
             payload.file_path,
             poll_interval=payload.poll_interval,
             limit=payload.limit,
             start_at_end=payload.start_at_end,
+            workspace_id=_request_workspace_id(request),
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2683,45 +2907,55 @@ def update_integration_response_policy(payload: IntegrationResponsePolicyRequest
 def orchestrate_integration_incident_response(request: Request, incident_id: str, payload: IncidentResponseOrchestrationRequest) -> dict[str, Any]:
     _require_enterprise_approval(request, action_name="integration:incident:response")
     try:
-        return hids_integration_service.orchestrate_incident_response(incident_id, apply_actions=payload.apply_actions)
+        return hids_integration_service.orchestrate_incident_response(
+            incident_id,
+            apply_actions=payload.apply_actions,
+            workspace_id=_request_workspace_id(request),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/integrations/whids/iocs/query", dependencies=[Depends(require_admin)])
-def query_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
+def query_whids_iocs(request: Request, payload: WhidsIoCRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:iocs:query")
     try:
         return hids_integration_service.list_whids_iocs(
             payload.manager_url,
             payload.api_key,
             filters=payload.filters,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS IoC query failed: {exc}") from exc
 
 
 @app.post("/integrations/whids/iocs/add", dependencies=[Depends(require_admin)])
-def add_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
+def add_whids_iocs(request: Request, payload: WhidsIoCRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:iocs:add")
     try:
         return hids_integration_service.add_whids_iocs(
             payload.manager_url,
             payload.api_key,
             payload.items,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS IoC add failed: {exc}") from exc
 
 
 @app.post("/integrations/whids/iocs/delete", dependencies=[Depends(require_admin)])
-def delete_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
+def delete_whids_iocs(request: Request, payload: WhidsIoCRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:iocs:delete")
     try:
         return hids_integration_service.delete_whids_iocs(
             payload.manager_url,
             payload.api_key,
             filters=payload.filters,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS IoC delete failed: {exc}") from exc
@@ -2730,7 +2964,8 @@ def delete_whids_iocs(payload: WhidsIoCRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/whids/rules/query", dependencies=[Depends(require_admin)])
-def query_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
+def query_whids_rules(request: Request, payload: WhidsRulesRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:rules:query")
     try:
         return hids_integration_service.list_whids_rules(
             payload.manager_url,
@@ -2738,13 +2973,15 @@ def query_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
             name=payload.name_filter,
             filters_only=payload.filters_only,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS rules query failed: {exc}") from exc
 
 
 @app.post("/integrations/whids/rules/add", dependencies=[Depends(require_admin)])
-def add_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
+def add_whids_rules(request: Request, payload: WhidsRulesRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:rules:add")
     try:
         return hids_integration_service.add_whids_rules(
             payload.manager_url,
@@ -2752,19 +2989,22 @@ def add_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
             payload.rules,
             update_existing=payload.update_existing,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS rules add failed: {exc}") from exc
 
 
 @app.post("/integrations/whids/rules/delete", dependencies=[Depends(require_admin)])
-def delete_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
+def delete_whids_rules(request: Request, payload: WhidsRulesRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:rules:delete")
     try:
         return hids_integration_service.delete_whids_rules(
             payload.manager_url,
             payload.api_key,
             rule_name=payload.rule_name,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS rules delete failed: {exc}") from exc
@@ -2773,7 +3013,8 @@ def delete_whids_rules(payload: WhidsRulesRequest) -> dict[str, Any]:
 
 
 @app.post("/integrations/whids/config", dependencies=[Depends(require_admin)])
-def get_whids_config(payload: WhidsConfigRequest) -> dict[str, Any]:
+def get_whids_config(request: Request, payload: WhidsConfigRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:config")
     try:
         return hids_integration_service.get_whids_endpoint_config(
             payload.manager_url,
@@ -2781,13 +3022,15 @@ def get_whids_config(payload: WhidsConfigRequest) -> dict[str, Any]:
             endpoint_uuid=payload.endpoint_uuid,
             config_format=payload.config_format,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS config query failed: {exc}") from exc
 
 
 @app.post("/integrations/whids/report-archive", dependencies=[Depends(require_admin)])
-def get_whids_report_archive(payload: WhidsConfigRequest) -> dict[str, Any]:
+def get_whids_report_archive(request: Request, payload: WhidsConfigRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:report_archive")
     try:
         return hids_integration_service.get_whids_report_archive(
             payload.manager_url,
@@ -2796,24 +3039,28 @@ def get_whids_report_archive(payload: WhidsConfigRequest) -> dict[str, Any]:
             since=payload.since,
             until=payload.until,
             verify_tls=payload.verify_tls,
+            workspace_id=_request_workspace_id(request),
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"WHIDS report archive query failed: {exc}") from exc
 
 
 @app.post("/integrations/whids/scheduler/start", dependencies=[Depends(require_admin)])
-def start_whids_scheduler(payload: WhidsSchedulerRequest) -> dict[str, Any]:
+def start_whids_scheduler(request: Request, payload: WhidsSchedulerRequest) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:scheduler:start")
     return hids_integration_service.start_whids_scheduler(
         payload.manager_url,
         payload.api_key,
         endpoint_uuid=payload.endpoint_uuid,
         poll_interval=payload.poll_interval,
         verify_tls=payload.verify_tls,
+        workspace_id=_request_workspace_id(request),
     )
 
 
 @app.post("/integrations/whids/scheduler/stop", dependencies=[Depends(require_admin)])
-def stop_whids_scheduler() -> dict[str, Any]:
+def stop_whids_scheduler(request: Request) -> dict[str, Any]:
+    _require_enterprise_approval(request, action_name="integration:whids:scheduler:stop")
     return hids_integration_service.stop_whids_scheduler()
 
 
@@ -2823,16 +3070,16 @@ def whids_scheduler_status() -> dict[str, Any]:
 
 
 @app.get("/artifacts/{filename}", dependencies=[Depends(require_analyst_or_admin)])
-def download_artifact(filename: str):
-    target = safe_child_path(OUT_DIR, filename, allowed_suffixes={".csv", ".json", ".html", ".pdf"})
+def download_artifact(request: Request, filename: str):
+    target = safe_child_path(_workspace_artifact_dir(_request_workspace_id(request)), filename, allowed_suffixes={".csv", ".json", ".html", ".pdf"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="Artifact not found")
     return _safe_file_response(target)
 
 
 @app.get("/reports/html", dependencies=[Depends(require_analyst_or_admin)])
-def html_report():
-    target = safe_child_path(OUT_DIR, "ShadowLab_Report.html", allowed_suffixes={".html"})
+def html_report(request: Request):
+    target = safe_child_path(_workspace_artifact_dir(_request_workspace_id(request)), "ShadowLab_Report.html", allowed_suffixes={".html"})
     if not target.exists():
         raise HTTPException(status_code=404, detail="HTML report not found")
     return _safe_file_response(target)
@@ -2914,7 +3161,7 @@ def capture_evidence(payload: EvidenceRequest) -> dict[str, Any]:
     path = collector.capture_screenshot(payload.alert_name)
     if str(path).startswith("Error"):
         raise HTTPException(status_code=500, detail=str(path))
-    integrity_service.refresh_manifest()
+    integrity_service.refresh_manifest(workspace_id=workspace_id)
     return {"status": "captured", "path": path}
 
 
@@ -2964,6 +3211,7 @@ def network_warfare_stop() -> dict[str, str]:
 
 
 def _write_monitor_artifacts(
+    target_dir: Path,
     telemetry_rows: list[dict[str, Any]],
     defender_summary: dict[str, Any],
     sysmon_summary: dict[str, Any],
@@ -2971,7 +3219,8 @@ def _write_monitor_artifacts(
     report_sections: list[str],
     incident,
 ) -> None:
-    with (OUT_DIR / "telemetry.csv").open("w", newline="", encoding="utf-8") as handle:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    with (target_dir / "telemetry.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(
             [
@@ -3003,16 +3252,27 @@ def _write_monitor_artifacts(
                 ]
             )
 
-    (OUT_DIR / "events_defender.json").write_text(json.dumps({"summary": defender_summary}, indent=2), encoding="utf-8")
-    (OUT_DIR / "events_sysmon.json").write_text(json.dumps({"summary": sysmon_summary}, indent=2), encoding="utf-8")
-    (OUT_DIR / "score.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
-    artifact_service.write_incident_bundle(incident, final, telemetry_rows)
-    generate_pdf(OUT_DIR, author="Ulfat Ibadov", sections=report_sections)
-    generate_html(OUT_DIR, author="Ulfat Ibadov")
+    (target_dir / "events_defender.json").write_text(json.dumps({"summary": defender_summary}, indent=2), encoding="utf-8")
+    (target_dir / "events_sysmon.json").write_text(json.dumps({"summary": sysmon_summary}, indent=2), encoding="utf-8")
+    (target_dir / "score.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
+    IncidentArtifactService(target_dir).write_incident_bundle(incident, final, telemetry_rows)
+    generate_pdf(target_dir, author="Ulfat Ibadov", sections=report_sections)
+    generate_html(target_dir, author="Ulfat Ibadov")
     integrity_service.refresh_manifest()
 
 
-def _artifact_manifest() -> dict[str, str]:
+def _workspace_artifact_dir(workspace_id: str) -> Path:
+    current = str(workspace_id or "default").strip().lower()
+    if current == "default":
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        return OUT_DIR
+    target = OUT_DIR / "workspaces" / current
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _artifact_manifest(workspace_id: str = "default") -> dict[str, str]:
+    target_dir = _workspace_artifact_dir(workspace_id)
     files = [
         "telemetry.csv",
         "events_defender.json",
@@ -3030,9 +3290,9 @@ def _artifact_manifest() -> dict[str, str]:
         "postgres_bootstrap.sql",
     ]
     return {
-        name: str(OUT_DIR / name)
+        name: str(target_dir / name)
         for name in files
-        if (OUT_DIR / name).exists()
+        if (target_dir / name).exists()
     }
 
 
@@ -3132,6 +3392,8 @@ def _validate_startup_security_posture() -> None:
         issues.append("authentication must be enabled")
     if profile in {"corp", "prod"} and any(origin.strip() == "*" for origin in security_settings.allowed_origins):
         issues.append("wildcard CORS origins are not allowed")
+    if profile in {"corp", "prod"} and not security_settings.require_tls:
+        issues.append("TLS must be required")
     if profile == "prod" and security_settings.enable_dangerous_actions:
         issues.append("dangerous actions must be disabled")
     if profile in {"corp", "prod"} and security_settings.enable_network_warfare:
@@ -3240,12 +3502,12 @@ def _validate_quarantine_restore_paths(quarantine_path: str, original_path: str)
     return source, resolved_target
 
 
-def _log_collector_exports(result: dict[str, Any]) -> None:
+def _log_collector_exports(result: dict[str, Any], workspace_id: str = "default") -> None:
     for export_type, export_result in (result.get("exports") or {}).items():
-        _log_single_collector_export(export_type, export_result)
+        _log_single_collector_export(export_type, export_result, workspace_id=workspace_id)
 
 
-def _log_single_collector_export(export_type: str, export_result: dict[str, Any], incident_id: str = "") -> None:
+def _log_single_collector_export(export_type: str, export_result: dict[str, Any], incident_id: str = "", workspace_id: str = "default") -> None:
     conn = db.create_connection()
     if conn is None:
         return
@@ -3260,6 +3522,7 @@ def _log_single_collector_export(export_type: str, export_result: dict[str, Any]
             str(target),
             str(export_result.get("status", "unknown")),
             str(export_result.get("detail", "")),
+            workspace_id=workspace_id,
         )
     finally:
         conn.close()
@@ -3299,13 +3562,14 @@ def _require_enterprise_approval(request: Request | None, action_name: str) -> N
             ),
         )
     now_value = time.time()
+    workspace_id = _request_workspace_id(request)
     conn = db.create_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database unavailable")
     try:
-        reserved = db.reserve_approval_request(conn, int(approval_id), action_name, now_value)
+        reserved = db.reserve_approval_request(conn, int(approval_id), action_name, now_value, workspace_id=workspace_id)
         if not reserved:
-            approvals = db.get_approval_requests(conn)
+            approvals = db.get_approval_requests(conn, workspace_id=workspace_id)
             row = approvals[approvals["id"] == int(approval_id)]
         else:
             row = None
@@ -3327,6 +3591,9 @@ def _require_enterprise_approval(request: Request | None, action_name: str) -> N
                 status_code=403,
                 detail=f"Approval `{approval_id}` is scoped to `{expected_action or 'unknown'}` and cannot be used for `{action_name}`",
             )
+        approval_workspace = str(item.get("workspace_id", "default") or "default").strip().lower()
+        if approval_workspace != workspace_id:
+            raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` belongs to workspace `{approval_workspace}`")
         expires_at = float(item.get("expires_at", 0) or 0)
         if expires_at and now_value > expires_at:
             raise HTTPException(status_code=403, detail=f"Approval `{approval_id}` has expired")
@@ -3355,9 +3622,10 @@ def _audit_mutating_request(request: Request, status_code: int) -> None:
         try:
             context = getattr(request.state, "security_context", None)
             role = getattr(context, "role", "")
+            workspace_id = getattr(context, "workspace_id", "default")
             client_ip = request.client.host if request.client else ""
             detail = _redact_audit_detail(request.url.query[:500] if request.url.query else "")
-            db.log_action_audit(conn, request.method.upper(), request.url.path, int(status_code), role, client_ip, detail)
+            db.log_action_audit(conn, request.method.upper(), request.url.path, int(status_code), role, client_ip, detail, workspace_id=workspace_id)
         finally:
             conn.close()
     except Exception:

@@ -8,6 +8,8 @@ import os
 import secrets
 from typing import Any
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 
 SENSITIVE_KEYS = {
     "api_key",
@@ -18,8 +20,14 @@ SENSITIVE_KEYS = {
     "shared_key",
     "token",
 }
-ENCRYPTED_PREFIX = "enc:v1:"
+ENCRYPTED_PREFIX = "enc:v2:"
+LEGACY_ENCRYPTED_PREFIX = "enc:v1:"
 SECRET_MASK = "***redacted***"
+
+
+def is_encrypted_secret(value: str | None) -> bool:
+    candidate = str(value or "")
+    return candidate.startswith(ENCRYPTED_PREFIX) or candidate.startswith(LEGACY_ENCRYPTED_PREFIX)
 
 
 class _DataBlob(ctypes.Structure):
@@ -48,7 +56,7 @@ class SecretStore:
             if isinstance(value, dict):
                 revealed[key] = self.reveal_config(value)
                 continue
-            if isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            if isinstance(value, str) and self._is_encrypted_value(value):
                 revealed[key] = self.decrypt_text(value)
                 continue
             revealed[key] = value
@@ -70,32 +78,56 @@ class SecretStore:
         raw = plaintext.encode("utf-8")
         if os.name == "nt":
             return ENCRYPTED_PREFIX + self._dpapi_encrypt(raw)
-        return ENCRYPTED_PREFIX + self._fallback_encrypt(raw)
+        return ENCRYPTED_PREFIX + self._aesgcm_encrypt(raw)
 
     def decrypt_text(self, ciphertext: str) -> str:
-        token = ciphertext[len(ENCRYPTED_PREFIX):]
+        if ciphertext.startswith(ENCRYPTED_PREFIX):
+            token = ciphertext[len(ENCRYPTED_PREFIX):]
+            if os.name == "nt":
+                try:
+                    return self._dpapi_decrypt(token).decode("utf-8")
+                except Exception:
+                    pass
+            return self._aesgcm_decrypt(token).decode("utf-8")
+        if ciphertext.startswith(LEGACY_ENCRYPTED_PREFIX):
+            token = ciphertext[len(LEGACY_ENCRYPTED_PREFIX):]
+            if os.name == "nt":
+                try:
+                    return self._dpapi_decrypt(token).decode("utf-8")
+                except Exception:
+                    pass
+            return self._legacy_fallback_decrypt(token).decode("utf-8")
+        raise ValueError("Unsupported encrypted secret format")
+
+    def _is_encrypted_value(self, value: str) -> bool:
+        return is_encrypted_secret(value)
+
+    def _aesgcm_encrypt(self, plaintext: bytes) -> str:
+        key = self._fallback_master_key()
+        salt = secrets.token_bytes(16)
+        nonce = secrets.token_bytes(12)
+        derived = hashlib.pbkdf2_hmac("sha256", key, salt, 120_000, dklen=32)
+        ciphertext = AESGCM(derived).encrypt(nonce, plaintext, salt)
+        payload = b"".join([salt, nonce, ciphertext])
+        return base64.b64encode(payload).decode("ascii")
+
+    def _aesgcm_decrypt(self, token: str) -> bytes:
+        key = self._fallback_master_key()
+        payload = base64.b64decode(token.encode("ascii"))
+        if len(payload) < 44:
+            raise ValueError("Encrypted payload is truncated")
+        salt = payload[:16]
+        nonce = payload[16:28]
+        ciphertext = payload[28:]
+        derived = hashlib.pbkdf2_hmac("sha256", key, salt, 120_000, dklen=32)
         if os.name == "nt":
-            try:
-                return self._dpapi_decrypt(token).decode("utf-8")
-            except Exception:
-                pass
-        return self._fallback_decrypt(token).decode("utf-8")
+            return AESGCM(derived).decrypt(nonce, ciphertext, salt)
+        return AESGCM(derived).decrypt(nonce, ciphertext, salt)
 
     def _is_sensitive_key(self, key: str) -> bool:
         return str(key or "").strip().lower() in SENSITIVE_KEYS
 
-    def _fallback_encrypt(self, plaintext: bytes) -> str:
-        key = self._fallback_master_key()
-        salt = secrets.token_bytes(16)
-        nonce = secrets.token_bytes(16)
-        derived = hashlib.pbkdf2_hmac("sha256", key, salt, 120_000, dklen=32)
-        keystream = _keystream(derived, nonce, len(plaintext))
-        ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream))
-        tag = hmac.new(derived, salt + nonce + ciphertext, hashlib.sha256).digest()
-        payload = b"".join([salt, nonce, ciphertext, tag])
-        return base64.b64encode(payload).decode("ascii")
-
-    def _fallback_decrypt(self, token: str) -> bytes:
+    def _legacy_fallback_decrypt(self, token: str) -> bytes:
         key = self._fallback_master_key()
         payload = base64.b64decode(token.encode("ascii"))
         if len(payload) < 64:

@@ -15,6 +15,10 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
+RUN useradd --create-home --shell /usr/sbin/nologin shadowlab \
+    && chown -R shadowlab:shadowlab /app
+
+USER shadowlab
 
 # Expose API port
 EXPOSE 8000

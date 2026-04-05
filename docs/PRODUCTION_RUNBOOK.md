@@ -63,6 +63,7 @@ Replay protection and rate-limit counters are persisted in the database.
 - PostgreSQL bootstrap artifact: `shadowlab_out/postgres_bootstrap.sql`
 - export helper: `scripts/export_sqlite_to_postgres.py`
 - smoke helper: `scripts/smoke_test_postgres_runtime.py`
+- enterprise readiness helper: `scripts/validate_enterprise_postgres_readiness.py`
 
 ## Integrity And Secrets
 
@@ -84,6 +85,12 @@ Routes:
 - `GET /enterprise/report/security-ops`
 - `POST /enterprise/report/security-ops/export`
 - `GET /enterprise/abuse/summary`
+
+Offline audit export helper:
+
+- `python scripts/export_audit_bundle.py`
+
+The audit bundle contains auth logs, action audit logs, external request logs, secret rotation history, connector queue state, and schema migrations with a local SHA-256 manifest.
 
 Generated incident reports now include:
 
@@ -145,9 +152,14 @@ Useful checks:
 - `python scripts/ci_verify.py`
 - `python scripts/load_test_api.py --base-url http://127.0.0.1:8000 --path /health --requests 200 --concurrency 20`
 - `python scripts/smoke_test_postgres_runtime.py`
+- `python scripts/validate_enterprise_postgres_readiness.py`
+- `python scripts/export_audit_bundle.py`
 
 ## Operator Notes
 
 - the desktop `Security Ops` tab is the safest place to review posture
 - approval requirements depend on both profile and feature flags
 - keep raw keys out of shell history and repository files
+
+updated
+

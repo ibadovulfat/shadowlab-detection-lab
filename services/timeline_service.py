@@ -17,12 +17,14 @@ class TimelineService:
         items: list[dict[str, Any]] = []
 
         for row in telemetry_rows or []:
+            cpu_value = self._float_value(row.get("cpu"))
+            mem_value = self._float_value(row.get("mem_percent"))
             items.append(
                 {
                     "time": row.get("ts"),
                     "type": "telemetry",
                     "severity": self._telemetry_severity(row),
-                    "title": f"CPU {row.get('cpu', 0):.1f}% | MEM {row.get('mem_percent', 0):.1f}%",
+                    "title": f"CPU {cpu_value:.1f}% | MEM {mem_value:.1f}%",
                     "details": row,
                 }
             )
@@ -134,6 +136,12 @@ class TimelineService:
             if len(filtered) >= bounded_limit:
                 break
         return filtered
+
+    def _float_value(self, value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def build_summary(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         by_type = Counter(str(item.get("type", "unknown") or "unknown") for item in items)

@@ -9,11 +9,12 @@ from pathlib import Path
 import re
 import threading
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 import psutil
-from services.secret_store import ENCRYPTED_PREFIX, secret_store
+from services.outbound_security import normalize_outbound_url
+from services.secret_store import is_encrypted_secret, secret_store
 
 
 class HidsIntegrationService:
@@ -37,6 +38,7 @@ class HidsIntegrationService:
             "manager_url": "",
             "poll_interval": 0.0,
             "endpoint_uuid": "",
+            "workspace_id": "default",
             "last_run_at": 0.0,
             "last_error": "",
             "total_cycles": 0,
@@ -51,6 +53,7 @@ class HidsIntegrationService:
             "poll_interval": 0.0,
             "limit": 0,
             "start_at_end": True,
+            "workspace_id": "default",
             "last_run_at": 0.0,
             "last_imported_at": 0.0,
             "last_error": "",
@@ -59,7 +62,16 @@ class HidsIntegrationService:
         }
         self._restore_runtime_if_enabled()
 
-    def import_whids_file(self, file_path: str, limit: int = 200) -> dict[str, Any]:
+    def _workspace_output_dir(self, workspace_id: str) -> Path:
+        current = str(workspace_id or "default").strip().lower() or "default"
+        if current == "default":
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            return self.out_dir
+        target = self.out_dir / "workspaces" / self._slugify(current)
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def import_whids_file(self, file_path: str, limit: int = 200, workspace_id: str = "default") -> dict[str, Any]:
         path = Path(file_path).expanduser()
         records = self._load_json_records(path, limit=limit)
         return self._store_incidents(
@@ -69,6 +81,7 @@ class HidsIntegrationService:
             detail_template="Imported {count} WHIDS detections from file",
             records=records,
             normalizer=self._normalize_whids_record,
+            workspace_id=workspace_id,
         )
 
     def import_whids_manager(
@@ -79,12 +92,9 @@ class HidsIntegrationService:
         limit: int = 200,
         endpoint_uuid: str = "",
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
-        base_url = manager_url.strip().rstrip("/") + "/"
-        headers = {"X-Api-Key": api_key.strip()}
-        session = requests.Session()
-        session.headers.update(headers)
-        session.verify = verify_tls
+        session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
 
         endpoints = []
         if endpoint_uuid.strip():
@@ -132,12 +142,13 @@ class HidsIntegrationService:
             detail_template="Imported {count} WHIDS detections from manager API",
             records=records[:limit],
             normalizer=self._normalize_whids_record,
+            workspace_id=workspace_id,
         )
         result["fetched_endpoints"] = fetched_endpoints
         result["source"] = manager_url
         return result
 
-    def import_ossec_file(self, file_path: str, limit: int = 200) -> dict[str, Any]:
+    def import_ossec_file(self, file_path: str, limit: int = 200, workspace_id: str = "default") -> dict[str, Any]:
         path = Path(file_path).expanduser()
         records = self._load_ossec_records(path, limit=limit)
         return self._store_incidents(
@@ -147,6 +158,7 @@ class HidsIntegrationService:
             detail_template="Imported {count} OSSEC alerts from file",
             records=records,
             normalizer=self._normalize_ossec_record,
+            workspace_id=workspace_id,
         )
 
     def start_ossec_live_ingest(
@@ -156,13 +168,14 @@ class HidsIntegrationService:
         poll_interval: float = 2.0,
         limit: int = 200,
         start_at_end: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         path = Path(file_path).expanduser()
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"Integration source not found: {path}")
         interval = max(0.5, float(poll_interval))
         max_records = max(1, min(int(limit), 2000))
-        initial_seen = self._load_existing_ossec_incident_ids()
+        initial_seen = self._load_existing_ossec_incident_ids(workspace_id=workspace_id)
         if start_at_end:
             current_records = self._load_ossec_records(path, limit=max_records)
             initial_seen.update(self._normalized_incident_ids(current_records, self._normalize_ossec_record))
@@ -175,6 +188,7 @@ class HidsIntegrationService:
                         "poll_interval": interval,
                         "limit": max_records,
                         "start_at_end": bool(start_at_end),
+                        "workspace_id": workspace_id,
                         "seen_count": len(initial_seen),
                     }
                 )
@@ -187,6 +201,7 @@ class HidsIntegrationService:
                     "poll_interval": interval,
                     "limit": max_records,
                     "start_at_end": bool(start_at_end),
+                    "workspace_id": workspace_id,
                     "last_run_at": 0.0,
                     "last_imported_at": 0.0,
                     "last_error": "",
@@ -196,7 +211,7 @@ class HidsIntegrationService:
             )
             self._ossec_live_thread = threading.Thread(
                 target=self._ossec_live_worker,
-                args=(str(path), interval, max_records, initial_seen),
+                args=(str(path), interval, max_records, initial_seen, workspace_id),
                 daemon=True,
                 name="shadowlab-ossec-live-ingest",
             )
@@ -216,6 +231,7 @@ class HidsIntegrationService:
                     "poll_interval": interval,
                     "limit": max_records,
                     "start_at_end": bool(start_at_end),
+                    "workspace_id": workspace_id,
                 }
             }
         )
@@ -273,6 +289,7 @@ class HidsIntegrationService:
         endpoint_uuid: str = "",
         poll_interval: float = 300.0,
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         interval = max(30.0, float(poll_interval))
         if self.whids_scheduler_thread and self.whids_scheduler_thread.is_alive():
@@ -281,6 +298,7 @@ class HidsIntegrationService:
                     "manager_url": manager_url,
                     "poll_interval": interval,
                     "endpoint_uuid": endpoint_uuid,
+                    "workspace_id": workspace_id,
                     "last_error": "",
                 }
             )
@@ -292,6 +310,7 @@ class HidsIntegrationService:
                 "manager_url": manager_url,
                 "poll_interval": interval,
                 "endpoint_uuid": endpoint_uuid,
+                "workspace_id": workspace_id,
                 "last_run_at": 0.0,
                 "last_error": "",
                 "total_cycles": 0,
@@ -299,7 +318,7 @@ class HidsIntegrationService:
         )
         self.whids_scheduler_thread = threading.Thread(
             target=self._whids_scheduler_worker,
-            args=(manager_url, api_key, endpoint_uuid, interval, verify_tls),
+            args=(manager_url, api_key, endpoint_uuid, interval, verify_tls, workspace_id),
             daemon=True,
             name="shadowlab-whids-scheduler",
         )
@@ -313,6 +332,7 @@ class HidsIntegrationService:
                     "endpoint_uuid": endpoint_uuid,
                     "poll_interval": interval,
                     "verify_tls": bool(verify_tls),
+                    "workspace_id": workspace_id,
                 }
             }
         )
@@ -340,12 +360,13 @@ class HidsIntegrationService:
         apply_actions: bool = False,
         allowed_actions: list[str] | None = None,
         source: str = "manual",
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         conn = self.db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            incident = self.db.get_incident_by_id(conn, incident_id)
+            incident = self.db.get_incident_by_id(conn, incident_id, workspace_id=workspace_id)
         finally:
             conn.close()
         if incident is None:
@@ -381,10 +402,11 @@ class HidsIntegrationService:
             target=incident_id,
             status="success",
             detail=f"{'Applied' if apply_actions else 'Planned'} {len(executed)} supported response actions for {incident_id} via {source}",
+            workspace_id=workspace_id,
         )
         return summary
 
-    def list_whids_iocs(self, manager_url: str, api_key: str, *, filters: dict[str, str] | None = None, verify_tls: bool = True) -> dict[str, Any]:
+    def list_whids_iocs(self, manager_url: str, api_key: str, *, filters: dict[str, str] | None = None, verify_tls: bool = True, workspace_id: str = "default") -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         response = session.get(urljoin(base_url, "iocs"), params=filters or None, timeout=30)
         response.raise_for_status()
@@ -392,7 +414,7 @@ class HidsIntegrationService:
         items = payload.get("data", [])
         return {"integration": "whids", "resource": "iocs", "items": items if isinstance(items, list) else []}
 
-    def add_whids_iocs(self, manager_url: str, api_key: str, items: list[dict[str, Any]], *, verify_tls: bool = True) -> dict[str, Any]:
+    def add_whids_iocs(self, manager_url: str, api_key: str, items: list[dict[str, Any]], *, verify_tls: bool = True, workspace_id: str = "default") -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         response = session.post(urljoin(base_url, "iocs"), json=items, timeout=30)
         response.raise_for_status()
@@ -404,10 +426,11 @@ class HidsIntegrationService:
             target=manager_url,
             status="success",
             detail=f"Added {len(data) if isinstance(data, list) else len(items)} WHIDS IoCs",
+            workspace_id=workspace_id,
         )
         return {"integration": "whids", "resource": "iocs", "items": data if isinstance(data, list) else []}
 
-    def delete_whids_iocs(self, manager_url: str, api_key: str, *, filters: dict[str, str], verify_tls: bool = True) -> dict[str, Any]:
+    def delete_whids_iocs(self, manager_url: str, api_key: str, *, filters: dict[str, str], verify_tls: bool = True, workspace_id: str = "default") -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         response = session.delete(urljoin(base_url, "iocs"), params=filters, timeout=30)
         response.raise_for_status()
@@ -417,10 +440,11 @@ class HidsIntegrationService:
             target=manager_url,
             status="success",
             detail=f"Deleted WHIDS IoCs with filters {json.dumps(filters, ensure_ascii=False)}",
+            workspace_id=workspace_id,
         )
         return {"integration": "whids", "resource": "iocs", "deleted_filters": filters, "ok": True}
 
-    def list_whids_rules(self, manager_url: str, api_key: str, *, name: str = "", filters_only: bool = False, verify_tls: bool = True) -> dict[str, Any]:
+    def list_whids_rules(self, manager_url: str, api_key: str, *, name: str = "", filters_only: bool = False, verify_tls: bool = True, workspace_id: str = "default") -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         params: dict[str, Any] = {}
         if name.strip():
@@ -441,6 +465,7 @@ class HidsIntegrationService:
         *,
         update_existing: bool = True,
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         response = session.post(
@@ -458,10 +483,11 @@ class HidsIntegrationService:
             target=manager_url,
             status="success",
             detail=f"Added or updated {len(data) if isinstance(data, list) else len(rules)} WHIDS rules",
+            workspace_id=workspace_id,
         )
         return {"integration": "whids", "resource": "rules", "items": data if isinstance(data, list) else []}
 
-    def delete_whids_rules(self, manager_url: str, api_key: str, *, rule_name: str, verify_tls: bool = True) -> dict[str, Any]:
+    def delete_whids_rules(self, manager_url: str, api_key: str, *, rule_name: str, verify_tls: bool = True, workspace_id: str = "default") -> dict[str, Any]:
         if not rule_name.strip():
             raise ValueError("rule_name is required")
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
@@ -473,6 +499,7 @@ class HidsIntegrationService:
             target=manager_url,
             status="success",
             detail=f"Deleted WHIDS rule {rule_name.strip()}",
+            workspace_id=workspace_id,
         )
         return {"integration": "whids", "resource": "rules", "deleted_rule": rule_name.strip(), "ok": True}
 
@@ -484,6 +511,7 @@ class HidsIntegrationService:
         endpoint_uuid: str,
         config_format: str = "json",
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         response = session.get(
@@ -510,6 +538,7 @@ class HidsIntegrationService:
         since: str = "",
         until: str = "",
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         params = {}
         if since.strip():
@@ -539,6 +568,7 @@ class HidsIntegrationService:
         *,
         endpoint_uuid: str = "",
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         session, base_url = self._build_whids_session(manager_url, api_key, verify_tls=verify_tls)
         target_uuid = endpoint_uuid.strip()
@@ -557,7 +587,7 @@ class HidsIntegrationService:
 
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         target_name = f"whids-report-{self._slugify(target_uuid or 'all-endpoints')}-{stamp}.json"
-        output_path = self.out_dir / target_name
+        output_path = self._workspace_output_dir(workspace_id) / target_name
         output_path.write_text(json.dumps(reports, indent=2, ensure_ascii=False), encoding="utf-8")
 
         summary = {
@@ -574,6 +604,7 @@ class HidsIntegrationService:
             target=manager_url if not target_uuid else f"{manager_url.rstrip('/')}/endpoints/{target_uuid}/report",
             status="success" if reports else "no_data",
             detail=f"Synced {len(reports)} WHIDS report entries to {output_path.name}",
+            workspace_id=workspace_id,
         )
         return summary
 
@@ -586,6 +617,7 @@ class HidsIntegrationService:
         since: str = "",
         max_files: int = 25,
         verify_tls: bool = True,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         target_uuid = endpoint_uuid.strip()
         if not target_uuid:
@@ -599,7 +631,7 @@ class HidsIntegrationService:
         artifact_entries = payload.get("data", [])
         entries = artifact_entries if isinstance(artifact_entries, list) else []
 
-        artifact_dir = self.out_dir / "artifacts" / self._slugify(target_uuid)
+        artifact_dir = self._workspace_output_dir(workspace_id) / "artifacts" / self._slugify(target_uuid)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         downloaded_files: list[dict[str, Any]] = []
         files_seen = 0
@@ -652,6 +684,7 @@ class HidsIntegrationService:
             target=f"{manager_url.rstrip('/')}/endpoints/{target_uuid}/artifacts",
             status="success" if downloaded_files else "no_data",
             detail=f"Downloaded {len(downloaded_files)} WHIDS artifacts for endpoint {target_uuid}",
+            workspace_id=workspace_id,
         )
         return {
             "integration": "whids",
@@ -673,6 +706,7 @@ class HidsIntegrationService:
         detail_template: str,
         records: list[dict[str, Any]],
         normalizer,
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
         imported = 0
         incidents: list[str] = []
@@ -684,7 +718,13 @@ class HidsIntegrationService:
                 normalized = normalizer(record)
                 if not normalized:
                     continue
-                if self._store_normalized_incident(conn, normalized, integration_name=integration_name, source_target=target):
+                if self._store_normalized_incident(
+                    conn,
+                    normalized,
+                    integration_name=integration_name,
+                    source_target=target,
+                    workspace_id=workspace_id,
+                ):
                     imported += 1
                     incidents.append(normalized["incident"]["incident_id"])
             self.db.log_integration_export(
@@ -694,6 +734,7 @@ class HidsIntegrationService:
                 str(target),
                 "success" if imported else "no_data",
                 detail_template.format(count=imported),
+                workspace_id=workspace_id,
             )
         finally:
             conn.close()
@@ -712,17 +753,27 @@ class HidsIntegrationService:
         integration_name: str,
         source_target: str,
         seen_ids: set[str] | None = None,
+        workspace_id: str = "default",
     ) -> bool:
         incident_id = str(normalized["incident"]["incident_id"])
         if seen_ids is not None and incident_id in seen_ids:
             return False
-        existing = self.db.get_incident_by_id(conn, incident_id)
-        self.db.upsert_host(conn, **normalized["host"])
-        self.db.upsert_incident(conn, **normalized["incident"])
+        existing = self.db.get_incident_by_id(conn, incident_id, workspace_id=workspace_id)
+        host_payload = dict(normalized["host"])
+        incident_payload = dict(normalized["incident"])
+        host_payload["workspace_id"] = workspace_id
+        incident_payload["workspace_id"] = workspace_id
+        self.db.upsert_host(conn, **host_payload)
+        self.db.upsert_incident(conn, **incident_payload)
         if seen_ids is not None:
             seen_ids.add(incident_id)
         if existing is None:
-            self._correlate_enterprise_incident(normalized, integration_name=integration_name, source_target=source_target)
+            self._correlate_enterprise_incident(
+                normalized,
+                integration_name=integration_name,
+                source_target=source_target,
+                workspace_id=workspace_id,
+            )
             self._auto_respond_if_needed(incident_id, normalized, integration_name=integration_name)
             return True
         self._log_export(
@@ -731,32 +782,52 @@ class HidsIntegrationService:
             target=incident_id,
             status="success",
             detail=f"Skipped duplicate incident import for {incident_id}",
+            workspace_id=workspace_id,
         )
         return False
 
-    def _log_export(self, *, integration_name: str, export_type: str, target: str, status: str, detail: str) -> None:
+    def _log_export(
+        self,
+        *,
+        integration_name: str,
+        export_type: str,
+        target: str,
+        status: str,
+        detail: str,
+        workspace_id: str = "default",
+    ) -> None:
         conn = self.db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            self.db.log_integration_export(conn, integration_name, export_type, str(target), status, detail)
+            self.db.log_integration_export(conn, integration_name, export_type, str(target), status, detail, workspace_id=workspace_id)
         finally:
             conn.close()
 
     def _build_whids_session(self, manager_url: str, api_key: str, *, verify_tls: bool) -> tuple[requests.Session, str]:
-        base_url = manager_url.strip().rstrip("/") + "/"
+        base_url = self._normalize_whids_manager_url(manager_url, verify_tls=verify_tls)
         headers = {"X-Api-Key": api_key.strip()}
         session = requests.Session()
         session.headers.update(headers)
         session.verify = verify_tls
         return session, base_url
 
-    def _load_existing_ossec_incident_ids(self) -> set[str]:
+    def _normalize_whids_manager_url(self, manager_url: str, *, verify_tls: bool) -> str:
+        normalized = normalize_outbound_url(manager_url)
+        if not normalized:
+            raise ValueError("WHIDS manager URL must be a safe http(s) destination")
+        parsed = urlparse(normalized)
+        hostname = (parsed.hostname or "").strip().lower()
+        if not verify_tls and hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("TLS verification may only be disabled for loopback WHIDS managers")
+        return normalized.rstrip("/") + "/"
+
+    def _load_existing_ossec_incident_ids(self, workspace_id: str = "default") -> set[str]:
         conn = self.db.create_connection()
         if conn is None:
             return set()
         try:
-            incidents = self.db.get_incidents(conn).fillna("").to_dict(orient="records")
+            incidents = self.db.get_incidents(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         return {str(item.get("incident_id", "")) for item in incidents if str(item.get("incident_id", "")).startswith("OSSEC-")}
@@ -769,7 +840,7 @@ class HidsIntegrationService:
                 incident_ids.add(str(normalized["incident"]["incident_id"]))
         return incident_ids
 
-    def _ossec_live_worker(self, file_path: str, interval: float, limit: int, seen_ids: set[str]) -> None:
+    def _ossec_live_worker(self, file_path: str, interval: float, limit: int, seen_ids: set[str], workspace_id: str) -> None:
         path = Path(file_path)
         while not self._ossec_live_stop.wait(interval):
             try:
@@ -789,6 +860,7 @@ class HidsIntegrationService:
                             integration_name="ossec",
                             source_target=file_path,
                             seen_ids=seen_ids,
+                            workspace_id=workspace_id,
                         ):
                             imported_now += 1
                 finally:
@@ -806,6 +878,7 @@ class HidsIntegrationService:
                             target=file_path,
                             status="success",
                             detail=f"Imported {imported_now} new OSSEC alerts from live ingest",
+                            workspace_id=workspace_id,
                         )
             except Exception as exc:
                 with self._ossec_live_lock:
@@ -814,10 +887,25 @@ class HidsIntegrationService:
         with self._ossec_live_lock:
             self._ossec_live_state["running"] = False
 
-    def _whids_scheduler_worker(self, manager_url: str, api_key: str, endpoint_uuid: str, interval: float, verify_tls: bool) -> None:
+    def _whids_scheduler_worker(
+        self,
+        manager_url: str,
+        api_key: str,
+        endpoint_uuid: str,
+        interval: float,
+        verify_tls: bool,
+        workspace_id: str,
+    ) -> None:
         while not self.whids_scheduler_stop.wait(interval):
             try:
-                self.import_whids_manager(manager_url, api_key, limit=200, endpoint_uuid=endpoint_uuid, verify_tls=verify_tls)
+                self.import_whids_manager(
+                    manager_url,
+                    api_key,
+                    limit=200,
+                    endpoint_uuid=endpoint_uuid,
+                    verify_tls=verify_tls,
+                    workspace_id=workspace_id,
+                )
                 self.sync_whids_reports(manager_url, api_key, endpoint_uuid=endpoint_uuid, verify_tls=verify_tls)
                 self.whids_scheduler_state["last_run_at"] = time.time()
                 self.whids_scheduler_state["last_error"] = ""
@@ -827,7 +915,14 @@ class HidsIntegrationService:
                 self.whids_scheduler_state["last_error"] = str(exc)
         self.whids_scheduler_state["running"] = False
 
-    def _correlate_enterprise_incident(self, normalized: dict[str, Any], *, integration_name: str, source_target: str) -> None:
+    def _correlate_enterprise_incident(
+        self,
+        normalized: dict[str, Any],
+        *,
+        integration_name: str,
+        source_target: str,
+        workspace_id: str = "default",
+    ) -> None:
         if self.enterprise_service is None or self.investigation_service is None:
             return
         incident = normalized.get("incident", {})
@@ -839,7 +934,7 @@ class HidsIntegrationService:
         if conn is None:
             return
         try:
-            case_rows = self.db.get_case_records(conn).fillna("").to_dict(orient="records")
+            case_rows = self.db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         existing_case = next((item for item in case_rows if str(item.get("incident_id", "")).strip() == incident_id), None)
@@ -856,6 +951,7 @@ class HidsIntegrationService:
                 asset_criticality=self._asset_criticality_from_severity(severity),
                 tags=[integration_name, "auto-ingested", str(host.get("host", ""))],
                 narrative=str(incident.get("summary", "")),
+                workspace_id=workspace_id,
             )
             case_id = int(case.get("id", 0) or 0)
         if not case_id:
@@ -875,6 +971,7 @@ class HidsIntegrationService:
             item_payload=payload,
             rationale=f"Auto-correlated from {integration_name.upper()} ingest.",
             pinned_by="hids-auto",
+            workspace_id=workspace_id,
         )
         self.investigation_service.create_note(
             case_id=case_id,
@@ -884,6 +981,7 @@ class HidsIntegrationService:
             note_text=f"Imported from {integration_name.upper()} source {source_target}.",
             tags=[integration_name, severity, "auto-ingested"],
             author="hids-auto",
+            workspace_id=workspace_id,
         )
         if source_target and Path(source_target).exists():
             self.enterprise_service.add_chain_of_custody_event(
@@ -892,6 +990,7 @@ class HidsIntegrationService:
                 actor="hids-auto",
                 artifact_path=source_target,
                 notes=f"Source ingested for incident {incident_id}",
+                workspace_id=workspace_id,
             )
 
     def _provider_from_incident(self, incident: dict[str, Any]) -> str:
@@ -933,7 +1032,10 @@ class HidsIntegrationService:
             context["pid"] = self._find_pid_by_path_or_name(file_path, context["process_name"]) if file_path else None
         if self.mitre_service is not None:
             try:
-                coverage = self.mitre_service.incident_coverage(str(incident.get("incident_id", "") or ""))
+                coverage = self.mitre_service.incident_coverage(
+                    str(incident.get("incident_id", "") or ""),
+                    workspace_id=str(incident.get("workspace_id", "default") or "default"),
+                )
                 context["mitre_mapping"] = coverage.get("mapped_techniques", context["mitre_mapping"])
                 context["mitre_inferred"] = coverage.get("inferred_techniques", [])
                 context["telemetry_cues"] = coverage.get("telemetry_cues", [])
@@ -1096,6 +1198,7 @@ class HidsIntegrationService:
             apply_actions=True,
             allowed_actions=actions,
             source="policy",
+            workspace_id=str(incident_context.get("workspace_id", "default") or "default"),
         )
 
     def _policy_actions_for_techniques(self, provider_policy: dict[str, Any], mitre_mapping: Any) -> list[str]:
@@ -1185,7 +1288,7 @@ class HidsIntegrationService:
         try:
             if whids.get("enabled") and whids.get("manager_url") and whids.get("api_key"):
                 runtime_api_key = str(whids.get("api_key", ""))
-                if runtime_api_key.startswith(ENCRYPTED_PREFIX):
+                if is_encrypted_secret(runtime_api_key):
                     runtime_api_key = secret_store.decrypt_text(runtime_api_key)
                 self.start_whids_scheduler(
                     str(whids.get("manager_url", "")),
@@ -1193,6 +1296,7 @@ class HidsIntegrationService:
                     endpoint_uuid=str(whids.get("endpoint_uuid", "")),
                     poll_interval=float(whids.get("poll_interval", 300.0) or 300.0),
                     verify_tls=bool(whids.get("verify_tls", True)),
+                    workspace_id=str(whids.get("workspace_id", "default") or "default"),
                 )
         except Exception as exc:
             self.whids_scheduler_state["last_error"] = f"restore_failed: {exc}"
@@ -1205,6 +1309,7 @@ class HidsIntegrationService:
                         poll_interval=float(ossec.get("poll_interval", 2.0) or 2.0),
                         limit=int(ossec.get("limit", 200) or 200),
                         start_at_end=bool(ossec.get("start_at_end", True)),
+                        workspace_id=str(ossec.get("workspace_id", "default") or "default"),
                     )
         except Exception as exc:
             self._ossec_live_state["last_error"] = f"restore_failed: {exc}"

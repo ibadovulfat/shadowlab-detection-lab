@@ -81,3 +81,6 @@ Auth-disabled mode is intentionally constrained. Elevated no-auth defaults are o
 ## Strategic Direction
 
 The platform is strongest as a Windows-first local workstation for host visibility, suspicious-process investigation, controlled response actions, case-driven investigation, and operator-ready reporting.
+
+updated
+

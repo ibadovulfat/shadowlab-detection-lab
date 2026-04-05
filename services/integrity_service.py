@@ -23,25 +23,38 @@ class IntegrityService:
         self.history_path = self.out_dir / "integrity_manifest_history.jsonl"
         self.signing_key_setting = "integrity_signing_key_enc"
 
-    def refresh_manifest(self) -> dict[str, Any]:
-        manifest = self._build_manifest()
+    def refresh_manifest(self, workspace_id: str = "default") -> dict[str, Any]:
+        manifest = self._build_manifest(workspace_id=workspace_id)
         manifest["signature"] = self._sign_manifest(manifest)
         manifest["signature_status"] = "signed" if manifest["signature"] else "unsigned"
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        with self.history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"generated_at": manifest.get("generated_at"), "signature": manifest.get("signature", ""), "file_count": len(manifest.get("files", {}))}) + "\n")
+        manifest_path = self._manifest_path(workspace_id)
+        history_path = self._history_path(workspace_id)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "generated_at": manifest.get("generated_at"),
+                        "signature": manifest.get("signature", ""),
+                        "file_count": len(manifest.get("files", {})),
+                        "workspace_id": workspace_id,
+                    }
+                )
+                + "\n"
+            )
         return manifest
 
-    def verify_manifest(self) -> dict[str, Any]:
-        if not self.manifest_path.exists():
+    def verify_manifest(self, workspace_id: str = "default") -> dict[str, Any]:
+        manifest_path = self._manifest_path(workspace_id)
+        if not manifest_path.exists():
             return {
                 "status": "missing_manifest",
-                "manifest_path": str(self.manifest_path),
+                "manifest_path": str(manifest_path),
                 "recommendation": "Run integrity refresh to create a trusted baseline.",
             }
-        stored = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        current = self._build_manifest()
+        stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+        current = self._build_manifest(workspace_id=workspace_id)
         stored_files = stored.get("files", {})
         current_files = current.get("files", {})
         missing = sorted(path for path in stored_files if path not in current_files)
@@ -63,7 +76,7 @@ class IntegrityService:
         signature_state = self._signature_state(stored)
         return {
             "status": "signature_invalid" if signature_state == "invalid" else status,
-            "manifest_path": str(self.manifest_path),
+            "manifest_path": str(manifest_path),
             "roots": current.get("roots", {}),
             "counts": {
                 "verified": len(verified),
@@ -97,10 +110,11 @@ class IntegrityService:
             "signature_status": manifest.get("signature_status", "unsigned"),
         }
 
-    def history(self, limit: int = 50) -> list[dict[str, Any]]:
-        if not self.history_path.exists():
+    def history(self, limit: int = 50, workspace_id: str = "default") -> list[dict[str, Any]]:
+        history_path = self._history_path(workspace_id)
+        if not history_path.exists():
             return []
-        lines = self.history_path.read_text(encoding="utf-8").splitlines()[-limit:]
+        lines = history_path.read_text(encoding="utf-8").splitlines()[-limit:]
         history: list[dict[str, Any]] = []
         for line in lines:
             try:
@@ -111,8 +125,10 @@ class IntegrityService:
                 history.append(item)
         return history
 
-    def _build_manifest(self) -> dict[str, Any]:
+    def _build_manifest(self, workspace_id: str = "default") -> dict[str, Any]:
         files: dict[str, dict[str, Any]] = {}
+        manifest_path = self._manifest_path(workspace_id)
+        history_path = self._history_path(workspace_id)
         roots = {
             "artifacts": str(self.out_dir.resolve()),
             "evidence": str(self.evidence_dir.resolve()),
@@ -126,10 +142,15 @@ class IntegrityService:
             if not directory.exists():
                 continue
             for path in sorted(item for item in directory.rglob("*") if item.is_file()):
-                if path.resolve() in {self.manifest_path.resolve(), self.history_path.resolve()}:
+                if path.resolve() in {manifest_path.resolve(), history_path.resolve()}:
                     continue
                 if allowed_suffixes and path.suffix.lower() not in allowed_suffixes:
                     continue
+                if directory == self.out_dir and workspace_id != "default":
+                    workspace_root = (self.out_dir / "workspaces" / workspace_id).resolve()
+                    resolved_path = path.resolve()
+                    if workspace_root not in resolved_path.parents and resolved_path != workspace_root:
+                        continue
                 relative = path.resolve().relative_to(self.base_dir.resolve()).as_posix()
                 files[relative] = {
                     "sha256": self._sha256(path),
@@ -138,10 +159,26 @@ class IntegrityService:
                 }
         return {
             "generated_at": time.time(),
-            "manifest_path": str(self.manifest_path),
+            "manifest_path": str(manifest_path),
             "roots": roots,
             "files": files,
         }
+
+    def _manifest_path(self, workspace_id: str) -> Path:
+        current = str(workspace_id or "default").strip().lower() or "default"
+        if current == "default":
+            return self.manifest_path
+        target = self.out_dir / "workspaces" / current
+        target.mkdir(parents=True, exist_ok=True)
+        return target / "integrity_manifest.json"
+
+    def _history_path(self, workspace_id: str) -> Path:
+        current = str(workspace_id or "default").strip().lower() or "default"
+        if current == "default":
+            return self.history_path
+        target = self.out_dir / "workspaces" / current
+        target.mkdir(parents=True, exist_ok=True)
+        return target / "integrity_manifest_history.jsonl"
 
     def _sign_manifest(self, manifest: dict[str, Any]) -> str:
         signing_key = self._load_signing_key()

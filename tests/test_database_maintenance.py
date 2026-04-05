@@ -95,6 +95,103 @@ class DatabaseMaintenanceTests(unittest.TestCase):
         self.assertIn("RETURNING id", executed_sql)
         self.assertIn("EXTRACT(EPOCH FROM NOW())", executed_sql)
 
+    def test_workspace_columns_are_available_on_shared_records(self) -> None:
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.upsert_incident(
+                conn,
+                "INC-WORKSPACE-001",
+                time.time(),
+                "medium",
+                "Workspace scoped incident",
+                "Workspace persistence check",
+                workspace_id="tenant-a",
+            )
+            case_id = db.create_case_record(conn, "Workspace case", workspace_id="tenant-a")
+            db.log_case_activity(
+                conn,
+                case_id=case_id,
+                event_type="workspace_check",
+                summary="workspace propagation",
+                workspace_id="tenant-a",
+            )
+            db.upsert_connector(conn, "workspace-siem", "siem", True, workspace_id="tenant-a")
+            db.insert_telemetry(conn, [{"ts": time.time(), "cpu": 1.0}], workspace_id="tenant-a")
+            db.log_response_action(conn, "kill", 12, "cmd.exe", "blocked", workspace_id="tenant-a")
+            db.log_alert(conn, "https://localhost/hook", "webhook", "high", "Alert", "sent", "detail", workspace_id="tenant-a")
+            db.log_remediation(conn, "registry", "HKCU\\Test", status="applied", workspace_id="tenant-a")
+            db.log_quarantine(conn, 12, "cmd.exe", "c:/a.exe", "c:/q/a.exe", workspace_id="tenant-a")
+            incidents = db.get_incidents(conn, workspace_id="tenant-a").fillna("")
+            cases = db.get_case_records(conn).fillna("")
+            activity = db.get_case_activity(conn, case_id).fillna("")
+            connectors = db.get_connectors(conn).fillna("")
+            telemetry = db.get_historical_data(conn, workspace_id="tenant-a").fillna("")
+            responses = db.get_response_logs(conn, workspace_id="tenant-a").fillna("")
+            alerts = db.get_alerts(conn, workspace_id="tenant-a").fillna("")
+            remediations = db.get_remediations(conn, workspace_id="tenant-a").fillna("")
+            quarantine = db.get_quarantine(conn, workspace_id="tenant-a").fillna("")
+        finally:
+            conn.close()
+        self.assertIn("workspace_id", incidents.columns)
+        self.assertEqual(str(incidents.iloc[0]["workspace_id"]), "tenant-a")
+        self.assertIn("workspace_id", cases.columns)
+        self.assertEqual(str(cases[cases["id"] == case_id].iloc[0]["workspace_id"]), "tenant-a")
+        self.assertIn("workspace_id", activity.columns)
+        self.assertEqual(str(activity.iloc[0]["workspace_id"]), "tenant-a")
+        self.assertIn("workspace_id", connectors.columns)
+        self.assertEqual(str(connectors[connectors["name"] == "workspace-siem"].iloc[0]["workspace_id"]), "tenant-a")
+        for frame in (telemetry, responses, alerts, remediations, quarantine):
+            self.assertIn("workspace_id", frame.columns)
+            self.assertEqual(str(frame.iloc[0]["workspace_id"]), "tenant-a")
+
+    def test_host_inventory_rejects_cross_workspace_host_id_takeover(self) -> None:
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.upsert_host(
+                conn,
+                host_id="shared-host-1",
+                host="shared-host-1",
+                platform="Windows",
+                role="agent",
+                ip_address="10.0.0.10",
+                api_status="online",
+                agent_version="1.0",
+                boot_time=time.time(),
+                last_seen=time.time(),
+                workspace_id="tenant-a",
+            )
+            with self.assertRaises(ValueError):
+                db.upsert_host(
+                    conn,
+                    host_id="shared-host-1",
+                    host="shared-host-1",
+                    platform="Windows",
+                    role="agent",
+                    ip_address="10.0.0.11",
+                    api_status="online",
+                    agent_version="1.0",
+                    boot_time=time.time(),
+                    last_seen=time.time(),
+                    workspace_id="tenant-b",
+                )
+        finally:
+            conn.close()
+
+    def test_connector_registry_allows_same_name_per_workspace(self) -> None:
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.upsert_connector(conn, "splunk", "siem", True, workspace_id="tenant-a")
+            db.upsert_connector(conn, "splunk", "siem", True, workspace_id="tenant-b")
+            connectors = db.get_connectors(conn).fillna("")
+        finally:
+            conn.close()
+        scoped = connectors[connectors["name"] == "splunk"]
+        self.assertTrue(any(str(row["workspace_id"]) == "tenant-a" for _, row in scoped.iterrows()))
+        self.assertTrue(any(str(row["workspace_id"]) == "tenant-b" for _, row in scoped.iterrows()))
+
 
 if __name__ == "__main__":
     unittest.main()

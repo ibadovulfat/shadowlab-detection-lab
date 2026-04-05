@@ -43,3 +43,6 @@ Do not include:
 - sensitive personal information
 
 If a secret is already exposed, rotate it before reporting the issue.
+
+updated
+

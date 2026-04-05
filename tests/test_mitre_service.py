@@ -87,6 +87,7 @@ def make_settings() -> security.SecuritySettings:
         api_keys={},
         api_keys_sha256={},
         auth_required=False,
+        require_tls=False,
         enable_dangerous_actions=True,
         enable_network_warfare=False,
         allow_destructive_file_delete=False,
@@ -94,6 +95,7 @@ def make_settings() -> security.SecuritySettings:
         protected_process_names=["lsass.exe", "wininit.exe"],
         policy_profile="lab",
         noauth_default_role="admin",
+        oidc_enabled=False,
     )
 
 
@@ -182,8 +184,12 @@ class MitreApiTests(unittest.TestCase):
         self.base_dir = Path(self.temp_dir.name)
         self.bundle_path = self.base_dir / "enterprise-attack.json"
         self.bundle_path.write_text(json.dumps(_bundle_fixture()), encoding="utf-8")
-        self.mitre_service = MitreAttackService(self.base_dir, db)
-        self.mitre_service.load_bundle(str(self.bundle_path), source="api-test")
+        api_bundle_dir = api.main.MITRE_IMPORT_ROOT
+        api_bundle_dir.mkdir(parents=True, exist_ok=True)
+        self.api_bundle_path = api_bundle_dir / f"enterprise-attack-api-{int(time.time() * 1000)}.json"
+        self.api_bundle_path.write_text(json.dumps(_bundle_fixture()), encoding="utf-8")
+        self.mitre_service = MitreAttackService(api.main.BASE_DIR, db)
+        self.mitre_service.load_bundle(str(self.api_bundle_path), source="api-test")
         self.incident_id = f"INC-MITRE-API-{int(time.time() * 1000)}"
         conn = db.create_connection()
         self.assertIsNotNone(conn)
@@ -211,6 +217,7 @@ class MitreApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+        self.api_bundle_path.unlink(missing_ok=True)
         self._secret_env.stop()
 
     def test_api_exposes_mitre_summary_and_case_export(self) -> None:
@@ -230,7 +237,7 @@ class MitreApiTests(unittest.TestCase):
                     self.assertEqual(discover.status_code, 200)
                     self.assertTrue(discover.json())
 
-                    compare = self.client.post("/enterprise/mitre/compare", json={"file_path": str(self.bundle_path)})
+                    compare = self.client.post("/enterprise/mitre/compare", json={"file_path": str(self.api_bundle_path)})
                     self.assertEqual(compare.status_code, 200)
                     self.assertIn("candidate_counts", compare.json())
 

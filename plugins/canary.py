@@ -1,4 +1,3 @@
-
 import os
 import time
 from pathlib import Path
@@ -29,7 +28,7 @@ class RansomwareCanary:
         self.canary_dir.mkdir(exist_ok=True)
         created = []
         for f in self.files:
-            p = self.canary_dir / f
+            p = self.canary_dir / Path(f).name
             with open(p, 'w') as fp:
                 fp.write("This is a honeypot file. Modification triggers alarm.\n" * 100)
             created.append(str(p))
@@ -57,6 +56,18 @@ class RansomwareCanary:
 
     def cleanup(self):
         self.stop()
-        if self.canary_dir.exists():
-            import shutil
-            shutil.rmtree(self.canary_dir)
+        if not self.canary_dir.exists():
+            return
+        for filename in self.files:
+            target = self.canary_dir / Path(filename).name
+            try:
+                if target.exists() and target.is_file():
+                    target.unlink()
+            except Exception:
+                continue
+        try:
+            next(self.canary_dir.iterdir())
+        except StopIteration:
+            self.canary_dir.rmdir()
+        except Exception:
+            return

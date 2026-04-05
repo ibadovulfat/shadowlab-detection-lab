@@ -80,6 +80,9 @@ def main() -> int:
         allowed_origins=["http://127.0.0.1", "http://localhost"],
         protected_process_names=["lsass.exe", "wininit.exe"],
         policy_profile="lab",
+        api_key_role="viewer",
+        noauth_default_role="viewer",
+        oidc_enabled=False,
     )
 
     security._RATE_LIMIT_BUCKETS.clear()

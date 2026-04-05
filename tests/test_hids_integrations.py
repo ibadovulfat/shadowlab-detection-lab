@@ -132,6 +132,63 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         self.assertTrue(incident["incident_id"].startswith("OSSEC-"))
         self.assertTrue(any(item["incident_id"] == result["incident_ids"][0] for item in cases))
 
+    def test_import_ossec_file_scopes_case_and_export_to_workspace(self) -> None:
+        source = self.temp_path / "tenant-alerts.log"
+        source.write_text(
+            "\n".join(
+                [
+                    "** Alert 171102.1: - syscheck,syscheck_entry_modified,",
+                    "2026 Mar 21 10:33:01 (tenant-web-01) 10.0.0.25->syscheck",
+                    "Rule: 550 (level 7) -> 'Integrity checksum changed.'",
+                    "Location: /var/www/html/index.php",
+                    "Src IP: 10.0.0.25",
+                    "File '/var/www/html/index.php' modified.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.service.import_ossec_file(str(source), workspace_id="tenant-a")
+
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            incident = db.get_incident_by_id(conn, result["incident_ids"][0], workspace_id="tenant-a")
+            tenant_cases = db.get_case_records(conn, workspace_id="tenant-a").fillna("").to_dict(orient="records")
+            default_cases = db.get_case_records(conn, workspace_id="default").fillna("").to_dict(orient="records")
+            exports = db.get_integration_exports(conn, workspace_id="tenant-a").fillna("").to_dict(orient="records")
+        finally:
+            conn.close()
+
+        self.assertIsNotNone(incident)
+        self.assertEqual(incident["workspace_id"], "tenant-a")
+        self.assertTrue(any(item["incident_id"] == result["incident_ids"][0] for item in tenant_cases))
+        self.assertFalse(any(item["incident_id"] == result["incident_ids"][0] for item in default_cases))
+        self.assertTrue(any(item["export_type"] == "import_file" and item["workspace_id"] == "tenant-a" for item in exports))
+
+    def test_orchestrate_incident_response_respects_workspace_scope(self) -> None:
+        source = self.temp_path / "scoped-alerts.log"
+        source.write_text(
+            "\n".join(
+                [
+                    "** Alert 171102.1: - syscheck,syscheck_entry_modified,",
+                    "2026 Mar 21 10:33:01 (tenant-web-01) 10.0.0.25->syscheck",
+                    "Rule: 550 (level 7) -> 'Integrity checksum changed.'",
+                    "Location: /var/www/html/index.php",
+                    "Src IP: 10.0.0.25",
+                    "File '/var/www/html/index.php' modified.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = self.service.import_ossec_file(str(source), workspace_id="tenant-a")
+
+        planned = self.service.orchestrate_incident_response(result["incident_ids"][0], apply_actions=False, workspace_id="tenant-a")
+        self.assertEqual(planned["incident_id"], result["incident_ids"][0])
+
+        with self.assertRaises(ValueError):
+            self.service.orchestrate_incident_response(result["incident_ids"][0], apply_actions=False, workspace_id="tenant-b")
+
     def test_import_ossec_json_syslog_shape_preserves_file_context(self) -> None:
         payload = {
             "crit": 11,
@@ -192,7 +249,7 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         session.get.side_effect = [endpoints_response, detections_response]
 
         with mock.patch("services.hids_integration_service.requests.Session", return_value=session):
-            result = self.service.import_whids_manager("https://whids.local:1520", "secret-key", limit=50)
+            result = self.service.import_whids_manager("https://localhost:1520", "secret-key", limit=50)
 
         self.assertEqual(result["integration"], "whids")
         self.assertEqual(result["imported"], 1)
@@ -200,6 +257,14 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         first_call = session.get.call_args_list[0]
         self.assertIn("endpoints", first_call.args[0])
         self.assertEqual(session.headers.update.call_args.args[0]["X-Api-Key"], "secret-key")
+
+    def test_import_whids_manager_rejects_unsafe_destination(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.import_whids_manager("http://169.254.169.254/latest", "secret-key", limit=50)
+
+    def test_import_whids_manager_rejects_tls_bypass_for_remote_host(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.import_whids_manager("https://whids.example", "secret-key", limit=50, verify_tls=False)
 
     def test_sync_whids_reports_writes_report_file(self) -> None:
         reports_response = mock.Mock()
@@ -218,7 +283,7 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         session.get.return_value = reports_response
 
         with mock.patch("services.hids_integration_service.requests.Session", return_value=session):
-            result = self.service.sync_whids_reports("https://whids.local:1520", "secret-key")
+            result = self.service.sync_whids_reports("https://localhost:1520", "secret-key")
 
         self.assertEqual(result["integration"], "whids")
         self.assertEqual(result["report_count"], 1)
@@ -247,7 +312,7 @@ class HidsIntegrationServiceTests(unittest.TestCase):
 
         with mock.patch("services.hids_integration_service.requests.Session", return_value=session):
             result = self.service.download_whids_artifacts(
-                "https://whids.local:1520",
+                "https://localhost:1520",
                 "secret-key",
                 endpoint_uuid="endpoint-1",
                 max_files=5,
@@ -305,12 +370,12 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         session.delete.side_effect = [delete_response, delete_response]
 
         with mock.patch("services.hids_integration_service.requests.Session", return_value=session):
-            iocs = self.service.list_whids_iocs("https://whids.local:1520", "secret-key")
-            added_iocs = self.service.add_whids_iocs("https://whids.local:1520", "secret-key", [{"value": "bad.example", "type": "domain"}])
-            rules = self.service.list_whids_rules("https://whids.local:1520", "secret-key")
-            added_rules = self.service.add_whids_rules("https://whids.local:1520", "secret-key", [{"Name": "ShadowLabRule"}])
-            deleted_iocs = self.service.delete_whids_iocs("https://whids.local:1520", "secret-key", filters={"value": "bad.example"})
-            deleted_rules = self.service.delete_whids_rules("https://whids.local:1520", "secret-key", rule_name="ShadowLabRule")
+            iocs = self.service.list_whids_iocs("https://localhost:1520", "secret-key")
+            added_iocs = self.service.add_whids_iocs("https://localhost:1520", "secret-key", [{"value": "bad.example", "type": "domain"}])
+            rules = self.service.list_whids_rules("https://localhost:1520", "secret-key")
+            added_rules = self.service.add_whids_rules("https://localhost:1520", "secret-key", [{"Name": "ShadowLabRule"}])
+            deleted_iocs = self.service.delete_whids_iocs("https://localhost:1520", "secret-key", filters={"value": "bad.example"})
+            deleted_rules = self.service.delete_whids_rules("https://localhost:1520", "secret-key", rule_name="ShadowLabRule")
 
         self.assertEqual(len(iocs["items"]), 1)
         self.assertEqual(len(added_iocs["items"]), 1)
@@ -330,8 +395,8 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         session.get.side_effect = [config_response, archive_response]
 
         with mock.patch("services.hids_integration_service.requests.Session", return_value=session):
-            config = self.service.get_whids_endpoint_config("https://whids.local:1520", "secret-key", endpoint_uuid="endpoint-1")
-            archive = self.service.get_whids_report_archive("https://whids.local:1520", "secret-key", endpoint_uuid="endpoint-1")
+            config = self.service.get_whids_endpoint_config("https://localhost:1520", "secret-key", endpoint_uuid="endpoint-1")
+            archive = self.service.get_whids_report_archive("https://localhost:1520", "secret-key", endpoint_uuid="endpoint-1")
 
         self.assertTrue(config["config"]["endpoint"])
         self.assertEqual(len(archive["items"]), 1)
@@ -391,21 +456,44 @@ class HidsIntegrationServiceTests(unittest.TestCase):
             orchestrator.execute_ossec_active_response("firewall-drop", "1.2.3.4 & whoami")
 
     def test_whids_runtime_state_encrypts_scheduler_api_key(self) -> None:
-        service = HidsIntegrationService(
-            db,
-            enterprise_service=EnterpriseService(Path(__file__).resolve().parent.parent, mock.Mock(), mock.Mock()),
-            investigation_service=InvestigationService(TimelineService()),
-            response_service=mock.Mock(),
-        )
+        with mock.patch.dict("os.environ", {"SHADOWLAB_RESTORE_INTEGRATION_RUNTIME": "false"}):
+            service = HidsIntegrationService(
+                db,
+                enterprise_service=EnterpriseService(Path(__file__).resolve().parent.parent, mock.Mock(), mock.Mock()),
+                investigation_service=InvestigationService(TimelineService()),
+                response_service=mock.Mock(),
+            )
         with mock.patch("services.hids_integration_service.threading.Thread") as thread_cls:
             thread_instance = mock.Mock()
             thread_cls.return_value = thread_instance
-            service.start_whids_scheduler("https://whids.local:1520", "super-secret-key", endpoint_uuid="endpoint-1")
+            service.start_whids_scheduler("https://localhost:1520", "super-secret-key", endpoint_uuid="endpoint-1")
 
         runtime_payload = json.loads(service.runtime_path.read_text(encoding="utf-8"))
         saved_key = runtime_payload["whids_scheduler"]["api_key"]
         self.assertNotEqual(saved_key, "super-secret-key")
-        self.assertTrue(str(saved_key).startswith("enc:v1:"))
+        self.assertTrue(str(saved_key).startswith("enc:v"))
+
+    def test_whids_runtime_state_persists_scheduler_workspace(self) -> None:
+        with mock.patch.dict("os.environ", {"SHADOWLAB_RESTORE_INTEGRATION_RUNTIME": "false"}):
+            service = HidsIntegrationService(
+                db,
+                enterprise_service=EnterpriseService(Path(__file__).resolve().parent.parent, mock.Mock(), mock.Mock()),
+                investigation_service=InvestigationService(TimelineService()),
+                response_service=mock.Mock(),
+            )
+        with mock.patch("services.hids_integration_service.threading.Thread") as thread_cls:
+            thread_instance = mock.Mock()
+            thread_cls.return_value = thread_instance
+            state = service.start_whids_scheduler(
+                "https://localhost:1520",
+                "super-secret-key",
+                endpoint_uuid="endpoint-1",
+                workspace_id="tenant-a",
+            )
+
+        runtime_payload = json.loads(service.runtime_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["workspace_id"], "tenant-a")
+        self.assertEqual(runtime_payload["whids_scheduler"]["workspace_id"], "tenant-a")
 
     def test_quarantine_file_keeps_existing_artifact(self) -> None:
         orchestrator = ResponseOrchestrator()
@@ -458,6 +546,38 @@ class HidsIntegrationServiceTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertTrue(any(str(item.get("incident_id", "")).startswith("OSSEC-") for item in incidents))
+
+    def test_ossec_live_ingest_scopes_to_workspace(self) -> None:
+        source = self.temp_path / "tenant-live-alerts.log"
+        source.write_text("", encoding="utf-8")
+
+        self.service.start_ossec_live_ingest(str(source), poll_interval=0.5, limit=50, start_at_end=True, workspace_id="tenant-a")
+        source.write_text(
+            "\n".join(
+                [
+                    "** Alert 171102.1: - syscheck,syscheck_entry_modified,",
+                    "2026 Mar 21 10:33:01 (web-live-tenant) 10.0.0.25->syscheck",
+                    "Rule: 550 (level 7) -> 'Integrity checksum changed.'",
+                    "Location: /var/www/html/index.php",
+                    "Src IP: 10.0.0.25",
+                    "File '/var/www/html/index.php' modified.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        time.sleep(1.2)
+        status = self.service.stop_ossec_live_ingest()
+
+        self.assertEqual(status["workspace_id"], "tenant-a")
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            tenant_incidents = db.get_incidents(conn, workspace_id="tenant-a").fillna("").to_dict(orient="records")
+            default_incidents = db.get_incidents(conn, workspace_id="default").fillna("").to_dict(orient="records")
+        finally:
+            conn.close()
+        self.assertTrue(any(str(item.get("incident_id", "")).startswith("OSSEC-") for item in tenant_incidents))
+        self.assertFalse(any(str(item.get("incident_id", "")).startswith("OSSEC-") for item in default_incidents))
 
 
 if __name__ == "__main__":

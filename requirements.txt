@@ -30,3 +30,4 @@ requests==2.31.0
 chardet==5.2.0
 reportlab==4.2.0
 psycopg[binary]==3.2.9
+cryptography==44.0.3

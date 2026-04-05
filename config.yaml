@@ -37,7 +37,7 @@ telemetry_fabric:
     headers: {}
     runtime:
         enabled: true
-        binary_path: "C:\\Users\\ulfat\\Downloads\\shadowlab-detection-lab\\build\\telemetry-fabric\\shadowlab-telemetry-fabric.exe"
+        binary_path: "build\\telemetry-fabric\\shadowlab-telemetry-fabric.exe"
         config_path: "config\\telemetry-fabric-runtime.yaml"
         zpages_url: "http://127.0.0.1:55679/debug/servicez"
     build:

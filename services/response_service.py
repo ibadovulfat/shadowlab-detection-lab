@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
-import shutil
-import re
 from typing import Any
 
 import psutil
 
 import database as db
+
+OSSEC_USER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class ResponseOrchestrator:
@@ -25,16 +27,16 @@ class ResponseOrchestrator:
         ]
         self.ossec_home = next((candidate for candidate in candidates if candidate and candidate.exists()), Path.home() / "Documents" / "ossec-hids-main")
 
-    def suspend(self, pid: int, process_name: str) -> dict[str, Any]:
-        return self._execute("SUSPEND", pid, process_name, lambda proc: proc.suspend())
+    def suspend(self, pid: int, process_name: str, workspace_id: str = "default") -> dict[str, Any]:
+        return self._execute("SUSPEND", pid, process_name, lambda proc: proc.suspend(), workspace_id=workspace_id)
 
-    def resume(self, pid: int, process_name: str) -> dict[str, Any]:
-        return self._execute("RESUME", pid, process_name, lambda proc: proc.resume())
+    def resume(self, pid: int, process_name: str, workspace_id: str = "default") -> dict[str, Any]:
+        return self._execute("RESUME", pid, process_name, lambda proc: proc.resume(), workspace_id=workspace_id)
 
-    def kill(self, pid: int, process_name: str) -> dict[str, Any]:
-        return self._execute("KILL", pid, process_name, lambda proc: proc.kill())
+    def kill(self, pid: int, process_name: str, workspace_id: str = "default") -> dict[str, Any]:
+        return self._execute("KILL", pid, process_name, lambda proc: proc.kill(), workspace_id=workspace_id)
 
-    def kill_tree(self, pid: int, process_name: str) -> dict[str, Any]:
+    def kill_tree(self, pid: int, process_name: str, workspace_id: str = "default") -> dict[str, Any]:
         if process_name.lower() in self.protected_names:
             return {"ok": False, "message": f"Protected process blocked: {process_name}"}
         try:
@@ -46,13 +48,13 @@ class ResponseOrchestrator:
                 except Exception:
                     continue
             proc.kill()
-            self._audit("KILL_TREE", pid, process_name, f"Killed process and {len(children)} children")
+            self._audit("KILL_TREE", pid, process_name, f"Killed process and {len(children)} children", workspace_id=workspace_id)
             return {"ok": True, "message": f"KILL_TREE succeeded for PID {pid}", "children_killed": len(children)}
         except Exception as exc:
-            self._audit("KILL_TREE", pid, process_name, f"Failed: {exc}")
+            self._audit("KILL_TREE", pid, process_name, f"Failed: {exc}", workspace_id=workspace_id)
             return {"ok": False, "message": str(exc)}
 
-    def quarantine_file(self, pid: int, process_name: str, path: str | None) -> dict[str, Any]:
+    def quarantine_file(self, pid: int, process_name: str, path: str | None, workspace_id: str = "default") -> dict[str, Any]:
         if not path or not Path(path).exists():
             return {"ok": False, "message": "Executable path unavailable for quarantine"}
         try:
@@ -61,10 +63,10 @@ class ResponseOrchestrator:
             src = Path(path)
             dest = quarantine_dir / self._unique_quarantine_name(src.name)
             shutil.copy2(src, dest)
-            self._audit("QUARANTINE", pid, process_name, f"Copied to quarantine: {dest}")
+            self._audit("QUARANTINE", pid, process_name, f"Copied to quarantine: {dest}", workspace_id=workspace_id)
             return {"ok": True, "message": f"Quarantined copy created at {dest}", "path": str(dest)}
         except Exception as exc:
-            self._audit("QUARANTINE", pid, process_name, f"Failed: {exc}")
+            self._audit("QUARANTINE", pid, process_name, f"Failed: {exc}", workspace_id=workspace_id)
             return {"ok": False, "message": str(exc)}
 
     def execute_ossec_active_response(self, action: str, subject: str, *, mode: str = "add", user: str = "-") -> dict[str, Any]:
@@ -192,6 +194,7 @@ class ResponseOrchestrator:
         pid: int,
         process_name: str,
         executable_path: str | None,
+        workspace_id: str = "default",
         plan: dict[str, Any],
     ) -> dict[str, Any]:
         executed: list[dict[str, Any]] = []
@@ -200,9 +203,9 @@ class ResponseOrchestrator:
             action = str(item.get("action", "")).lower()
             try:
                 if action == "suspend":
-                    result = self.suspend(pid, process_name)
+                    result = self.suspend(pid, process_name, workspace_id=workspace_id)
                 elif action == "quarantine":
-                    result = self.quarantine_file(pid, process_name, executable_path)
+                    result = self.quarantine_file(pid, process_name, executable_path, workspace_id=workspace_id)
                 elif action == "firewall-drop":
                     result = self.execute_ossec_active_response("firewall-drop", str(item.get("target", "")))
                 else:
@@ -229,24 +232,24 @@ class ResponseOrchestrator:
                     remote_ips.append(normalized)
         return remote_ips
 
-    def _execute(self, action: str, pid: int, process_name: str, operation) -> dict[str, Any]:
+    def _execute(self, action: str, pid: int, process_name: str, operation, workspace_id: str = "default") -> dict[str, Any]:
         if process_name.lower() in self.protected_names:
             return {"ok": False, "message": f"Protected process blocked: {process_name}"}
         try:
             proc = psutil.Process(pid)
             operation(proc)
-            self._audit(action, pid, process_name, "User initiated action")
+            self._audit(action, pid, process_name, "User initiated action", workspace_id=workspace_id)
             return {"ok": True, "message": f"{action} succeeded for PID {pid}"}
         except Exception as exc:
-            self._audit(action, pid, process_name, f"Failed: {exc}")
+            self._audit(action, pid, process_name, f"Failed: {exc}", workspace_id=workspace_id)
             return {"ok": False, "message": str(exc)}
 
-    def _audit(self, action: str, pid: int, process_name: str, details: str) -> None:
+    def _audit(self, action: str, pid: int, process_name: str, details: str, workspace_id: str = "default") -> None:
         conn = db.create_connection()
         if not conn:
             return
         try:
-            db.log_response_action(conn, action, pid, process_name, details)
+            db.log_response_action(conn, action, pid, process_name, details, workspace_id=workspace_id)
         finally:
             conn.close()
 
@@ -281,8 +284,8 @@ class ResponseOrchestrator:
 
     def _validated_ossec_user(self, user: str) -> str:
         candidate = str(user or "-").strip()
-        if not candidate or any(ch.isspace() for ch in candidate):
-            raise ValueError("OSSEC active-response user must be a single token")
+        if not candidate or not OSSEC_USER_RE.fullmatch(candidate):
+            raise ValueError("OSSEC active-response user must match ^[A-Za-z0-9._-]+$")
         return candidate
 
     def _unique_quarantine_name(self, filename: str) -> str:

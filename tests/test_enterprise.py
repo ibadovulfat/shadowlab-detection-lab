@@ -42,6 +42,17 @@ class EnterpriseServiceTests(unittest.TestCase):
         result = self.service.get_policy_profiles()
         self.assertIn("prod", result["profiles"])
         self.assertTrue(result["profiles"]["corp"]["approval_required"])
+        self.assertEqual(result["profiles"]["corp"]["workspace_mode"], "team-scoped")
+        self.assertEqual(result["workspace_governance"]["default_workspace_id"], "default")
+
+    def test_cases_are_scoped_by_workspace(self) -> None:
+        alpha = self.service.create_case(title="Alpha case", workspace_id="tenant-a", owner="alpha")
+        beta = self.service.create_case(title="Beta case", workspace_id="tenant-b", owner="beta")
+        tenant_a = self.service.list_cases(workspace_id="tenant-a")
+        tenant_b = self.service.list_cases(workspace_id="tenant-b")
+        self.assertTrue(any(int(item["id"]) == int(alpha["id"]) for item in tenant_a))
+        self.assertFalse(any(int(item["id"]) == int(beta["id"]) for item in tenant_a))
+        self.assertTrue(any(int(item["id"]) == int(beta["id"]) for item in tenant_b))
 
     def test_canary_bypass_assessment_lists_tests(self) -> None:
         result = self.service.assess_canary_bypass()
@@ -53,7 +64,7 @@ class EnterpriseServiceTests(unittest.TestCase):
             name="splunk",
             kind="siem",
             enabled=True,
-            config={"hec_url": "https://invalid.local/hec", "token": "token"},
+            config={"hec_url": "https://127.0.0.1/hec", "token": "token"},
         )
         with mock.patch.object(
             self.service.connector_delivery,
@@ -79,7 +90,7 @@ class EnterpriseServiceTests(unittest.TestCase):
             name="splunk",
             kind="siem",
             enabled=True,
-            config={"hec_url": "https://splunk.example", "token": "super-secret-token"},
+            config={"hec_url": "https://127.0.0.1/hec", "token": "super-secret-token"},
         )
         conn = db.create_connection()
         self.assertIsNotNone(conn)
@@ -87,17 +98,35 @@ class EnterpriseServiceTests(unittest.TestCase):
             rows = db.get_connectors(conn).fillna("").to_dict(orient="records")
         finally:
             conn.close()
-        stored = next(item for item in rows if item["name"] == "splunk")
+        stored = next(item for item in rows if str(item["name"]) == "splunk" and str(item["workspace_id"]) == "default")
         self.assertNotIn("super-secret-token", stored["config_json"])
+        self.assertEqual(stored["workspace_id"], "default")
         listed = next(item for item in self.service.list_connectors() if item["name"] == "splunk")
         self.assertEqual(listed["config"]["token"], "***redacted***")
+
+    def test_connectors_are_isolated_per_workspace(self) -> None:
+        self.service.configure_connector(
+            name="splunk",
+            kind="siem",
+            enabled=True,
+            config={"hec_url": "https://127.0.0.1/hec", "token": "tenant-a-token"},
+            workspace_id="tenant-a",
+        )
+        tenant_a = self.service.list_connectors(workspace_id="tenant-a")
+        tenant_b = self.service.list_connectors(workspace_id="tenant-b")
+        self.assertEqual(next(item for item in tenant_a if item["name"] == "splunk")["workspace_id"], "tenant-a")
+        self.assertEqual(next(item for item in tenant_b if item["name"] == "splunk")["workspace_id"], "tenant-b")
+        self.assertNotEqual(
+            next(item for item in tenant_a if item["name"] == "splunk")["workspace_id"],
+            next(item for item in tenant_b if item["name"] == "splunk")["workspace_id"],
+        )
 
     def test_connector_queue_moves_poison_event_to_dead_letter(self) -> None:
         self.service.configure_connector(
             name="splunk",
             kind="siem",
             enabled=True,
-            config={"hec_url": "https://splunk.example", "token": "token"},
+            config={"hec_url": "https://127.0.0.1/hec", "token": "token"},
         )
         conn = db.create_connection()
         self.assertIsNotNone(conn)
@@ -143,6 +172,7 @@ class EnterpriseServiceTests(unittest.TestCase):
                         "remote_ips": "8.8.8.8",
                     }
                 ],
+                workspace_id="default",
             )
             db.upsert_incident(
                 conn,
@@ -152,7 +182,7 @@ class EnterpriseServiceTests(unittest.TestCase):
                 "Suspicious powershell behavior",
                 "Unit test incident",
             )
-            db.log_response_action(conn, "kill", 404, "powershell.exe", "killed during unit test")
+            db.log_response_action(conn, "kill", 404, "powershell.exe", "killed during unit test", workspace_id="default")
         finally:
             conn.close()
 

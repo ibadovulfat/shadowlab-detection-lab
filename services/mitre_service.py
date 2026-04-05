@@ -181,8 +181,8 @@ class MitreAttackService:
             raise KeyError(f"Unknown ATT&CK technique: {normalized_id}")
         return self._technique_view(technique)
 
-    def incident_coverage(self, incident_id: str) -> dict[str, Any]:
-        incident = self._get_incident(incident_id)
+    def incident_coverage(self, incident_id: str, workspace_id: str = "") -> dict[str, Any]:
+        incident = self._get_incident(incident_id, workspace_id=workspace_id)
         explicit = self._safe_json_list(incident.get("mitre_mapping"))
         inferred = self._infer_techniques_for_incident(incident)
         combined = list(dict.fromkeys(explicit + inferred))
@@ -204,8 +204,8 @@ class MitreAttackService:
             "telemetry_cues": self._incident_cues(incident),
         }
 
-    def case_coverage(self, case_id: int) -> dict[str, Any]:
-        incident_ids = self._case_incident_ids(case_id)
+    def case_coverage(self, case_id: int, workspace_id: str = "") -> dict[str, Any]:
+        incident_ids = self._case_incident_ids(case_id, workspace_id=workspace_id)
         if not incident_ids:
             return {
                 "case_id": int(case_id),
@@ -214,19 +214,19 @@ class MitreAttackService:
                 "mapped_techniques": [],
                 "coverage_summary": self._coverage_summary([], tactic_list=[]),
             }
-        return self._aggregate_coverages(incident_ids=incident_ids, case_id=int(case_id))
+        return self._aggregate_coverages(incident_ids=incident_ids, case_id=int(case_id), workspace_id=workspace_id)
 
-    def enterprise_summary(self, *, limit: int = 50) -> dict[str, Any]:
+    def enterprise_summary(self, *, limit: int = 50, workspace_id: str = "") -> dict[str, Any]:
         conn = self.db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            incidents = self.db.get_incidents(conn).fillna("").to_dict(orient="records")
+            incidents = self.db.get_incidents(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         recent = incidents[: max(1, int(limit))]
         incident_ids = [str(item.get("incident_id", "")).strip() for item in recent if str(item.get("incident_id", "")).strip()]
-        summary = self._aggregate_coverages(incident_ids=incident_ids)
+        summary = self._aggregate_coverages(incident_ids=incident_ids, workspace_id=workspace_id)
         summary["recent_incident_count"] = len(recent)
         summary["dataset_lifecycle"] = self.status()
         coverage_summary = summary.get("coverage_summary", {}) if isinstance(summary.get("coverage_summary"), dict) else {}
@@ -239,11 +239,12 @@ class MitreAttackService:
         *,
         incident_ids: list[str] | None = None,
         case_id: int | None = None,
+        workspace_id: str = "",
         layer_name: str = "",
         description: str = "",
         include_subtechniques: bool = True,
     ) -> dict[str, Any]:
-        coverage = self._coverage_bundle(case_id=case_id, incident_ids=incident_ids)
+        coverage = self._coverage_bundle(case_id=case_id, incident_ids=incident_ids, workspace_id=workspace_id)
         selected_incident_ids = coverage["incident_ids"]
         if not selected_incident_ids:
             raise ValueError("At least one incident_id or case_id is required to export a Navigator layer")
@@ -293,8 +294,8 @@ class MitreAttackService:
         target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return {"saved_path": str(target), "technique_count": len(techniques), "incident_ids": selected_incident_ids, "layer": payload}
 
-    def workbench_export(self, *, case_id: int | None = None, incident_ids: list[str] | None = None) -> dict[str, Any]:
-        coverage_items = self._coverage_bundle(case_id=case_id, incident_ids=incident_ids)
+    def workbench_export(self, *, case_id: int | None = None, incident_ids: list[str] | None = None, workspace_id: str = "") -> dict[str, Any]:
+        coverage_items = self._coverage_bundle(case_id=case_id, incident_ids=incident_ids, workspace_id=workspace_id)
         notes = []
         relationships = []
         for technique in coverage_items["techniques"]:
@@ -597,24 +598,24 @@ class MitreAttackService:
             "object_counts": dict(counts),
         }
 
-    def _get_incident(self, incident_id: str) -> dict[str, Any]:
+    def _get_incident(self, incident_id: str, workspace_id: str = "") -> dict[str, Any]:
         conn = self.db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            incident = self.db.get_incident_by_id(conn, incident_id)
+            incident = self.db.get_incident_by_id(conn, incident_id, workspace_id=workspace_id)
         finally:
             conn.close()
         if not incident:
             raise KeyError(f"Incident not found: {incident_id}")
         return incident
 
-    def _case_incident_ids(self, case_id: int) -> list[str]:
+    def _case_incident_ids(self, case_id: int, workspace_id: str = "") -> list[str]:
         conn = self.db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            cases = self.db.get_case_records(conn).fillna("").to_dict(orient="records")
+            cases = self.db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         case_row = next((item for item in cases if int(item.get("id", 0) or 0) == int(case_id)), None)
@@ -623,14 +624,14 @@ class MitreAttackService:
         incident_id = str(case_row.get("incident_id", "")).strip()
         return [incident_id] if incident_id else []
 
-    def _aggregate_coverages(self, *, incident_ids: list[str], case_id: int | None = None) -> dict[str, Any]:
+    def _aggregate_coverages(self, *, incident_ids: list[str], case_id: int | None = None, workspace_id: str = "") -> dict[str, Any]:
         techniques_by_id: dict[str, dict[str, Any]] = {}
         tactic_list: list[str] = []
         explicit_ids: list[str] = []
         inferred_ids: list[str] = []
         cue_counter = Counter()
         for incident_id in incident_ids:
-            coverage = self.incident_coverage(incident_id)
+            coverage = self.incident_coverage(incident_id, workspace_id=workspace_id)
             tactic_list.extend(coverage.get("attack_chain", []))
             explicit_ids.extend(coverage.get("explicit_mapped_techniques", []))
             inferred_ids.extend(coverage.get("inferred_techniques", []))
@@ -661,16 +662,16 @@ class MitreAttackService:
             "coverage_summary": coverage_summary,
         }
 
-    def _coverage_bundle(self, *, case_id: int | None = None, incident_ids: list[str] | None = None) -> dict[str, Any]:
+    def _coverage_bundle(self, *, case_id: int | None = None, incident_ids: list[str] | None = None, workspace_id: str = "") -> dict[str, Any]:
         selected_incident_ids = [str(item).strip() for item in (incident_ids or []) if str(item).strip()]
         if case_id is not None:
-            selected_incident_ids.extend(self._case_incident_ids(int(case_id)))
+            selected_incident_ids.extend(self._case_incident_ids(int(case_id), workspace_id=workspace_id))
         selected_incident_ids = list(dict.fromkeys(selected_incident_ids))
-        aggregated = self._aggregate_coverages(incident_ids=selected_incident_ids, case_id=case_id)
+        aggregated = self._aggregate_coverages(incident_ids=selected_incident_ids, case_id=case_id, workspace_id=workspace_id)
         technique_counter: Counter[str] = Counter()
         comments: dict[str, list[str]] = defaultdict(list)
         for incident_id in selected_incident_ids:
-            coverage = self.incident_coverage(incident_id)
+            coverage = self.incident_coverage(incident_id, workspace_id=workspace_id)
             title = str(coverage.get("title", incident_id))
             severity = str(coverage.get("severity", "medium")).lower()
             base_score = self._severity_score(severity)

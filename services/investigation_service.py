@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import database as db
+from core.workspace_context import DEFAULT_WORKSPACE_ID, filter_rows_by_workspace, workspace_matches_row
 
 from services.timeline_service import TimelineService
 
@@ -17,6 +18,7 @@ class InvestigationService:
     def workspace(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         query_text: str = "",
         event_types: list[str] | None = None,
         severities: list[str] | None = None,
@@ -30,18 +32,20 @@ class InvestigationService:
             raise RuntimeError("Database unavailable")
         try:
             items = self.timeline_service.build(
-                telemetry_rows=db.get_historical_data(conn).to_dict(orient="records")[-300:],
-                response_rows=db.get_response_logs(conn).to_dict(orient="records")[:300],
-                incident_rows=db.get_incidents(conn).to_dict(orient="records")[:300],
-                alert_rows=db.get_alerts(conn).to_dict(orient="records")[:300],
-                remediation_rows=db.get_remediations(conn).to_dict(orient="records")[:300],
+                telemetry_rows=db.get_historical_data(conn, workspace_id=workspace_id).to_dict(orient="records")[-300:],
+                response_rows=db.get_response_logs(conn, workspace_id=workspace_id).to_dict(orient="records")[:300],
+                incident_rows=filter_rows_by_workspace(db.get_incidents(conn, workspace_id=workspace_id).to_dict(orient="records"), workspace_id)[:300],
+                alert_rows=db.get_alerts(conn, workspace_id=workspace_id).to_dict(orient="records")[:300],
+                remediation_rows=db.get_remediations(conn, workspace_id=workspace_id).to_dict(orient="records")[:300],
             )
             notes = db.get_investigation_notes(conn, case_id=case_id).fillna("").to_dict(orient="records")
             stories = db.get_investigation_stories(conn, case_id=case_id).fillna("").to_dict(orient="records")
             saved_views = db.get_investigation_views(conn, case_id=case_id).fillna("").to_dict(orient="records")
             pins = db.get_investigation_pins(conn, case_id=case_id).fillna("").to_dict(orient="records")
-            cases = db.get_case_records(conn).fillna("").to_dict(orient="records")
-            activity = db.get_case_activity(conn, case_id).fillna("").to_dict(orient="records") if case_id is not None else []
+            cases = filter_rows_by_workspace(db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
+            if case_id is not None and not any(int(item.get("id", 0) or 0) == case_id for item in cases):
+                raise KeyError("Case not found")
+            activity = db.get_case_activity(conn, case_id, workspace_id=workspace_id).fillna("").to_dict(orient="records") if case_id is not None else []
         finally:
             conn.close()
 
@@ -65,18 +69,20 @@ class InvestigationService:
                 "end_time": end_time,
                 "limit": limit,
                 "case_id": case_id,
+                "workspace_id": workspace_id,
             },
             "saved_views": [self._serialize_view(item) for item in saved_views[:10]],
             "recent_notes": [self._serialize_note(item) for item in notes[:10]],
             "active_stories": [self._serialize_story(item) for item in stories[:10]],
             "pinned_items": [self._serialize_pin(item) for item in pins[:10]],
-            "case_board": self._build_case_board(case_id, filtered, notes, stories, pins, cases),
+            "case_board": self._build_case_board(case_id, filtered, notes, stories, pins, cases, workspace_id=workspace_id),
             "activity_feed": [self._serialize_activity(item) for item in activity[:20]],
         }
 
     def create_saved_view(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         name: str,
         description: str = "",
         query_text: str = "",
@@ -97,6 +103,7 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             view_id = db.create_investigation_view(
                 conn,
                 name=name,
@@ -111,11 +118,12 @@ class InvestigationService:
             conn.close()
         return next((self._serialize_view(item) for item in rows if int(item.get("id", 0) or 0) == view_id), {"id": view_id})
 
-    def list_saved_views(self, *, case_id: int | None = None) -> list[dict[str, Any]]:
+    def list_saved_views(self, *, case_id: int | None = None, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             rows = db.get_investigation_views(conn, case_id=case_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
@@ -124,6 +132,7 @@ class InvestigationService:
     def create_note(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         note_text: str,
         case_id: int | None = None,
         view_id: int | None = None,
@@ -137,6 +146,7 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             note_id = db.create_investigation_note(
                 conn,
                 note_text=note_text,
@@ -152,6 +162,7 @@ class InvestigationService:
             if case_id is not None:
                 db.log_case_activity(
                     conn,
+                    workspace_id=workspace_id,
                     case_id=case_id,
                     event_type="note_added",
                     actor=author,
@@ -162,11 +173,12 @@ class InvestigationService:
             conn.close()
         return next((self._serialize_note(item) for item in rows if int(item.get("id", 0) or 0) == note_id), {"id": note_id})
 
-    def list_notes(self, *, case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
+    def list_notes(self, *, case_id: int | None = None, view_id: int | None = None, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             rows = db.get_investigation_notes(conn, case_id=case_id, view_id=view_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
@@ -175,6 +187,7 @@ class InvestigationService:
     def create_story(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         title: str,
         hypothesis: str = "",
         summary: str = "",
@@ -187,6 +200,7 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             story_id = db.create_investigation_story(
                 conn,
                 title=title,
@@ -201,6 +215,7 @@ class InvestigationService:
             if case_id is not None:
                 db.log_case_activity(
                     conn,
+                    workspace_id=workspace_id,
                     case_id=case_id,
                     event_type="story_added",
                     actor=created_by,
@@ -211,11 +226,12 @@ class InvestigationService:
             conn.close()
         return next((self._serialize_story(item) for item in rows if int(item.get("id", 0) or 0) == story_id), {"id": story_id})
 
-    def list_stories(self, *, case_id: int | None = None) -> list[dict[str, Any]]:
+    def list_stories(self, *, case_id: int | None = None, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             rows = db.get_investigation_stories(conn, case_id=case_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
@@ -224,6 +240,7 @@ class InvestigationService:
     def create_pin(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         case_id: int | None = None,
         view_id: int | None = None,
         item_time: float = 0,
@@ -238,6 +255,7 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             pin_id = db.create_investigation_pin(
                 conn,
                 case_id=case_id,
@@ -254,6 +272,7 @@ class InvestigationService:
             if case_id is not None:
                 db.log_case_activity(
                     conn,
+                    workspace_id=workspace_id,
                     case_id=case_id,
                     event_type="pin_added",
                     actor=pinned_by,
@@ -264,23 +283,25 @@ class InvestigationService:
             conn.close()
         return next((self._serialize_pin(item) for item in rows if int(item.get("id", 0) or 0) == pin_id), {"id": pin_id})
 
-    def list_pins(self, *, case_id: int | None = None, view_id: int | None = None) -> list[dict[str, Any]]:
+    def list_pins(self, *, case_id: int | None = None, view_id: int | None = None, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             rows = db.get_investigation_pins(conn, case_id=case_id, view_id=view_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         return [self._serialize_pin(item) for item in rows]
 
-    def case_board(self, *, case_id: int) -> dict[str, Any]:
-        workspace = self.workspace(case_id=case_id, limit=200)
+    def case_board(self, *, case_id: int, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
+        workspace = self.workspace(case_id=case_id, limit=200, workspace_id=workspace_id)
         return workspace["case_board"]
 
     def assign_analyst(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         case_id: int,
         analyst: str,
         role: str = "owner",
@@ -291,11 +312,13 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             assignment_id = db.create_case_assignment(
                 conn, case_id=case_id, analyst=analyst, role=role, status=status, assigned_by=assigned_by
             )
             db.log_case_activity(
                 conn,
+                workspace_id=workspace_id,
                 case_id=case_id,
                 event_type="analyst_assigned",
                 actor=assigned_by,
@@ -307,11 +330,12 @@ class InvestigationService:
             conn.close()
         return next((item for item in rows if int(item.get("id", 0) or 0) == assignment_id), {"id": assignment_id})
 
-    def list_assignments(self, *, case_id: int) -> list[dict[str, Any]]:
+    def list_assignments(self, *, case_id: int, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             return db.get_case_assignments(conn, case_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
@@ -319,6 +343,7 @@ class InvestigationService:
     def create_task(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         case_id: int,
         title: str,
         description: str = "",
@@ -332,6 +357,7 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             task_id = db.create_case_task(
                 conn,
                 case_id=case_id,
@@ -345,6 +371,7 @@ class InvestigationService:
             )
             db.log_case_activity(
                 conn,
+                workspace_id=workspace_id,
                 case_id=case_id,
                 event_type="task_created",
                 actor=created_by,
@@ -356,11 +383,12 @@ class InvestigationService:
             conn.close()
         return next((item for item in rows if int(item.get("id", 0) or 0) == task_id), {"id": task_id})
 
-    def list_tasks(self, *, case_id: int) -> list[dict[str, Any]]:
+    def list_tasks(self, *, case_id: int, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             return db.get_case_tasks(conn, case_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
@@ -370,6 +398,7 @@ class InvestigationService:
         *,
         task_id: int,
         case_id: int,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         status: str | None = None,
         priority: str | None = None,
         assigned_to: str | None = None,
@@ -379,6 +408,7 @@ class InvestigationService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            self._require_case_workspace(conn, case_id, workspace_id)
             db.update_case_task(
                 conn,
                 task_id,
@@ -389,6 +419,7 @@ class InvestigationService:
             )
             db.log_case_activity(
                 conn,
+                workspace_id=workspace_id,
                 case_id=case_id,
                 event_type="task_updated",
                 actor=assigned_to or "",
@@ -400,18 +431,19 @@ class InvestigationService:
             conn.close()
         return next((item for item in rows if int(item.get("id", 0) or 0) == task_id), {"id": task_id})
 
-    def list_activity(self, *, case_id: int) -> list[dict[str, Any]]:
+    def list_activity(self, *, case_id: int, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
-            rows = db.get_case_activity(conn, case_id).fillna("").to_dict(orient="records")
+            self._require_case_workspace(conn, case_id, workspace_id)
+            rows = db.get_case_activity(conn, case_id, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         return [self._serialize_activity(item) for item in rows]
 
-    def export_case_report(self, *, case_id: int, out_dir: str) -> dict[str, Any]:
-        workspace = self.workspace(case_id=case_id, limit=200)
+    def export_case_report(self, *, case_id: int, out_dir: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
+        workspace = self.workspace(case_id=case_id, limit=200, workspace_id=workspace_id)
         board = workspace["case_board"]
         target_dir = Path(out_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -419,8 +451,8 @@ class InvestigationService:
         json_path = target_dir / f"{safe_case_id}_investigation_report.json"
         html_path = target_dir / f"{safe_case_id}_investigation_report.html"
         pdf_path = target_dir / f"{safe_case_id}_executive_report.pdf"
-        assignments = self.list_assignments(case_id=case_id)
-        tasks = self.list_tasks(case_id=case_id)
+        assignments = self.list_assignments(case_id=case_id, workspace_id=workspace_id)
+        tasks = self.list_tasks(case_id=case_id, workspace_id=workspace_id)
         payload = {
             "case_board": board,
             "summary": workspace["summary"],
@@ -564,6 +596,16 @@ class InvestigationService:
             counts[value] = counts.get(value, 0) + 1
         return counts
 
+    def _require_case_workspace(self, conn, case_id: int | None, workspace_id: str) -> None:
+        if case_id is None:
+            return
+        cases = db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+        case_record = next((item for item in cases if int(item.get("id", 0) or 0) == int(case_id)), None)
+        if case_record is None:
+            raise KeyError("Case not found")
+        if not workspace_matches_row(case_record, workspace_id):
+            raise KeyError("Case not found")
+
     def _build_case_board(
         self,
         case_id: int | None,
@@ -572,12 +614,13 @@ class InvestigationService:
         stories: list[dict[str, Any]],
         pins: list[dict[str, Any]],
         cases: list[dict[str, Any]],
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> dict[str, Any]:
         case_record = next((item for item in cases if case_id is not None and int(item.get("id", 0) or 0) == case_id), None)
         high_priority_items = [item for item in items if str(item.get("severity", "")).lower() in {"high", "critical"}][:8]
-        assignments = self.list_assignments(case_id=case_id) if case_id is not None else []
-        tasks = self.list_tasks(case_id=case_id) if case_id is not None else []
-        activity = self.list_activity(case_id=case_id) if case_id is not None else []
+        assignments = self.list_assignments(case_id=case_id, workspace_id=workspace_id) if case_id is not None else []
+        tasks = self.list_tasks(case_id=case_id, workspace_id=workspace_id) if case_id is not None else []
+        activity = self.list_activity(case_id=case_id, workspace_id=workspace_id) if case_id is not None else []
         overdue_tasks = self._overdue_tasks(tasks)
         task_statuses = self._count_values(tasks, "status")
         task_priorities = self._count_values(tasks, "priority")

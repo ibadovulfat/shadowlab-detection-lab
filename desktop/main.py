@@ -34,7 +34,7 @@ class ShadowLabDesktop(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ShadowLab")
-        self.resize(1760, 980)
+        self.resize(1900, 980)
         self.settings = QSettings("ShadowLab", "Desktop")
         self.logo_path = Path(__file__).resolve().parent.parent / "static" / "shadowlab-logo-active.png"
         if self.logo_path.exists():
@@ -130,13 +130,6 @@ class ShadowLabDesktop(QMainWindow):
         hero_row.addWidget(title_logo)
         hero_row.addWidget(title_block)
         hero_row.addStretch(1)
-        layout.addWidget(hero)
-
-        controls = QWidget()
-        controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.controls_row = QHBoxLayout(controls)
-        self.controls_row.setContentsMargins(0, 0, 0, 0)
-        self.controls_row.setSpacing(12)
         self.base = QLineEdit("http://127.0.0.1:8000")
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.Password)
@@ -148,11 +141,15 @@ class ShadowLabDesktop(QMainWindow):
         self.activate_role_btn.clicked.connect(self.activate_role_mode)
         self.auth_mode_badge = QLabel("Mode: locked")
         self.auth_mode_badge.setStyleSheet("color:#f4c26b;font-weight:700;")
-        self.auth_mode_hint = QLabel("Enter an API key here, then press OK to unlock the right workflow.")
-        self.auth_mode_hint.setWordWrap(True)
+        self.auth_mode_hint = QLabel("")
+        self.auth_mode_hint.setWordWrap(False)
         self.auth_mode_hint.setStyleSheet("color:#96a5b8;font-size:12px;")
         self.approval_id = QLineEdit()
         self.approval_id.setPlaceholderText("Optional: approved change ID for corp/prod actions")
+        self.actor_name = QLineEdit()
+        self.actor_name.setPlaceholderText("Operator / actor ID")
+        self.workspace_id = QLineEdit("default")
+        self.workspace_id.setPlaceholderText("Workspace ID (required for corp/prod)")
         self.duration = QSpinBox(); self.duration.setRange(5, 600); self.duration.setValue(30)
         self.interval = QDoubleSpinBox(); self.interval.setRange(0.1, 10.0); self.interval.setValue(1.0)
         self.vt_key = QLineEdit(); self.vt_key.setEchoMode(QLineEdit.Password)
@@ -201,18 +198,21 @@ class ShadowLabDesktop(QMainWindow):
         self.hids_live_start_at_end.setChecked(True)
 
         ops_card = QFrame(); ops_card.setProperty("card", True); ops_card.setMinimumWidth(500)
-        ops_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        ops_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ops_layout = QVBoxLayout(ops_card)
-        ops_layout.setContentsMargins(14, 14, 14, 14)
-        ops_layout.setSpacing(6)
+        ops_layout.setContentsMargins(10, 8, 10, 8)
+        ops_layout.setSpacing(1)
         ops_title = QLabel("Primary Controls")
-        ops_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
+        ops_title.setStyleSheet("font-size:13px;font-weight:700;color:#f4f7fb;")
         ops_sub = QLabel("Base access, fast lookups and day-to-day operator controls")
-        ops_sub.setStyleSheet("color:#96a5b8;font-size:12px;")
+        ops_sub.setStyleSheet("color:#96a5b8;font-size:10px;")
         ops_form = QGridLayout()
         ops_form.setContentsMargins(0, 2, 0, 0)
-        ops_form.setHorizontalSpacing(10)
-        ops_form.setVerticalSpacing(8)
+        ops_form.setHorizontalSpacing(8)
+        ops_form.setVerticalSpacing(4)
+        ops_form.setColumnStretch(0, 1)
+        ops_form.setColumnStretch(1, 1)
+        ops_form.setColumnStretch(2, 1)
         ops_form.addWidget(self._field_block("API Base URL", self.base), 0, 0)
         auth_row = QWidget()
         auth_row_layout = QHBoxLayout(auth_row)
@@ -221,41 +221,69 @@ class ShadowLabDesktop(QMainWindow):
         auth_row_layout.addWidget(self.api_key, 1)
         auth_row_layout.addWidget(self.activate_role_btn)
         access_status = QWidget()
+        access_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         access_status_layout = QVBoxLayout(access_status)
         access_status_layout.setContentsMargins(0, 0, 0, 0)
-        access_status_layout.setSpacing(2)
-        self.auth_mode_badge.setStyleSheet("color:#f4c26b;font-weight:700;font-size:11px;")
-        self.auth_mode_hint.setStyleSheet("color:#96a5b8;font-size:10px;")
-        self.remember_api_key.setStyleSheet("font-size:10px;color:#96a5b8;")
+        access_status_layout.setSpacing(0)
+        access_status_layout.setAlignment(Qt.AlignTop)
+        self.auth_mode_badge.setStyleSheet("color:#f4c26b;font-weight:700;font-size:10px;")
+        self.auth_mode_hint.setStyleSheet("color:#96a5b8;font-size:8px;")
+        self.auth_mode_hint.setMinimumHeight(12)
+        self.auth_mode_hint.setMaximumHeight(12)
+        self.auth_mode_hint.setVisible(False)
+        self.remember_api_key.setStyleSheet("font-size:9px;color:#96a5b8;")
+        if win32cred is None:
+            self.remember_api_key.setChecked(False)
+            self.remember_api_key.setEnabled(False)
+            self.remember_api_key.setToolTip("Secure secret storage is unavailable on this host.")
+        self.remember_api_key.setContentsMargins(0, 0, 0, 0)
         access_status_layout.addWidget(self.auth_mode_badge)
-        access_status_layout.addWidget(self.auth_mode_hint)
         access_status_layout.addWidget(self.remember_api_key)
+        ops_header = QWidget()
+        ops_header_row = QHBoxLayout(ops_header)
+        ops_header_row.setContentsMargins(0, 0, 0, 0)
+        ops_header_row.setSpacing(12)
+        ops_header_left = QWidget()
+        ops_header_left_layout = QVBoxLayout(ops_header_left)
+        ops_header_left_layout.setContentsMargins(0, 0, 0, 0)
+        ops_header_left_layout.setSpacing(1)
+        ops_header_left_layout.addWidget(ops_title)
+        ops_header_left_layout.addWidget(ops_sub)
+        ops_header_row.addWidget(ops_header_left, 1)
+        ops_header_row.addStretch(1)
+        ops_form.addWidget(self._field_block("API Base URL", self.base), 0, 0)
         ops_form.addWidget(self._field_block("Role-Based API Key", auth_row), 0, 1)
-        ops_form.addWidget(self._field_block("Access Mode", access_status), 1, 0)
-        ops_form.addWidget(self._field_block("Approval ID", self.approval_id), 1, 1)
+        ops_form.addWidget(self._field_block("Access Mode", access_status), 0, 2)
+        ops_form.addWidget(self._field_block("Approval ID", self.approval_id), 1, 0)
+        ops_form.addWidget(self._field_block("Actor", self.actor_name), 1, 1)
+        ops_form.addWidget(self._field_block("Workspace ID", self.workspace_id), 1, 2)
         ops_form.addWidget(self._field_block("Monitor Duration (s)", self.duration), 2, 0)
         ops_form.addWidget(self._field_block("Monitor Interval (s)", self.interval), 2, 1)
-        ops_form.addWidget(self._field_block("Threat Hash", self.hash_input), 3, 0)
-        ops_form.addWidget(self._field_block("Threat IP", self.ip_input), 3, 1)
-        ops_form.addWidget(self._field_block("Persistence Filter", self.persist_filter), 4, 0)
-        ops_form.addWidget(self._field_block("Webhook URL", self.webhook_url), 4, 1)
-        ops_layout.addWidget(ops_title)
-        ops_layout.addWidget(ops_sub)
+        ops_form.addWidget(self._field_block("Webhook URL", self.webhook_url), 2, 2)
+        ops_form.addWidget(self._field_block("Threat IP", self.ip_input), 3, 0)
+        ops_form.addWidget(self._field_block("Threat Hash", self.hash_input), 3, 1)
+        ops_form.addWidget(self._field_block("Persistence Filter", self.persist_filter), 3, 2)
+        ops_layout.addWidget(ops_header)
+        ops_layout.addSpacing(1)
         ops_layout.addLayout(ops_form)
+        ops_layout.addStretch(1)
 
         adv_card = QFrame(); adv_card.setProperty("card", True); adv_card.setMinimumWidth(520)
-        adv_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        adv_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         adv_layout = QVBoxLayout(adv_card)
-        adv_layout.setContentsMargins(14, 14, 14, 14)
-        adv_layout.setSpacing(6)
+        adv_layout.setContentsMargins(10, 8, 10, 8)
+        adv_layout.setSpacing(1)
         adv_title = QLabel("Advanced Hunt & Lab Settings")
-        adv_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
+        adv_title.setStyleSheet("font-size:13px;font-weight:700;color:#f4f7fb;")
         adv_sub = QLabel("Advanced hunt, trace, deception and network lab inputs")
-        adv_sub.setStyleSheet("color:#96a5b8;font-size:12px;")
+        adv_sub.setStyleSheet("color:#96a5b8;font-size:10px;")
         adv_form = QGridLayout()
         adv_form.setContentsMargins(0, 2, 0, 0)
-        adv_form.setHorizontalSpacing(10)
-        adv_form.setVerticalSpacing(8)
+        adv_form.setHorizontalSpacing(8)
+        adv_form.setVerticalSpacing(4)
+        adv_form.setColumnStretch(0, 1)
+        adv_form.setColumnStretch(1, 1)
+        adv_form.setColumnStretch(2, 1)
         adv_form.addWidget(self._field_block("VirusTotal API Key", self.vt_key), 0, 0)
         adv_form.addWidget(self._field_block("MalwareBazaar Auth-Key", self.malwarebazaar_key), 0, 1)
         adv_form.addWidget(self._field_block("YARAify Auth-Key", self.yaraify_key), 0, 2)
@@ -270,32 +298,35 @@ class ShadowLabDesktop(QMainWindow):
         adv_form.addWidget(self._field_block("Strings Patterns", self.strings_patterns), 3, 2)
         adv_layout.addWidget(adv_title)
         adv_layout.addWidget(adv_sub)
+        adv_layout.addSpacing(1)
         adv_layout.addLayout(adv_form)
+        adv_layout.addStretch(1)
         self.advanced_card = adv_card
-
-        self.ops_card = ops_card
-        self.controls_row.addWidget(ops_card, 1)
-        self.controls_row.addWidget(adv_card, 1)
-        layout.addWidget(controls)
-
-        top = QWidget()
-        top_row = QHBoxLayout(top)
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
         self.health = QLabel("API status: unknown")
         self.auth_role = QLabel("Role: -")
-        self.auth_summary = QLabel("Capabilities: -")
-        top_row.addWidget(self.health)
-        top_row.addWidget(self.auth_role)
-        top_row.addWidget(self.auth_summary, 1)
+        self.auth_summary = QLabel("")
+        self.auth_summary.setVisible(False)
+        self.auth_role.setStyleSheet(
+            "background:#24344a;color:#f4f7fb;border:1px solid #355179;"
+            "border-radius:10px;padding:6px 14px;font-weight:700;font-size:12px;"
+        )
         self.toggle_advanced_btn = QPushButton("Hide Advanced Settings")
         self.toggle_advanced_btn.clicked.connect(self.toggle_advanced_settings)
-        top_row.addWidget(self.toggle_advanced_btn)
-        top_row.addStretch(1)
         top_capabilities = {
             "Run Monitor": "can_run_monitor",
             "Filter Persistence": "can_view_persistence",
         }
+        hero_tools = QWidget()
+        hero_status = QWidget()
+        hero_status_row = QHBoxLayout(hero_status)
+        hero_status_row.setContentsMargins(0, 0, 0, 0)
+        hero_status_row.setSpacing(8)
+        hero_status_row.addStretch(1)
+        hero_actions = QWidget()
+        hero_actions_row = QHBoxLayout(hero_actions)
+        hero_actions_row.setContentsMargins(0, 0, 0, 0)
+        hero_actions_row.setSpacing(8)
+        hero_actions_row.addWidget(self.toggle_advanced_btn)
         for btn_text, fn in [
             ("Run Monitor", self.run_monitor),
             ("Load Processes", self.refresh_processes),
@@ -307,29 +338,48 @@ class ShadowLabDesktop(QMainWindow):
             btn.clicked.connect(fn)
             if btn_text in top_capabilities:
                 self._bind_capability(btn, top_capabilities[btn_text])
-            top_row.addWidget(btn)
-        layout.addWidget(top)
+            hero_actions_row.addWidget(btn)
+        hero_actions_row.addStretch(1)
+        hero_actions_row.addWidget(self.health, 0, Qt.AlignRight)
+        hero_actions_row.addWidget(self.auth_role, 0, Qt.AlignRight)
+        hero_tools_layout = QVBoxLayout(hero_tools)
+        hero_tools_layout.setContentsMargins(0, 0, 0, 0)
+        hero_tools_layout.setSpacing(6)
+        hero_tools_layout.addWidget(hero_status)
+        hero_tools_layout.addWidget(hero_actions)
+        hero_row.addWidget(hero_tools, 0, Qt.AlignRight | Qt.AlignTop)
+        layout.addWidget(hero)
+
+        controls = QWidget()
+        controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.controls = controls
+        self.controls_row = QHBoxLayout(controls)
+        self.controls_row.setContentsMargins(0, 0, 0, 0)
+        self.controls_row.setSpacing(10)
+        self.ops_card = ops_card
+        self.controls_row.addWidget(ops_card, 1)
+        self.controls_row.addWidget(adv_card, 1)
+        layout.addWidget(controls)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._scrollable_tab(self._dashboard_hub_tab()), "Dashboards")
-        self.tabs.addTab(self._scrollable_tab(self._whids_tab()), "WHIDS")
-        self.tabs.addTab(self._scrollable_tab(self._hids_tab()), "HIDS")
+        self.tabs.addTab(self._whids_tab(), "WHIDS")
+        self.tabs.addTab(self._hids_tab(), "HIDS")
         self.tabs.addTab(self._scrollable_tab(self._overview_tab()), "Overview")
         self.tabs.addTab(self._scrollable_tab(self._process_tab(), allow_horizontal=True), "Processes")
         self.tabs.addTab(self._scrollable_tab(self._hunt_tab(), allow_horizontal=True), "Advanced Hunt")
         self.tabs.addTab(self._scrollable_tab(self._persistence_tab(), allow_horizontal=True), "Persistence")
         self.tabs.addTab(self._scrollable_tab(self._threat_tab(), allow_horizontal=True), "Threat Intel")
-        self.tabs.addTab(self._scrollable_tab(self._malware_analyst_tab(), allow_horizontal=True), "Static Analysis")
-        self.tabs.addTab(self._scrollable_tab(self._deception_tab(), allow_horizontal=True), "Deception")
-        self.tabs.addTab(self._scrollable_tab(self._network_tab(), allow_horizontal=True), "Network")
-        self.tabs.addTab(self._scrollable_tab(self._hosts_tab(), allow_horizontal=True), "Hosts")
-        self.tabs.addTab(self._scrollable_tab(self._graph_tab()), "Graph")
-        self.tabs.addTab(self._scrollable_tab(self._timeline_tab(), allow_horizontal=True), "Timeline")
+        self.tabs.addTab(self._malware_analyst_tab(), "Static Analysis")
+        self.tabs.addTab(self._deception_tab(), "Deception")
+        self.tabs.addTab(self._network_tab(), "Network")
+        self.tabs.addTab(self._graph_tab(), "Graph")
+        self.tabs.addTab(self._timeline_tab(), "Timeline")
         self.tabs.addTab(self._scrollable_tab(self._quarantine_tab(), allow_horizontal=True), "Quarantine")
         self.tabs.addTab(self._scrollable_tab(self._history_tab(), allow_horizontal=True), "History")
-        self.tabs.addTab(self._scrollable_tab(self._artifacts_tab(), allow_horizontal=True), "Artifacts")
-        self.tabs.addTab(self._scrollable_tab(self._enterprise_tab(), allow_horizontal=True), "Enterprise")
-        self.tabs.addTab(self._scrollable_tab(self._security_ops_tab(), allow_horizontal=True), "Security Ops")
+        self.tabs.addTab(self._artifacts_tab(), "Artifacts")
+        self.tabs.addTab(self._enterprise_tab(), "Enterprise")
+        self.tabs.addTab(self._security_ops_tab(), "Security Ops")
         self.tabs.addTab(self._scrollable_tab(self._scenario_tab(), allow_horizontal=True), "Scenarios")
         self.tabs.addTab(self._scrollable_tab(self._about_tab()), "About / FAQ")
         self.tabs.setDocumentMode(True)
@@ -353,7 +403,7 @@ class ShadowLabDesktop(QMainWindow):
 
         title = QLabel("Multi Dashboard Wall")
         title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
-        subtitle = QLabel("Compact panels for SOC triage. Use Open Panel to move any card into a separate window.")
+        subtitle = QLabel("Compact panels for SOC triage. Use Open Panel on analysis cards when needed.")
         subtitle.setStyleSheet("color:#96a5b8;font-size:12px;")
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -381,6 +431,7 @@ class ShadowLabDesktop(QMainWindow):
         quick_row.setContentsMargins(0, 0, 0, 0)
         quick_row.setSpacing(8)
         for text, fn in [
+            ("Refresh Dashboard", self._refresh_dashboard_panels),
             ("Run Monitor", self.run_monitor),
             ("Load Processes", self.refresh_processes),
             ("Refresh History", self.refresh_history),
@@ -395,7 +446,7 @@ class ShadowLabDesktop(QMainWindow):
         grid.addWidget(self._panel_card("Threat Snapshot", self.dash_threat, self._open_dashboard_threat_panel), 0, 1)
         grid.addWidget(self._panel_card("Auth & Policy", self.dash_auth, self._open_dashboard_auth_panel), 1, 0)
         grid.addWidget(self._panel_card("Timeline Story", self.dash_timeline, self._open_dashboard_timeline_panel), 1, 1)
-        grid.addWidget(self._panel_card("Quick Actions", quick_actions, self._open_dashboard_actions_panel), 2, 0, 1, 2)
+        grid.addWidget(self._panel_card("Quick Actions", quick_actions, None), 2, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
 
@@ -407,17 +458,35 @@ class ShadowLabDesktop(QMainWindow):
         l = QVBoxLayout(w)
         l.setContentsMargins(8, 8, 8, 8)
         l.setSpacing(8)
-        self._tab_header(l, "WHIDS Integration", "Use WHIDS manager API or exported detection files to ingest official WHIDS detections into ShadowLab.")
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        header_left = QWidget()
+        header_left_layout = QVBoxLayout(header_left)
+        header_left_layout.setContentsMargins(0, 0, 0, 0)
+        header_left_layout.setSpacing(3)
+        header_title = QLabel("WHIDS Integration")
+        header_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;letter-spacing:0.2px;")
+        header_subtitle = QLabel("Use WHIDS manager API or exported detection files to ingest official WHIDS detections into ShadowLab.")
+        header_subtitle.setStyleSheet("color:#96a5b8;font-size:12px;line-height:1.2;")
+        header_subtitle.setWordWrap(True)
+        header_left_layout.addWidget(header_title)
+        header_left_layout.addWidget(header_subtitle)
+        self.whids_health_badge = QLabel("WHIDS: unknown")
+        self.whids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+        header_layout.addWidget(header_left, 1)
+        header_layout.addWidget(self.whids_health_badge, 0, Qt.AlignTop | Qt.AlignRight)
+        l.addWidget(header)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("background:#1e3050;max-height:1px;border:none;")
+        l.addWidget(sep)
 
         top = QWidget()
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(8)
-
-        manager_row = QWidget()
-        manager_layout = QHBoxLayout(manager_row)
-        manager_layout.setContentsMargins(0, 0, 0, 0)
-        manager_layout.setSpacing(8)
+        top_layout.setSpacing(4)
         manager_import_btn = QPushButton("Pull WHIDS Manager")
         manager_import_btn.clicked.connect(self.import_whids_manager)
         self._bind_capability(manager_import_btn, "can_manage_integrations")
@@ -463,101 +532,144 @@ class ShadowLabDesktop(QMainWindow):
         save_policy_btn = QPushButton("Save Policy")
         save_policy_btn.clicked.connect(self.save_integration_policy)
         self._bind_capability(save_policy_btn, "can_manage_integrations")
-        manager_layout.addWidget(self._field_block("WHIDS Manager URL", self.whids_manager_url), 1)
-        manager_layout.addWidget(self._field_block("X-Api-Key", self.whids_manager_api_key), 1)
-        manager_layout.addWidget(self._field_block("Endpoint UUID (optional)", self.whids_endpoint_uuid), 1)
-        manager_layout.addWidget(self.whids_verify_tls)
-        manager_layout.addWidget(manager_import_btn)
-        manager_layout.addWidget(report_import_btn)
-        manager_layout.addWidget(artifact_import_btn)
-        manager_layout.addWidget(manager_refresh_btn)
-
-        file_row = QWidget()
-        top_row = QHBoxLayout(file_row)
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
+        self.whids_ioc_payload.setMinimumHeight(24)
+        self.whids_ioc_payload.setMaximumHeight(24)
+        self.whids_rule_payload.setMinimumHeight(24)
+        self.whids_rule_payload.setMaximumHeight(24)
+        self.integration_policy_payload.setMinimumHeight(24)
+        self.integration_policy_payload.setMaximumHeight(24)
         import_btn = QPushButton("Import WHIDS File")
         import_btn.clicked.connect(self.import_whids_file)
         self._bind_capability(import_btn, "can_manage_integrations")
-        top_row.addWidget(self._field_block("WHIDS Export File", self.whids_file_path), 1)
-        top_row.addWidget(self._field_block("Artifacts Since (RFC3339)", self.whids_artifact_since), 1)
-        top_row.addWidget(self._field_block("Artifact Limit", self.whids_artifact_limit))
-        top_row.addWidget(self._field_block("Scheduler Poll (s)", self.whids_scheduler_interval))
-        top_row.addWidget(import_btn)
-        top_layout.addWidget(manager_row)
-        top_layout.addWidget(file_row)
 
-        lifecycle_row = QWidget()
-        lifecycle_layout = QHBoxLayout(lifecycle_row)
-        lifecycle_layout.setContentsMargins(0, 0, 0, 0)
-        lifecycle_layout.setSpacing(8)
-        lifecycle_layout.addWidget(self._field_block("WHIDS IoC JSON", self.whids_ioc_payload), 1)
-        lifecycle_layout.addWidget(self._field_block("WHIDS Rule JSON", self.whids_rule_payload), 1)
-        action_col = QWidget()
-        action_layout = QVBoxLayout(action_col)
-        action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(6)
-        action_layout.addWidget(self._field_block("Rule Name / Filter", self.whids_rule_name))
-        for btn in [query_iocs_btn, add_iocs_btn, delete_iocs_btn, query_rules_btn, add_rules_btn, delete_rules_btn]:
-            action_layout.addWidget(btn)
-        for btn in [scheduler_start_btn, scheduler_stop_btn, scheduler_status_btn]:
-            action_layout.addWidget(btn)
-        action_layout.addStretch(1)
-        lifecycle_layout.addWidget(action_col)
-        top_layout.addWidget(lifecycle_row)
+        verify_block = QWidget()
+        verify_block_layout = QVBoxLayout(verify_block)
+        verify_block_layout.setContentsMargins(0, 0, 0, 0)
+        verify_block_layout.setSpacing(2)
+        verify_label = QLabel("")
+        verify_label.setMinimumHeight(14)
+        verify_label.setMaximumHeight(14)
+        verify_block_layout.addWidget(verify_label)
+        verify_block_layout.addWidget(self.whids_verify_tls)
 
-        policy_row = QWidget()
-        policy_layout = QHBoxLayout(policy_row)
-        policy_layout.setContentsMargins(0, 0, 0, 0)
-        policy_layout.setSpacing(8)
-        policy_layout.addWidget(self._field_block("Response Policy JSON", self.integration_policy_payload), 1)
-        policy_btn_col = QWidget()
-        policy_btn_layout = QVBoxLayout(policy_btn_col)
-        policy_btn_layout.setContentsMargins(0, 0, 0, 0)
-        policy_btn_layout.setSpacing(6)
-        policy_btn_layout.addWidget(load_policy_btn)
-        policy_btn_layout.addWidget(save_policy_btn)
-        policy_btn_layout.addStretch(1)
-        policy_layout.addWidget(policy_btn_col)
-        top_layout.addWidget(policy_row)
+        transport_block = self._field_block("Transport", verify_block)
+        row1 = QWidget()
+        row1_layout = QHBoxLayout(row1)
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(8)
+        row1_layout.addWidget(self._field_block("WHIDS Manager URL", self.whids_manager_url), 1)
+        row1_layout.addWidget(self._field_block("X-Api-Key", self.whids_manager_api_key), 1)
+        row1_layout.addWidget(self._field_block("Endpoint UUID (optional)", self.whids_endpoint_uuid), 1)
+        row1_layout.addWidget(transport_block, 1)
+
+        row2 = QWidget()
+        row2_layout = QHBoxLayout(row2)
+        row2_layout.setContentsMargins(0, 0, 0, 0)
+        row2_layout.setSpacing(8)
+        row2_layout.addWidget(self._field_block("WHIDS Export File", self.whids_file_path), 1)
+        row2_layout.addWidget(self._field_block("Artifacts Since (RFC3339)", self.whids_artifact_since), 1)
+        row2_layout.addWidget(self._field_block("Artifact Limit", self.whids_artifact_limit), 1)
+        row2_layout.addWidget(self._field_block("Scheduler Poll (s)", self.whids_scheduler_interval), 1)
+
+        ioc_block = self._field_block("WHIDS IoC JSON", self.whids_ioc_payload)
+        rule_json_block = self._field_block("WHIDS Rule JSON", self.whids_rule_payload)
+        rule_name_block = self._field_block("Rule Name / Filter", self.whids_rule_name)
+        policy_block = self._field_block("Response Policy JSON", self.integration_policy_payload)
+
+        row3 = QWidget()
+        row3_layout = QHBoxLayout(row3)
+        row3_layout.setContentsMargins(0, 0, 0, 0)
+        row3_layout.setSpacing(8)
+        row3_layout.addWidget(ioc_block, 1)
+        row3_layout.addWidget(rule_json_block, 1)
+        row3_layout.addWidget(rule_name_block, 1)
+        row3_layout.addWidget(policy_block, 1)
+
+        top_layout.addWidget(row1)
+        top_layout.addWidget(row2)
+        top_layout.addWidget(row3)
 
         self.whids_summary = QTextBrowser()
         self.whids_summary.setProperty("role", "brief")
-        self.whids_summary.setMinimumHeight(120)
-        self.whids_health_badge = QLabel("WHIDS: unknown")
-        self.whids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
+        self.whids_summary.setMinimumHeight(220)
         self.whids_table = QTableWidget(0, 5)
         self.whids_table.setHorizontalHeaderLabels(["Created", "Type", "Target", "Status", "Detail"])
         self.whids_table.itemSelectionChanged.connect(self.show_selected_whids_export)
         self._style_table(self.whids_table)
+        self.whids_table.setMinimumHeight(220)
         self.whids_detail = QTextEdit()
         self.whids_detail.setReadOnly(True)
         self.whids_detail.setProperty("role", "brief")
+        self.whids_detail.setMinimumHeight(220)
 
-        split = QSplitter(Qt.Horizontal)
-        split.addWidget(self._panel_card("WHIDS Export History", self.whids_table, lambda: self._open_panel_window("WHIDS Export History", self._clone_table(self.whids_table))))
-        split.addWidget(self._panel_card("WHIDS Detail", self.whids_detail, lambda: self._open_panel_window("WHIDS Detail", self._clone_text_view(self.whids_detail))))
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-
-        whids_actions = QWidget()
-        whids_actions_row = QHBoxLayout(whids_actions)
-        whids_actions_row.setContentsMargins(0, 0, 0, 0)
-        whids_actions_row.setSpacing(8)
         open_whids_target_btn = QPushButton("Open Selected Target")
         open_whids_target_btn.clicked.connect(self.open_selected_whids_target)
         self._bind_capability(open_whids_target_btn, "can_manage_integrations")
         open_whids_case_btn = QPushButton("Open Enterprise Case")
         open_whids_case_btn.clicked.connect(lambda: self.open_enterprise_case_for_incident(prefix="WHIDS-"))
         self._bind_capability(open_whids_case_btn, "can_manage_incidents")
-        whids_actions_row.addWidget(self.whids_health_badge)
-        whids_actions_row.addWidget(open_whids_target_btn)
-        whids_actions_row.addWidget(open_whids_case_btn)
-        whids_actions_row.addStretch(1)
-        l.addWidget(self._panel_card("WHIDS Summary", self.whids_summary, lambda: self._open_panel_window("WHIDS Summary", self._clone_text_view(self.whids_summary))))
-        l.addWidget(self._panel_card("WHIDS Status", whids_actions, lambda: self._open_panel_window("WHIDS Status", QLabel("Use WHIDS status controls in the main workspace."))))
-        l.addWidget(self._panel_card("WHIDS Controls", top, lambda: self._open_panel_window("WHIDS Controls", QLabel("Use the main WHIDS tab to import detections."))))
-        l.addWidget(split, 1)
+        action_strip = QWidget()
+        action_strip_layout = QHBoxLayout(action_strip)
+        action_strip_layout.setContentsMargins(0, 0, 0, 0)
+        action_strip_layout.setSpacing(8)
+        action_strip_layout.addWidget(open_whids_target_btn)
+        action_strip_layout.addWidget(open_whids_case_btn)
+        action_strip_layout.addStretch(1)
+        l.addWidget(action_strip)
+
+        controls_card = QFrame()
+        controls_card.setProperty("card", True)
+        controls_layout = QVBoxLayout(controls_card)
+        controls_layout.setContentsMargins(12, 10, 12, 12)
+        controls_layout.setSpacing(8)
+        controls_title = QLabel("WHIDS Controls")
+        controls_title.setStyleSheet("font-size:13px;font-weight:700;color:#f4f7fb;letter-spacing:0.2px;")
+        controls_layout.addWidget(controls_title)
+        controls_layout.addWidget(top)
+        l.addWidget(controls_card)
+
+        controls_actions = QWidget()
+        controls_actions_layout = QHBoxLayout(controls_actions)
+        controls_actions_layout.setContentsMargins(0, 0, 0, 0)
+        controls_actions_layout.setSpacing(6)
+        for btn in [
+            manager_import_btn,
+            report_import_btn,
+            artifact_import_btn,
+            manager_refresh_btn,
+            scheduler_start_btn,
+            scheduler_stop_btn,
+            scheduler_status_btn,
+            query_iocs_btn,
+            add_iocs_btn,
+            delete_iocs_btn,
+            query_rules_btn,
+            add_rules_btn,
+            delete_rules_btn,
+            load_policy_btn,
+            save_policy_btn,
+            import_btn,
+        ]:
+            controls_actions_layout.addWidget(btn)
+        controls_actions_layout.addStretch(1)
+
+        controls_actions_scroll = QScrollArea()
+        controls_actions_scroll.setWidgetResizable(True)
+        controls_actions_scroll.setFrameShape(QFrame.NoFrame)
+        controls_actions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        controls_actions_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_actions_scroll.setWidget(controls_actions)
+        controls_actions_scroll.setMaximumHeight(64)
+        l.addWidget(controls_actions_scroll)
+
+        bottom_row_cards = QWidget()
+        bottom_row_layout = QHBoxLayout(bottom_row_cards)
+        bottom_row_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_row_layout.setSpacing(8)
+        bottom_row_layout.addWidget(self._panel_card("WHIDS Summary", self.whids_summary, lambda: self._open_panel_window("WHIDS Summary", self._clone_text_view(self.whids_summary))), 2)
+        bottom_row_layout.addWidget(self._panel_card("WHIDS Export History", self.whids_table, lambda: self._open_panel_window("WHIDS Export History", self._clone_table(self.whids_table))), 3)
+        bottom_row_layout.addWidget(self._panel_card("WHIDS Detail", self.whids_detail, lambda: self._open_panel_window("WHIDS Detail", self._clone_text_view(self.whids_detail))), 2)
+        l.addWidget(bottom_row_cards, 1)
         return w
 
     def _hids_tab(self) -> QWidget:
@@ -606,22 +718,18 @@ class ShadowLabDesktop(QMainWindow):
 
         self.hids_summary = QTextBrowser()
         self.hids_summary.setProperty("role", "brief")
-        self.hids_summary.setMinimumHeight(120)
+        self.hids_summary.setMinimumHeight(220)
         self.hids_health_badge = QLabel("HIDS: unknown")
         self.hids_health_badge.setStyleSheet("background:#4a5568;color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
         self.hids_table = QTableWidget(0, 5)
         self.hids_table.setHorizontalHeaderLabels(["Created", "Type", "Target", "Status", "Detail"])
         self.hids_table.itemSelectionChanged.connect(self.show_selected_hids_export)
         self._style_table(self.hids_table)
+        self.hids_table.setMinimumHeight(220)
         self.hids_detail = QTextEdit()
         self.hids_detail.setReadOnly(True)
         self.hids_detail.setProperty("role", "brief")
-
-        split = QSplitter(Qt.Horizontal)
-        split.addWidget(self._panel_card("HIDS Export History", self.hids_table, lambda: self._open_panel_window("HIDS Export History", self._clone_table(self.hids_table))))
-        split.addWidget(self._panel_card("HIDS Detail", self.hids_detail, lambda: self._open_panel_window("HIDS Detail", self._clone_text_view(self.hids_detail))))
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
+        self.hids_detail.setMinimumHeight(220)
 
         hids_actions = QWidget()
         hids_actions_row = QHBoxLayout(hids_actions)
@@ -637,13 +745,26 @@ class ShadowLabDesktop(QMainWindow):
         hids_actions_row.addWidget(open_hids_target_btn)
         hids_actions_row.addWidget(open_hids_case_btn)
         hids_actions_row.addStretch(1)
-        l.addWidget(self._panel_card("HIDS Summary", self.hids_summary, lambda: self._open_panel_window("HIDS Summary", self._clone_text_view(self.hids_summary))))
-        l.addWidget(self._panel_card("HIDS Status", hids_actions, lambda: self._open_panel_window("HIDS Status", QLabel("Use HIDS status controls in the main workspace."))))
-        l.addWidget(self._panel_card("HIDS Controls", top, lambda: self._open_panel_window("HIDS Controls", QLabel("Use the main HIDS tab to import detections."))))
-        l.addWidget(split, 1)
+
+        top_row_cards = QWidget()
+        top_row_layout = QHBoxLayout(top_row_cards)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(8)
+        top_row_layout.addWidget(self._panel_card("HIDS Status", hids_actions, None), 2)
+        top_row_layout.addWidget(self._panel_card("HIDS Controls", top, None), 5)
+        l.addWidget(top_row_cards)
+
+        bottom_row_cards = QWidget()
+        bottom_row_layout = QHBoxLayout(bottom_row_cards)
+        bottom_row_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_row_layout.setSpacing(8)
+        bottom_row_layout.addWidget(self._panel_card("HIDS Summary", self.hids_summary, lambda: self._open_panel_window("HIDS Summary", self._clone_text_view(self.hids_summary))), 2)
+        bottom_row_layout.addWidget(self._panel_card("HIDS Export History", self.hids_table, lambda: self._open_panel_window("HIDS Export History", self._clone_table(self.hids_table))), 3)
+        bottom_row_layout.addWidget(self._panel_card("HIDS Detail", self.hids_detail, lambda: self._open_panel_window("HIDS Detail", self._clone_text_view(self.hids_detail))), 2)
+        l.addWidget(bottom_row_cards, 1)
         return w
 
-    def _panel_card(self, title: str, content: QWidget, expand_fn) -> QWidget:
+    def _panel_card(self, title: str, content: QWidget, expand_fn=None) -> QWidget:
         card = QFrame()
         card.setProperty("card", True)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -657,12 +778,13 @@ class ShadowLabDesktop(QMainWindow):
         header_row.setSpacing(8)
         label = QLabel(title)
         label.setStyleSheet("font-size:13px;font-weight:700;color:#f4f7fb;letter-spacing:0.2px;")
-        expand_btn = QPushButton("Open Panel")
-        expand_btn.setMaximumWidth(104)
-        expand_btn.clicked.connect(expand_fn)
         header_row.addWidget(label)
         header_row.addStretch(1)
-        header_row.addWidget(expand_btn)
+        if expand_fn is not None:
+            expand_btn = QPushButton("Open Panel")
+            expand_btn.setMaximumWidth(104)
+            expand_btn.clicked.connect(expand_fn)
+            header_row.addWidget(expand_btn)
         expanding_content = isinstance(content, (QTextEdit, QTextBrowser, QTableWidget, QListWidget, QTreeWidget))
         if expanding_content:
             content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -868,12 +990,13 @@ class ShadowLabDesktop(QMainWindow):
         self.dash_threat.setHtml(f"<h3>Threat Snapshot</h3><ul>{items}</ul>")
 
         role = str(self.auth_context.get("role", "viewer"))
+        workspace_id = str(self.auth_context.get("workspace_id", self.workspace_id.text().strip() or "default"))
         features = self.auth_context.get("features", {}) if isinstance(self.auth_context.get("features"), dict) else {}
         policy_profile = str(features.get("policy_profile", "lab"))
         self.dash_auth.setHtml(
             f"<h3>Auth & Policy</h3>"
             f"<p><b>Role:</b> {html.escape(role)}<br><b>Policy:</b> {html.escape(policy_profile)}<br>"
-            f"<b>Dangerous Actions:</b> {html.escape(str(features.get('dangerous_actions_enabled', False)))}</p>"
+            f"<b>Workspace:</b> {html.escape(workspace_id)}<br><b>Dangerous Actions:</b> {html.escape(str(features.get('dangerous_actions_enabled', False)))}</p>"
         )
 
         timeline_text = self.timeline_summary.toHtml().strip() if hasattr(self, "timeline_summary") else ""
@@ -948,11 +1071,24 @@ class ShadowLabDesktop(QMainWindow):
         process_panel_row.addWidget(pop_proc_detail)
         process_panel_row.addStretch(1)
         l.addWidget(process_panel_actions)
-        self.proc_table = QTableWidget(0, 5); self.proc_table.setHorizontalHeaderLabels(["PID","Name","CPU %","Memory %","Signature"]); self.proc_table.itemSelectionChanged.connect(self.show_selected_process); self._style_table(self.proc_table)
+        self.proc_table = QTableWidget(0, 5); self.proc_table.setHorizontalHeaderLabels(["PID","Name","CPU %","Memory %","Signature"]); self.proc_table.itemSelectionChanged.connect(self.show_selected_process); self._style_table(self.proc_table); self.proc_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.proc_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         right = QWidget(); rl = QVBoxLayout(right); self.proc_detail = QTextEdit(); self.proc_detail.setReadOnly(True); rl.addWidget(self.proc_detail)
-        actions = QWidget(); ar = QHBoxLayout(actions)
+        actions = QWidget()
+        actions_layout = QVBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(6)
+        actions_row_1 = QWidget()
+        actions_row_1_layout = QHBoxLayout(actions_row_1)
+        actions_row_1_layout.setContentsMargins(0, 0, 0, 0)
+        actions_row_1_layout.setSpacing(6)
+        actions_row_2 = QWidget()
+        actions_row_2_layout = QHBoxLayout(actions_row_2)
+        actions_row_2_layout.setContentsMargins(0, 0, 0, 0)
+        actions_row_2_layout.setSpacing(6)
         process_capabilities = {
             "Auto Triage": "can_run_triage",
+            "Selected VT Scan": "can_run_hunt",
+            "All VT Scan": "can_run_hunt",
             "Executable Scan": "can_run_hunt",
             "Memory Analysis": "can_run_hunt",
             "Internals": "can_run_hunt",
@@ -968,15 +1104,49 @@ class ShadowLabDesktop(QMainWindow):
             "Kill Tree": "can_manage_process_actions",
             "Quarantine": "can_manage_process_actions",
         }
-        for text, fn in [("Auto Triage", self.run_auto_triage),("Executable Scan", self.scan_selected_process),("Memory Analysis", self.run_memory_analysis),("Internals", self.load_selected_internals),("Strings", self.run_strings_analysis),("Executable YARA", self.run_yara_scan),("Sandbox", self.run_sandbox_trace),("Process Tree", self.load_process_tree),("AI Analyst", self.run_ai_analysis),("Triage Respond", self.run_triage_response),("Suspend", lambda: self.process_action("suspend")),("Resume", lambda: self.process_action("resume")),("Kill", lambda: self.process_action("kill")),("Kill Tree", lambda: self.process_action("kill-tree")),("Quarantine", lambda: self.process_action("quarantine"))]:
+        primary_actions = [
+            ("Auto Triage", self.run_auto_triage),
+            ("Selected VT Scan", self.scan_selected_processes_vt),
+            ("All VT Scan", self.scan_all_processes_vt),
+            ("Executable Scan", self.scan_selected_process),
+            ("Memory Analysis", self.run_memory_analysis),
+            ("Internals", self.load_selected_internals),
+            ("Strings", self.run_strings_analysis),
+            ("Executable YARA", self.run_yara_scan),
+            ("Sandbox", self.run_sandbox_trace),
+            ("Process Tree", self.load_process_tree),
+            ("AI Analyst", self.run_ai_analysis),
+        ]
+        response_actions = [
+            ("Triage Respond", self.run_triage_response),
+            ("Suspend", lambda: self.process_action("suspend")),
+            ("Resume", lambda: self.process_action("resume")),
+            ("Kill", lambda: self.process_action("kill")),
+            ("Kill Tree", lambda: self.process_action("kill-tree")),
+            ("Quarantine", lambda: self.process_action("quarantine")),
+        ]
+        for text, fn in primary_actions:
             b = QPushButton(text)
             b.clicked.connect(fn)
             self._bind_capability(b, process_capabilities[text])
-            ar.addWidget(b)
+            actions_row_1_layout.addWidget(b)
+        actions_row_1_layout.addStretch(1)
+        for text, fn in response_actions:
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            self._bind_capability(b, process_capabilities[text])
+            actions_row_2_layout.addWidget(b)
+        actions_row_2_layout.addStretch(1)
+        actions_layout.addWidget(actions_row_1)
+        actions_layout.addWidget(actions_row_2)
         self.proc_table.setMinimumHeight(220)
         self.proc_detail.setMinimumHeight(220)
         s.setMinimumHeight(360)
-        rl.addWidget(actions); s.addWidget(self.proc_table); s.addWidget(right); s.setStretchFactor(0, 2); s.setStretchFactor(1, 3); l.addWidget(s, 1); return w
+        s.setChildrenCollapsible(False)
+        rl.addWidget(actions); s.addWidget(self.proc_table); s.addWidget(right); s.setStretchFactor(0, 2); s.setStretchFactor(1, 3)
+        # Start with a stable default split, but keep it user-resizable via splitter handle.
+        QTimer.singleShot(0, lambda: s.setSizes([560, 1320]))
+        l.addWidget(s, 1); return w
 
     def _hunt_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(10)
@@ -1022,7 +1192,11 @@ class ShadowLabDesktop(QMainWindow):
         actions = QWidget(); ar = QHBoxLayout(actions)
         ar.setContentsMargins(0, 0, 0, 0)
         ar.setSpacing(8)
-        remediate = QPushButton("Remediate Selected Persistence"); remediate.clicked.connect(self.remediate_selected_persistence); self._bind_capability(remediate, "can_manage_persistence")
+        refresh_btn = QPushButton("Refresh Persistence"); refresh_btn.clicked.connect(self.refresh_persistence)
+        filter_btn = QPushButton("Apply Filter"); filter_btn.clicked.connect(self.apply_persistence_filter)
+        remediate = QPushButton("Remediate Selected Persistence"); remediate.clicked.connect(self.remediate_selected_persistence)
+        ar.addWidget(refresh_btn)
+        ar.addWidget(filter_btn)
         ar.addWidget(remediate)
         ar.addStretch(1)
         self.persist_table = QTableWidget(0, 4); self.persist_table.setHorizontalHeaderLabels(["Name","Type","Path","Details"]); self.persist_table.itemSelectionChanged.connect(self.show_selected_persistence); self._style_table(self.persist_table)
@@ -1032,7 +1206,7 @@ class ShadowLabDesktop(QMainWindow):
         split.addWidget(self._panel_card("Persistence Detail", self.persist_detail, lambda: self._open_panel_window("Persistence Detail", self._clone_text_view(self.persist_detail))))
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
-        l.addWidget(self._panel_card("Persistence Actions", actions, lambda: self._open_panel_window("Persistence Actions", QLabel("Use this panel in main window to run remediation."))))
+        l.addWidget(self._panel_card("Persistence Actions", actions, None))
         l.addWidget(split, 1)
         return w
 
@@ -1054,7 +1228,7 @@ class ShadowLabDesktop(QMainWindow):
         for item in [self.ti_last_type, self.ti_last_value, self.ti_last_source]:
             sr.addWidget(item)
         sr.addStretch(1)
-        l.addWidget(self._panel_card("Current Query Context", summary, self._open_threat_output_panel))
+        l.addWidget(self._panel_card("Current Query Context", summary, None))
 
         controls = QWidget(); cr = QHBoxLayout(controls)
         cr.setContentsMargins(0, 0, 0, 0)
@@ -1067,7 +1241,7 @@ class ShadowLabDesktop(QMainWindow):
         for btn in [auto_hash, auto_ip, hash_btn, ip_btn, scan_btn]:
             cr.addWidget(btn)
         cr.addStretch(1)
-        l.addWidget(self._panel_card("Threat Actions", controls, self._open_threat_output_panel))
+        l.addWidget(self._panel_card("Threat Actions", controls, None))
 
         split = QSplitter(Qt.Horizontal)
         left = QWidget(); ll = QVBoxLayout(left)
@@ -1087,8 +1261,21 @@ class ShadowLabDesktop(QMainWindow):
         return w
 
     def _malware_analyst_tab(self) -> QWidget:
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(10)
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
         self._tab_header(l, "Static Analysis Workspace", "Detect It Easy-backed static binary analysis for file inspection and selected-process executable triage. This workspace analyzes files on disk, not live process memory.")
+
+        def _inline_card(title_text: str, content_widget: QWidget) -> QWidget:
+            card = QFrame()
+            card.setProperty("card", True)
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 12)
+            card_layout.setSpacing(8)
+            title_label = QLabel(title_text)
+            title_label.setStyleSheet("font-size:13px;font-weight:700;color:#f4f7fb;letter-spacing:0.2px;")
+            card_layout.addWidget(title_label)
+            card_layout.addWidget(content_widget)
+            return card
 
         status_row = QWidget(); sr = QHBoxLayout(status_row)
         sr.setContentsMargins(0, 0, 0, 0); sr.setSpacing(8)
@@ -1098,7 +1285,6 @@ class ShadowLabDesktop(QMainWindow):
         for item in [self.ma_status_badge, self.ma_repo_badge, self.ma_runtime_badge]:
             sr.addWidget(item)
         sr.addStretch(1)
-        l.addWidget(self._panel_card("Detect It Easy Readiness", status_row, lambda: self._open_panel_window("DIE Readiness", self._clone_text_view(self.ma_summary))))
 
         controls = QWidget(); cr = QVBoxLayout(controls)
         cr.setContentsMargins(0, 0, 0, 0); cr.setSpacing(8)
@@ -1129,23 +1315,35 @@ class ShadowLabDesktop(QMainWindow):
         ar.addStretch(1)
         cr.addWidget(path_row)
         cr.addWidget(action_row)
-        l.addWidget(self._panel_card("Static Analysis Actions", controls, lambda: self._open_panel_window("Static Analysis Output", self._clone_text_view(self.ma_output))))
 
-        split = QSplitter(Qt.Horizontal)
-        left = QWidget(); ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0); ll.setSpacing(8)
-        self.ma_summary = QTextBrowser(); self.ma_summary.setProperty("role", "brief"); self.ma_summary.setMinimumHeight(160)
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        top_layout.setAlignment(Qt.AlignTop)
+        readiness_card = _inline_card("Detect It Easy Readiness", status_row)
+        actions_card = _inline_card("Static Analysis Actions", controls)
+        readiness_card.setMinimumHeight(126)
+        actions_card.setMinimumHeight(126)
+        top_layout.addWidget(readiness_card, 2, Qt.AlignTop)
+        top_layout.addWidget(actions_card, 5, Qt.AlignTop)
+        l.addWidget(top_row)
+
+        bottom_row = QWidget()
+        bottom_layout = QHBoxLayout(bottom_row)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(8)
+        self.ma_summary = QTextBrowser(); self.ma_summary.setProperty("role", "brief"); self.ma_summary.setMinimumHeight(180)
         self.ma_highlights = QTableWidget(0, 2)
         self.ma_highlights.setHorizontalHeaderLabels(["Category", "Highlight"])
         self._style_table(self.ma_highlights)
-        ll.addWidget(self._panel_card("Analysis Summary", self.ma_summary, lambda: self._open_panel_window("Static Analysis Summary", self._clone_text_view(self.ma_summary))))
-        ll.addWidget(self._panel_card("DIE Highlights", self.ma_highlights, lambda: self._open_panel_window("DIE Highlights", self._clone_table(self.ma_highlights))))
+        self.ma_highlights.setMinimumHeight(180)
         self.ma_output = QTextEdit(); self.ma_output.setReadOnly(True)
-        split.addWidget(left)
-        split.addWidget(self._panel_card("Raw DIE Output", self.ma_output, lambda: self._open_panel_window("Raw DIE Output", self._clone_text_view(self.ma_output))))
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 3)
-        l.addWidget(split, 1)
+        self.ma_output.setMinimumHeight(180)
+        bottom_layout.addWidget(self._panel_card("Analysis Summary", self.ma_summary, lambda: self._open_panel_window("Static Analysis Summary", self._clone_text_view(self.ma_summary))), 2)
+        bottom_layout.addWidget(self._panel_card("Raw DIE Output", self.ma_output, lambda: self._open_panel_window("Raw DIE Output", self._clone_text_view(self.ma_output))), 3)
+        bottom_layout.addWidget(self._panel_card("DIE Highlights", self.ma_highlights, lambda: self._open_panel_window("DIE Highlights", self._clone_table(self.ma_highlights))), 2)
+        l.addWidget(bottom_row, 1)
         return w
 
     def _deception_tab(self) -> QWidget:
@@ -1154,65 +1352,73 @@ class ShadowLabDesktop(QMainWindow):
         top = QWidget(); tr = QHBoxLayout(top)
         tr.setContentsMargins(0, 0, 0, 0)
         tr.setSpacing(8)
-        deception_capabilities = {
-            "Deploy Honeypot": "can_manage_deception",
-            "Check Honeypot": "can_view_deception",
-            "Cleanup Honeypot": "can_manage_deception",
-            "Deploy Canary": "can_manage_deception",
-            "Check Canary": "can_view_deception",
-            "Cleanup Canary": "can_manage_deception",
-            "Capture Evidence": "can_capture_evidence",
-            "Refresh Evidence": "can_view_evidence",
-            "Delete Evidence": "can_delete_evidence",
-        }
         for text, fn in [("Deploy Honeypot", self.deploy_honeypot),("Check Honeypot", self.check_honeypot),("Cleanup Honeypot", self.cleanup_honeypot),("Deploy Canary", self.deploy_canary),("Check Canary", self.check_canary),("Cleanup Canary", self.cleanup_canary),("Capture Evidence", self.capture_evidence),("Refresh Evidence", self.refresh_evidence),("Delete Evidence", self.delete_selected_evidence)]:
             btn = QPushButton(text)
             btn.clicked.connect(fn)
-            self._bind_capability(btn, deception_capabilities[text])
             tr.addWidget(btn)
         tr.addStretch(1)
-        l.addWidget(self._panel_card("Deception Actions", top, lambda: self._open_panel_window("Deception Actions", QLabel("Use this action strip in main workspace."))))
-        split = QSplitter(Qt.Horizontal)
-        self.evidence_list = QListWidget(); self.evidence_list.itemSelectionChanged.connect(self.show_selected_evidence)
-        right = QWidget(); rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(8)
-        self.deception_out = QTextEdit(); self.deception_out.setReadOnly(True)
-        self.evidence_detail = QTextEdit(); self.evidence_detail.setReadOnly(True)
-        open_evidence_btn = QPushButton("Open Selected Evidence"); open_evidence_btn.clicked.connect(self.open_selected_evidence); self._bind_capability(open_evidence_btn, "can_view_evidence")
-        rl.addWidget(self._panel_card("Deception Output", self.deception_out, lambda: self._open_panel_window("Deception Output", self._clone_text_view(self.deception_out))))
-        rl.addWidget(self._panel_card("Evidence Detail", self.evidence_detail, lambda: self._open_panel_window("Evidence Detail", self._clone_text_view(self.evidence_detail))))
-        rl.addWidget(open_evidence_btn)
-        split.addWidget(self._panel_card("Evidence List", self.evidence_list, lambda: self._open_panel_window("Evidence List", QLabel("Open evidence from main workspace list."))))
-        split.addWidget(right)
-        split.setStretchFactor(0, 1); split.setStretchFactor(1, 3)
-        l.addWidget(split, 1)
+        open_evidence_btn = QPushButton("Open Selected Evidence")
+        open_evidence_btn.clicked.connect(self.open_selected_evidence)
+        tr.addWidget(open_evidence_btn)
+        l.addWidget(self._panel_card("Deception Actions", top, None))
+
+        self.evidence_list = QListWidget(); self.evidence_list.itemSelectionChanged.connect(self.show_selected_evidence); self.evidence_list.setMinimumHeight(190)
+        self.deception_out = QTextEdit(); self.deception_out.setReadOnly(True); self.deception_out.setMinimumHeight(190)
+        self.evidence_detail = QTextEdit(); self.evidence_detail.setReadOnly(True); self.evidence_detail.setMinimumHeight(190)
+
+        cards_row = QWidget()
+        cards_row_layout = QHBoxLayout(cards_row)
+        cards_row_layout.setContentsMargins(0, 0, 0, 0)
+        cards_row_layout.setSpacing(8)
+        cards_row_layout.addWidget(self._panel_card("Evidence List", self.evidence_list, lambda: self._open_panel_window("Evidence List", QLabel("Use evidence list in the main workspace."))), 1)
+        cards_row_layout.addWidget(self._panel_card("Deception Output", self.deception_out, lambda: self._open_panel_window("Deception Output", self._clone_text_view(self.deception_out))), 1)
+        cards_row_layout.addWidget(self._panel_card("Evidence Detail", self.evidence_detail, lambda: self._open_panel_window("Evidence Detail", self._clone_text_view(self.evidence_detail))), 1)
+        l.addWidget(cards_row, 1)
         return w
 
     def _network_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
         self._tab_header(l, "Network Workspace", "Capture packets, discover ARP devices, inspect connections and control the network blocker.")
-        row = QWidget(); r = QHBoxLayout(row)
+        controls_row = QWidget(); r = QHBoxLayout(controls_row)
         r.setContentsMargins(0, 0, 0, 0)
         r.setSpacing(8)
         self.sniff_duration = QSpinBox(); self.sniff_duration.setRange(5, 60); self.sniff_duration.setValue(10)
-        sniff = QPushButton("Start Packet Capture"); sniff.clicked.connect(self.run_sniffer); self._bind_capability(sniff, "can_run_sniffer")
-        scan = QPushButton("ARP Discovery"); scan.clicked.connect(self.scan_network_devices); self._bind_capability(scan, "can_manage_network_warfare")
-        start_block = QPushButton("Start Blocker"); start_block.clicked.connect(self.start_network_blocker); self._bind_capability(start_block, "can_manage_network_warfare")
-        stop_block = QPushButton("Stop Blocker"); stop_block.clicked.connect(self.stop_network_blocker); self._bind_capability(stop_block, "can_manage_network_warfare")
-        r.addWidget(QLabel("Capture Duration")); r.addWidget(self.sniff_duration); r.addWidget(sniff); r.addWidget(scan); r.addWidget(start_block); r.addWidget(stop_block); r.addStretch(1)
-        l.addWidget(self._panel_card("Network Controls", row, lambda: self._open_panel_window("Network Controls", QLabel("Use this control strip in main workspace."))))
-        s = QSplitter(Qt.Horizontal)
-        left = QWidget(); ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(8)
-        self.net_table = QTableWidget(0, 4); self.net_table.setHorizontalHeaderLabels(["Local","Remote","Status","PID"]); self._style_table(self.net_table)
-        self.device_table = QTableWidget(0, 3); self.device_table.setHorizontalHeaderLabels(["IP","MAC","Vendor"]); self._style_table(self.device_table)
-        ll.addWidget(self._panel_card("Connection Table", self.net_table, lambda: self._open_panel_window("Connection Table", self._clone_table(self.net_table))))
-        ll.addWidget(self._panel_card("Discovered Devices", self.device_table, lambda: self._open_panel_window("Discovered Devices", self._clone_table(self.device_table))))
-        self.net_out = QTextEdit(); self.net_out.setReadOnly(True)
-        s.addWidget(left); s.addWidget(self._panel_card("Network Output", self.net_out, lambda: self._open_panel_window("Network Output", self._clone_text_view(self.net_out))))
-        s.setStretchFactor(0, 2); s.setStretchFactor(1, 3); l.addWidget(s, 1); return w
+        sniff = QPushButton("Start Packet Capture"); sniff.clicked.connect(self.run_sniffer)
+        scan = QPushButton("ARP Discovery"); scan.clicked.connect(self.scan_network_devices)
+        start_block = QPushButton("Start Blocker"); start_block.clicked.connect(self.start_network_blocker)
+        stop_block = QPushButton("Stop Blocker"); stop_block.clicked.connect(self.stop_network_blocker)
+        refresh_hosts_btn = QPushButton("Refresh Hosts"); refresh_hosts_btn.clicked.connect(self.refresh_hosts)
+        r.addWidget(QLabel("Capture Duration"))
+        r.addWidget(self.sniff_duration)
+        r.addWidget(sniff)
+        r.addWidget(scan)
+        r.addWidget(start_block)
+        r.addWidget(stop_block)
+        r.addWidget(refresh_hosts_btn)
+        r.addStretch(1)
+        l.addWidget(controls_row)
+
+        self.net_table = QTableWidget(0, 4); self.net_table.setHorizontalHeaderLabels(["Local","Remote","Status","PID"]); self._style_table(self.net_table); self.net_table.setMinimumHeight(190)
+        self.device_table = QTableWidget(0, 3); self.device_table.setHorizontalHeaderLabels(["IP","MAC","Vendor"]); self._style_table(self.device_table); self.device_table.setMinimumHeight(190)
+        self.host_table = QTableWidget(0, 7); self.host_table.setHorizontalHeaderLabels(["Host","Platform","Boot Time","API Status","Role","IP","Version"]); self._style_table(self.host_table); self.host_table.setMinimumHeight(190)
+        self.net_out = QTextEdit(); self.net_out.setReadOnly(True); self.net_out.setMinimumHeight(190)
+
+        top_cards = QWidget()
+        top_cards_layout = QHBoxLayout(top_cards)
+        top_cards_layout.setContentsMargins(0, 0, 0, 0)
+        top_cards_layout.setSpacing(8)
+        top_cards_layout.addWidget(self._panel_card("Connection Table", self.net_table, lambda: self._open_panel_window("Connection Table", self._clone_table(self.net_table))), 1)
+        top_cards_layout.addWidget(self._panel_card("Discovered Devices", self.device_table, lambda: self._open_panel_window("Discovered Devices", self._clone_table(self.device_table))), 1)
+        top_cards_layout.addWidget(self._panel_card("Network Output", self.net_out, lambda: self._open_panel_window("Network Output", self._clone_text_view(self.net_out))), 1)
+        l.addWidget(top_cards)
+
+        bottom_cards = QWidget()
+        bottom_cards_layout = QHBoxLayout(bottom_cards)
+        bottom_cards_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_cards_layout.setSpacing(8)
+        bottom_cards_layout.addWidget(self._panel_card("Host Inventory", self.host_table, lambda: self._open_panel_window("Host Inventory", self._clone_table(self.host_table))), 1)
+        l.addWidget(bottom_cards, 1)
+        return w
 
     def _hosts_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
@@ -1232,40 +1438,51 @@ class ShadowLabDesktop(QMainWindow):
         top = QWidget(); r = QHBoxLayout(top)
         r.setContentsMargins(0, 0, 0, 0)
         r.setSpacing(8)
-        top.setMinimumHeight(42)
+        graph_header = l.itemAt(l.count() - 1)
+        if graph_header and graph_header.widget():
+            graph_header.widget().hide()
+        top.setMinimumHeight(36)
         top.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         refresh_btn = QPushButton("Refresh Entity Graph"); refresh_btn.clicked.connect(self.refresh_entity_graph)
         focus_btn = QPushButton("Build From Selected Process"); focus_btn.clicked.connect(self.refresh_selected_process_graph)
         open_btn = QPushButton("Open Interactive Graph"); open_btn.clicked.connect(self.open_entity_graph)
-        r.addWidget(refresh_btn); r.addWidget(focus_btn); r.addWidget(open_btn); r.addStretch(1)
-        l.addWidget(self._panel_card("Graph Controls", top, lambda: self._open_panel_window("Graph Controls", QLabel("Use graph controls in main workspace."))))
-        self.graph_summary = QTextBrowser(); self.graph_summary.setMinimumHeight(140)
-        graph_top = QWidget()
-        graph_top_layout = QHBoxLayout(graph_top)
-        graph_top_layout.setContentsMargins(0, 0, 0, 0)
-        graph_top_layout.setSpacing(8)
-        self.graph_findings = QTextBrowser(); self.graph_findings.setMinimumHeight(180)
+        for btn in [refresh_btn, focus_btn, open_btn]:
+            btn.setMaximumWidth(190)
+        r.addWidget(refresh_btn)
+        r.addWidget(focus_btn)
+        r.addWidget(open_btn)
+        r.addStretch(1)
+        l.addWidget(top)
+        self.graph_summary = QTextBrowser(); self.graph_summary.setMinimumHeight(170)
+        self.graph_findings = QTextBrowser(); self.graph_findings.setMinimumHeight(170)
         self.graph_focus_table = QTableWidget(0, 4); self.graph_focus_table.setHorizontalHeaderLabels(["Process","PID","Risk","Signature"]); self._style_table(self.graph_focus_table)
-        self.graph_focus_table.setMinimumHeight(180)
+        self.graph_focus_table.setMinimumHeight(190)
         self.graph_group_table = QTableWidget(0, 2); self.graph_group_table.setHorizontalHeaderLabels(["Group","Count"]); self._style_table(self.graph_group_table)
-        self.graph_group_table.setMinimumHeight(180)
-        graph_top_layout.addWidget(self._panel_card("Priority Findings", self.graph_findings, lambda: self._open_panel_window("Priority Findings", self._clone_text_view(self.graph_findings))), 3)
-        graph_top_layout.addWidget(self._panel_card("Hot Processes", self.graph_focus_table, lambda: self._open_panel_window("Hot Processes", self._clone_table(self.graph_focus_table))), 3)
-        graph_top_layout.addWidget(self._panel_card("Graph Coverage", self.graph_group_table, lambda: self._open_panel_window("Graph Coverage", self._clone_table(self.graph_group_table))), 2)
-        split = QSplitter(Qt.Horizontal)
+        self.graph_group_table.setMinimumHeight(190)
         self.graph_nodes_table = QTableWidget(0, 5); self.graph_nodes_table.setHorizontalHeaderLabels(["Label","Group","Cluster","Risk","Title"]); self._style_table(self.graph_nodes_table)
         self.graph_edges_table = QTableWidget(0, 4); self.graph_edges_table.setHorizontalHeaderLabels(["From","To","Label","Width"]); self._style_table(self.graph_edges_table)
-        self.graph_nodes_table.setMinimumHeight(240)
-        self.graph_edges_table.setMinimumHeight(240)
-        split.addWidget(self._panel_card("Entity Nodes", self.graph_nodes_table, lambda: self._open_panel_window("Entity Nodes", self._clone_table(self.graph_nodes_table))))
-        split.addWidget(self._panel_card("Entity Edges", self.graph_edges_table, lambda: self._open_panel_window("Entity Edges", self._clone_table(self.graph_edges_table))))
-        split.setStretchFactor(0, 2); split.setStretchFactor(1, 2)
-        split.setChildrenCollapsible(False)
-        self.graph_detail = QTextEdit(); self.graph_detail.setReadOnly(True); self.graph_detail.setMinimumHeight(180)
-        l.addWidget(self._panel_card("Graph Summary", self.graph_summary, lambda: self._open_panel_window("Graph Summary", self._clone_text_view(self.graph_summary))))
-        l.addWidget(graph_top)
-        l.addWidget(split, 1)
-        l.addWidget(self._panel_card("Graph Detail", self.graph_detail, lambda: self._open_panel_window("Graph Detail", self._clone_text_view(self.graph_detail))))
+        self.graph_nodes_table.setMinimumHeight(190)
+        self.graph_edges_table.setMinimumHeight(190)
+        self.graph_detail = QTextEdit(); self.graph_detail.setReadOnly(True); self.graph_detail.setMinimumHeight(170)
+
+        summary_row = QWidget()
+        summary_row_layout = QHBoxLayout(summary_row)
+        summary_row_layout.setContentsMargins(0, 0, 0, 0)
+        summary_row_layout.setSpacing(8)
+        summary_row_layout.addWidget(self._panel_card("Graph Summary", self.graph_summary, lambda: self._open_panel_window("Graph Summary", self._clone_text_view(self.graph_summary))), 1)
+        summary_row_layout.addWidget(self._panel_card("Graph Detail", self.graph_detail, lambda: self._open_panel_window("Graph Detail", self._clone_text_view(self.graph_detail))), 1)
+        summary_row_layout.addWidget(self._panel_card("Priority Findings", self.graph_findings, lambda: self._open_panel_window("Priority Findings", self._clone_text_view(self.graph_findings))), 1)
+        l.addWidget(summary_row)
+
+        insights_row = QWidget()
+        insights_row_layout = QHBoxLayout(insights_row)
+        insights_row_layout.setContentsMargins(0, 0, 0, 0)
+        insights_row_layout.setSpacing(8)
+        insights_row_layout.addWidget(self._panel_card("Hot Processes", self.graph_focus_table, lambda: self._open_panel_window("Hot Processes", self._clone_table(self.graph_focus_table))), 1)
+        insights_row_layout.addWidget(self._panel_card("Entity Nodes", self.graph_nodes_table, lambda: self._open_panel_window("Entity Nodes", self._clone_table(self.graph_nodes_table))), 1)
+        insights_row_layout.addWidget(self._panel_card("Entity Edges", self.graph_edges_table, lambda: self._open_panel_window("Entity Edges", self._clone_table(self.graph_edges_table))), 1)
+        l.addWidget(insights_row)
+
         return w
 
     def _timeline_tab(self) -> QWidget:
@@ -1275,36 +1492,31 @@ class ShadowLabDesktop(QMainWindow):
         tr.setContentsMargins(0, 0, 0, 0)
         tr.setSpacing(8)
         btn = QPushButton("Refresh Timeline"); btn.clicked.connect(self.refresh_timeline); tr.addWidget(btn); tr.addStretch(1)
-        l.addWidget(self._panel_card("Timeline Controls", top, lambda: self._open_panel_window("Timeline Controls", QLabel("Use refresh in main workspace."))))
-        self.timeline_summary = QTextBrowser(); self.timeline_summary.setMinimumHeight(120)
+        l.addWidget(self._panel_card("Timeline Controls", top, None))
+        self.timeline_summary = QTextBrowser(); self.timeline_summary.setMinimumHeight(190)
         self.timeline_table = QTableWidget(0, 4); self.timeline_table.setHorizontalHeaderLabels(["Time","Type","Severity","Title"]); self.timeline_table.itemSelectionChanged.connect(self.show_selected_timeline); self._style_table(self.timeline_table)
-        self.timeline_detail = QTextEdit(); self.timeline_detail.setReadOnly(True)
-        split = QSplitter(Qt.Horizontal)
-        split.addWidget(self._panel_card("Timeline Events", self.timeline_table, lambda: self._open_panel_window("Timeline Events", self._clone_table(self.timeline_table))))
-        split.addWidget(self._panel_card("Timeline Detail", self.timeline_detail, lambda: self._open_panel_window("Timeline Detail", self._clone_text_view(self.timeline_detail))))
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 3)
-        l.addWidget(self._panel_card("Timeline Story", self.timeline_summary, lambda: self._open_panel_window("Timeline Story", self._clone_text_view(self.timeline_summary))))
-        l.addWidget(split, 1)
+        self.timeline_table.setMinimumHeight(190)
+        self.timeline_detail = QTextEdit(); self.timeline_detail.setReadOnly(True); self.timeline_detail.setMinimumHeight(190)
+
+        cards_row = QWidget()
+        cards_row_layout = QHBoxLayout(cards_row)
+        cards_row_layout.setContentsMargins(0, 0, 0, 0)
+        cards_row_layout.setSpacing(8)
+        cards_row_layout.addWidget(self._panel_card("Timeline Story", self.timeline_summary, None), 1)
+        cards_row_layout.addWidget(self._panel_card("Timeline Events", self.timeline_table, None), 1)
+        cards_row_layout.addWidget(self._panel_card("Timeline Detail", self.timeline_detail, None), 1)
+        l.addWidget(cards_row, 1)
         return w
 
     def _quarantine_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
         self._tab_header(l, "Quarantine & Alert Workspace", "Manage quarantined processes, restore items, configure alert webhooks.")
         row = QWidget(); r = QHBoxLayout(row)
-        quarantine_capabilities = {
-            "Refresh Quarantine": "can_view_quarantine",
-            "Restore Selected": "can_manage_quarantine",
-            "Delete Selected": "can_manage_quarantine",
-            "Test Webhook": "can_manage_alerts",
-            "Save Webhook": "can_manage_alerts",
-        }
         for text, fn in [("Refresh Quarantine", self.refresh_quarantine), ("Restore Selected", self.restore_selected_quarantine), ("Delete Selected", self.delete_selected_quarantine), ("Test Webhook", self.test_alert_webhook), ("Save Webhook", self.save_alert_webhook)]:
             b = QPushButton(text)
             b.clicked.connect(fn)
-            self._bind_capability(b, quarantine_capabilities[text])
             r.addWidget(b)
-        r.addStretch(1); l.addWidget(self._panel_card("Quarantine Controls", row, lambda: self._open_panel_window("Quarantine Controls", QLabel("Use controls in main workspace."))))
+        r.addStretch(1); l.addWidget(self._panel_card("Quarantine Controls", row, None))
         self.quarantine_table = QTableWidget(0, 6); self.quarantine_table.setHorizontalHeaderLabels(["ID","Process","Original Path","Quarantine Path","Status","Created"]); self._style_table(self.quarantine_table)
         self.quarantine_detail = QTextEdit(); self.quarantine_detail.setReadOnly(True)
         split = QSplitter(Qt.Horizontal)
@@ -1324,7 +1536,7 @@ class ShadowLabDesktop(QMainWindow):
         self.incident_status = QComboBox(); self.incident_status.addItems(["open","investigating","contained","closed"])
         self.incident_owner = QLineEdit()
         self.incident_notes = QLineEdit()
-        save_incident = QPushButton("Update Incident"); save_incident.clicked.connect(self.update_selected_incident); self._bind_capability(save_incident, "can_manage_incidents")
+        save_incident = QPushButton("Update Incident"); save_incident.clicked.connect(self.update_selected_incident)
         cr.addWidget(QLabel("Status")); cr.addWidget(self.incident_status)
         cr.addWidget(QLabel("Owner")); cr.addWidget(self.incident_owner)
         cr.addWidget(QLabel("Notes")); cr.addWidget(self.incident_notes)
@@ -1342,30 +1554,53 @@ class ShadowLabDesktop(QMainWindow):
         audit_panel = QSplitter(Qt.Horizontal)
         audit_panel.addWidget(bottom); audit_panel.addWidget(self.auth_anomaly_view)
         audit_panel.setStretchFactor(0, 3); audit_panel.setStretchFactor(1, 2)
-        l.addWidget(self._panel_card("Incident Controls", controls, lambda: self._open_panel_window("Incident Controls", QLabel("Use incident controls in main workspace."))))
+        l.addWidget(self._panel_card("Incident Controls", controls, None))
         l.addWidget(s, 2); l.addWidget(audit_panel, 2); return w
 
     def _artifacts_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8); s = QSplitter(Qt.Horizontal)
         self._tab_header(l, "Artifacts & Evidence Store", "Browse, preview and open forensic artifacts captured during monitoring and hunt sessions.")
+        controls = QWidget()
+        cr = QHBoxLayout(controls)
+        cr.setContentsMargins(0, 0, 0, 0)
+        cr.setSpacing(8)
+        refresh_btn = QPushButton("Refresh Artifacts")
+        refresh_btn.clicked.connect(self.refresh_artifacts)
+        open_btn = QPushButton("Open Selected Artifact")
+        open_btn.clicked.connect(self.open_selected_artifact)
+        cr.addWidget(refresh_btn)
+        cr.addWidget(open_btn)
+        cr.addStretch(1)
+        l.addWidget(self._panel_card("Artifact Actions", controls, None))
+
         self.art_list = QListWidget(); self.art_list.itemSelectionChanged.connect(self.show_selected_artifact)
-        right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(8); self.art_preview = QTextBrowser(); self.art_preview.setMinimumHeight(180); self.art_detail = QTextEdit(); self.art_detail.setReadOnly(True); open_btn = QPushButton("Open Selected Artifact"); open_btn.clicked.connect(self.open_selected_artifact); rl.addWidget(self._panel_card("Artifact Preview", self.art_preview, lambda: self._open_panel_window("Artifact Preview", self._clone_text_view(self.art_preview)))); rl.addWidget(self._panel_card("Artifact Detail", self.art_detail, lambda: self._open_panel_window("Artifact Detail", self._clone_text_view(self.art_detail)))); rl.addWidget(open_btn)
+        right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(8); self.art_preview = QTextBrowser(); self.art_preview.setMinimumHeight(180); self.art_detail = QTextEdit(); self.art_detail.setReadOnly(True); rl.addWidget(self._panel_card("Artifact Preview", self.art_preview, lambda: self._open_panel_window("Artifact Preview", self._clone_text_view(self.art_preview)))); rl.addWidget(self._panel_card("Artifact Detail", self.art_detail, lambda: self._open_panel_window("Artifact Detail", self._clone_text_view(self.art_detail))))
         s.addWidget(self._panel_card("Artifact List", self.art_list, lambda: self._open_panel_window("Artifact List", QLabel("Use artifact list in main workspace.")))); s.addWidget(right); s.setStretchFactor(0, 1); s.setStretchFactor(1, 3); l.addWidget(s, 1); return w
 
     def _enterprise_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
-        self._tab_header(l, "Enterprise Operations Center", "Case management, approvals, network assessment, web surface inspection and purple team replay.")
+        overview_section = QFrame()
+        overview_section.setProperty("card", True)
+        overview_layout = QVBoxLayout(overview_section)
+        overview_layout.setContentsMargins(12, 10, 12, 12)
+        overview_layout.setSpacing(8)
         controls_card = QFrame(); controls_card.setProperty("card", True)
         controls_inner = QVBoxLayout(controls_card)
-        controls_inner.setContentsMargins(12, 10, 12, 10)
-        controls_inner.setSpacing(6)
+        controls_inner.setContentsMargins(12, 8, 12, 8)
+        controls_inner.setSpacing(4)
         controls_lbl = QLabel("Case &amp; Operations Controls")
         controls_lbl.setStyleSheet("font-size:12px;font-weight:700;color:#96a5b8;")
         controls_inner.addWidget(controls_lbl)
         controls_top = QWidget()
-        controls_top_row = QHBoxLayout(controls_top)
-        controls_top_row.setContentsMargins(0, 0, 0, 0)
-        controls_top_row.setSpacing(8)
+        controls_top_layout = QVBoxLayout(controls_top)
+        controls_top_layout.setContentsMargins(0, 0, 0, 0)
+        controls_top_layout.setSpacing(6)
+        controls_status_row = QHBoxLayout()
+        controls_status_row.setContentsMargins(0, 0, 0, 0)
+        controls_status_row.setSpacing(8)
+        controls_filter_row = QHBoxLayout()
+        controls_filter_row.setContentsMargins(0, 0, 0, 0)
+        controls_filter_row.setSpacing(8)
         self.enterprise_warning_banner = QLabel("Warnings will appear here when cases need attention.")
         self.enterprise_warning_banner.setStyleSheet("color:#ffd166;background:#1a2230;border:1px solid #2c4260;border-radius:8px;padding:8px 10px;font-weight:600;")
         self.enterprise_role_banner = QLabel("Role context will appear here.")
@@ -1387,18 +1622,22 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_activity_filter.textChanged.connect(self._apply_enterprise_filters)
         self.enterprise_activity_filter.textChanged.connect(self._persist_enterprise_ui_state)
         self.enterprise_auto_refresh.toggled.connect(self._persist_enterprise_ui_state)
-        controls_top_row.addWidget(self.enterprise_warning_banner, 2)
-        controls_top_row.addWidget(self.enterprise_role_banner, 1)
-        controls_top_row.addWidget(self.enterprise_live_status)
-        controls_top_row.addWidget(self.enterprise_auto_refresh)
-        controls_top_row.addWidget(self.enterprise_case_filter)
-        controls_top_row.addWidget(self.enterprise_task_filter)
-        controls_top_row.addWidget(self.enterprise_activity_filter)
+        controls_status_row.addWidget(self.enterprise_warning_banner, 2)
+        controls_status_row.addWidget(self.enterprise_role_banner, 1)
+        controls_status_row.addWidget(self.enterprise_live_status)
+        controls_status_row.addWidget(self.enterprise_auto_refresh)
+        controls_status_row.addStretch(1)
+        controls_filter_row.addWidget(self.enterprise_case_filter)
+        controls_filter_row.addWidget(self.enterprise_task_filter)
+        controls_filter_row.addWidget(self.enterprise_activity_filter)
+        controls_filter_row.addStretch(1)
+        controls_top_layout.addLayout(controls_status_row)
+        controls_top_layout.addLayout(controls_filter_row)
         controls_inner.addWidget(controls_top)
         controls = QWidget()
         cr = QVBoxLayout(controls)
         cr.setContentsMargins(0, 0, 0, 0)
-        cr.setSpacing(8)
+        cr.setSpacing(6)
         self.enterprise_case_title = QLineEdit("Suspicious activity case")
         self.enterprise_case_title.setPlaceholderText("Case title")
         self.enterprise_case_owner = QLineEdit()
@@ -1436,9 +1675,15 @@ class ShadowLabDesktop(QMainWindow):
         fields_row = QWidget()
         fields_layout = QHBoxLayout(fields_row)
         fields_layout.setContentsMargins(0, 0, 0, 0)
-        fields_layout.setSpacing(8)
-        for widget in [QLabel("Case"), self.enterprise_case_title, QLabel("Owner"), self.enterprise_case_owner, QLabel("Priority"), self.enterprise_case_priority]:
-            fields_layout.addWidget(widget)
+        fields_layout.setSpacing(6)
+        fields_layout.addWidget(QLabel("Case"))
+        fields_layout.addWidget(self.enterprise_case_title, 3)
+        fields_layout.addWidget(QLabel("Owner"))
+        fields_layout.addWidget(self.enterprise_case_owner, 2)
+        fields_layout.addWidget(QLabel("Priority"))
+        fields_layout.addWidget(self.enterprise_case_priority, 1)
+        fields_layout.addWidget(QLabel("ATT&CK"))
+        fields_layout.addWidget(self.enterprise_mitre_bundle_path, 5)
         fields_layout.addStretch(1)
         primary_row = QWidget()
         primary_layout = QHBoxLayout(primary_row)
@@ -1450,29 +1695,30 @@ class ShadowLabDesktop(QMainWindow):
         secondary_row = QWidget()
         secondary_layout = QHBoxLayout(secondary_row)
         secondary_layout.setContentsMargins(0, 0, 0, 0)
-        secondary_layout.setSpacing(8)
-        for widget in [update_task_btn, mark_done_btn, approval_btn, web_btn, net_btn, replay_btn, gaps_btn, load_mitre_btn, self.enterprise_mitre_bundle_path]:
+        secondary_layout.setSpacing(6)
+        for widget in [update_task_btn, mark_done_btn, approval_btn, web_btn, net_btn, replay_btn, gaps_btn, load_mitre_btn]:
             secondary_layout.addWidget(widget)
         secondary_layout.addStretch(1)
         cr.addWidget(fields_row)
         cr.addWidget(primary_row)
         cr.addWidget(secondary_row)
-        controls_scroll = QScrollArea()
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setFrameShape(QFrame.NoFrame)
-        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        controls_scroll.setFixedHeight(120)
-        controls_scroll.setWidget(controls)
-        controls_inner.addWidget(controls_scroll)
-        l.addWidget(controls_card)
+        controls_inner.addWidget(controls)
+        overview_layout.addWidget(controls_card)
 
-        triage_card = QFrame(); triage_card.setProperty("card", True); triage_layout = QVBoxLayout(triage_card)
-        triage_title = QLabel("What Needs Attention Now")
-        triage_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
-        self.enterprise_summary = QTextBrowser(); self.enterprise_summary.setMinimumHeight(150); self.enterprise_summary.setProperty("role", "brief")
-        triage_layout.addWidget(triage_title); triage_layout.addWidget(self.enterprise_summary)
-        l.addWidget(triage_card)
+        self.enterprise_summary = QTextBrowser()
+        self.enterprise_summary.setMinimumHeight(220)
+        self.enterprise_summary.setProperty("role", "brief")
+
+        context_metrics = QWidget()
+        cmr = QHBoxLayout(context_metrics)
+        cmr.setContentsMargins(0, 0, 0, 0)
+        cmr.setSpacing(8)
+        selected_case_card, self.enterprise_selected_case_value = self._metric_card("Selected Case", "#c9d7e8")
+        auth_anomalies_card, self.enterprise_auth_anomalies_value = self._metric_card("Auth Anomalies", "#ff9f6b")
+        approvals_card, self.enterprise_pending_approvals_value = self._metric_card("Pending Approvals", "#ffd166")
+        event_pressure_card, self.enterprise_event_pressure_value = self._metric_card("High-Risk Events", "#ff7f96")
+        for card in [selected_case_card, auth_anomalies_card, approvals_card, event_pressure_card]:
+            cmr.addWidget(card, 1)
 
         metrics = QWidget()
         mr = QHBoxLayout(metrics)
@@ -1484,34 +1730,48 @@ class ShadowLabDesktop(QMainWindow):
         high_risk_card, self.enterprise_high_risk_value = self._metric_card("High Risk Assets", "#7bd389")
         for card in [open_cases_card, overdue_card, assignments_card, high_risk_card]:
             mr.addWidget(card, 1)
-        l.addWidget(metrics)
 
         self.enterprise_kpi_chart = QChartView()
-        self.enterprise_kpi_chart.setMinimumHeight(180)
+        self.enterprise_kpi_chart.setMinimumHeight(220)
         self.enterprise_kpi_chart.setRenderHint(self.enterprise_kpi_chart.renderHints())
-        l.addWidget(self._panel_card("Operational Snapshot", self.enterprise_kpi_chart, lambda: self._open_panel_window("Operational Snapshot", QLabel("Use the main Enterprise tab for the live KPI chart."))))
+        summary_row = QWidget()
+        summary_row_layout = QHBoxLayout(summary_row)
+        summary_row_layout.setContentsMargins(0, 0, 0, 0)
+        summary_row_layout.setSpacing(8)
+        summary_row_layout.addWidget(
+            self._panel_card(
+                "What Needs Attention Now",
+                self.enterprise_summary,
+                lambda: self._open_panel_window("What Needs Attention Now", self._clone_text_view(self.enterprise_summary)),
+            ),
+            6,
+        )
+        summary_row_layout.addWidget(
+            self._panel_card(
+                "Operational Snapshot",
+                self.enterprise_kpi_chart,
+                lambda: self._open_panel_window("Operational Snapshot", QLabel("Use the main Enterprise tab for the live KPI chart.")),
+            ),
+            5,
+        )
+        overview_layout.addWidget(summary_row)
+        overview_layout.addWidget(context_metrics)
+        overview_layout.addWidget(metrics)
 
         enterprise_sections = QTabWidget()
         enterprise_sections.setDocumentMode(True)
         enterprise_sections.setUsesScrollButtons(True)
 
-        ops_page = QWidget()
-        ops_layout = QHBoxLayout(ops_page)
-        ops_layout.setContentsMargins(0, 0, 0, 0)
-        ops_layout.setSpacing(8)
-        split = QSplitter(Qt.Horizontal)
-        left = QWidget(); ll = QVBoxLayout(left)
+        ops_cases_page = QWidget()
+        ops_cases_layout = QGridLayout(ops_cases_page)
+        ops_cases_layout.setContentsMargins(0, 0, 0, 0)
+        ops_cases_layout.setHorizontalSpacing(8)
+        ops_cases_layout.setVerticalSpacing(8)
         self.enterprise_cases_table = QTableWidget(0, 6); self.enterprise_cases_table.setHorizontalHeaderLabels(["ID", "Title", "Priority", "Stage", "Owner", "Status"]); self._style_table(self.enterprise_cases_table); self.enterprise_cases_table.itemSelectionChanged.connect(self._on_enterprise_case_selection_changed)
         self.enterprise_assets_table = QTableWidget(0, 4); self.enterprise_assets_table.setHorizontalHeaderLabels(["PID", "Name", "Criticality", "Rationale"]); self._style_table(self.enterprise_assets_table)
         self.enterprise_detections_table = QTableWidget(0, 4); self.enterprise_detections_table.setHorizontalHeaderLabels(["Rule", "Version", "Status", "Notes"]); self._style_table(self.enterprise_detections_table)
         self.enterprise_notes_table = QTableWidget(0, 3); self.enterprise_notes_table.setHorizontalHeaderLabels(["Author", "Type", "Note"]); self._style_table(self.enterprise_notes_table); self.enterprise_notes_table.itemSelectionChanged.connect(self.show_selected_enterprise_note)
         self.enterprise_stories_table = QTableWidget(0, 3); self.enterprise_stories_table.setHorizontalHeaderLabels(["Title", "Confidence", "Author"]); self._style_table(self.enterprise_stories_table); self.enterprise_stories_table.itemSelectionChanged.connect(self.show_selected_enterprise_story)
-        ll.addWidget(self._panel_card("Cases", self.enterprise_cases_table, lambda: self._open_panel_window("Enterprise Cases", self._clone_table(self.enterprise_cases_table))))
-        ll.addWidget(self._panel_card("Critical Assets", self.enterprise_assets_table, lambda: self._open_panel_window("Enterprise Assets", self._clone_table(self.enterprise_assets_table))))
-        ll.addWidget(self._panel_card("Detection Lifecycle", self.enterprise_detections_table, lambda: self._open_panel_window("Enterprise Detections", self._clone_table(self.enterprise_detections_table))))
-        ll.addWidget(self._panel_card("Investigation Notes", self.enterprise_notes_table, lambda: self._open_panel_window("Investigation Notes", self._clone_table(self.enterprise_notes_table))))
-        ll.addWidget(self._panel_card("Investigation Stories", self.enterprise_stories_table, lambda: self._open_panel_window("Investigation Stories", self._clone_table(self.enterprise_stories_table))))
-        right = QWidget(); rl = QVBoxLayout(right)
         self.enterprise_narrative = QTextBrowser(); self.enterprise_narrative.setProperty("role", "brief"); self.enterprise_narrative.setMinimumHeight(180)
         self.enterprise_case_board = QTextBrowser(); self.enterprise_case_board.setProperty("role", "brief"); self.enterprise_case_board.setMinimumHeight(160)
         self.enterprise_case_timeline = QTableWidget(0, 4); self.enterprise_case_timeline.setHorizontalHeaderLabels(["Time", "Kind", "Severity", "Title"]); self._style_table(self.enterprise_case_timeline); self.enterprise_case_timeline.itemSelectionChanged.connect(self.show_selected_enterprise_timeline)
@@ -1523,47 +1783,82 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_assignments_table = QTableWidget(0, 4); self.enterprise_assignments_table.setHorizontalHeaderLabels(["Analyst", "Role", "Status", "Assigned By"]); self._style_table(self.enterprise_assignments_table); self.enterprise_assignments_table.itemSelectionChanged.connect(self.show_selected_enterprise_assignment)
         self.enterprise_tasks_table = QTableWidget(0, 4); self.enterprise_tasks_table.setHorizontalHeaderLabels(["Title", "Status", "Priority", "Assigned"]); self._style_table(self.enterprise_tasks_table); self.enterprise_tasks_table.itemSelectionChanged.connect(self.show_selected_enterprise_task); self.enterprise_tasks_table.itemChanged.connect(self._inline_update_enterprise_task)
         self.enterprise_activity_table = QTableWidget(0, 4); self.enterprise_activity_table.setHorizontalHeaderLabels(["Time", "Event", "Actor", "Summary"]); self._style_table(self.enterprise_activity_table); self.enterprise_activity_table.itemSelectionChanged.connect(self.show_selected_enterprise_activity)
-        self.enterprise_notifications_table = QTableWidget(0, 4); self.enterprise_notifications_table.setHorizontalHeaderLabels(["Time", "Severity", "Category", "Message"]); self._style_table(self.enterprise_notifications_table); self.enterprise_notifications_table.itemSelectionChanged.connect(self.show_selected_enterprise_notification)
+        self.enterprise_notifications_cases_table = QTableWidget(0, 4); self.enterprise_notifications_cases_table.setHorizontalHeaderLabels(["Time", "Severity", "Category", "Message"]); self._style_table(self.enterprise_notifications_cases_table); self.enterprise_notifications_cases_table.setMinimumHeight(180); self.enterprise_notifications_cases_table.itemSelectionChanged.connect(self.show_selected_enterprise_notification)
+        self.enterprise_notifications_table = QTableWidget(0, 4); self.enterprise_notifications_table.setHorizontalHeaderLabels(["Time", "Severity", "Category", "Message"]); self._style_table(self.enterprise_notifications_table); self.enterprise_notifications_table.setMinimumHeight(180); self.enterprise_notifications_table.itemSelectionChanged.connect(self.show_selected_enterprise_notification)
         self.enterprise_detail = QTextEdit(); self.enterprise_detail.setReadOnly(True)
-        rl.addWidget(self._panel_card("Narrative", self.enterprise_narrative, lambda: self._open_panel_window("Enterprise Narrative", self._clone_text_view(self.enterprise_narrative))))
-        rl.addWidget(self._panel_card("Case Board", self.enterprise_case_board, lambda: self._open_panel_window("Case Board", self._clone_text_view(self.enterprise_case_board))))
-        rl.addWidget(self._panel_card("Assignments", self.enterprise_assignments_table, lambda: self._open_panel_window("Assignments", self._clone_table(self.enterprise_assignments_table))))
-        rl.addWidget(self._panel_card("Tasks", self.enterprise_tasks_table, lambda: self._open_panel_window("Tasks", self._clone_table(self.enterprise_tasks_table))))
-        rl.addWidget(self._panel_card("Activity Feed", self.enterprise_activity_table, lambda: self._open_panel_window("Activity Feed", self._clone_table(self.enterprise_activity_table))))
-        rl.addWidget(self._panel_card("Notification Center", self.enterprise_notifications_table, lambda: self._open_panel_window("Notification Center", self._clone_table(self.enterprise_notifications_table))))
-        rl.addWidget(self._panel_card("Case JSON Detail", self.enterprise_detail, lambda: self._open_panel_window("Case JSON Detail", self._clone_text_view(self.enterprise_detail))))
-        split.addWidget(left); split.addWidget(right); split.setStretchFactor(0, 2); split.setStretchFactor(1, 3)
-        ops_layout.addWidget(split)
+        ops_cases_layout.addWidget(self._panel_card("Cases", self.enterprise_cases_table, lambda: self._open_panel_window("Enterprise Cases", self._clone_table(self.enterprise_cases_table))), 0, 0)
+        ops_cases_layout.addWidget(self._panel_card("Narrative", self.enterprise_narrative, lambda: self._open_panel_window("Enterprise Narrative", self._clone_text_view(self.enterprise_narrative))), 0, 1)
+        ops_cases_layout.addWidget(self._panel_card("Assignments", self.enterprise_assignments_table, lambda: self._open_panel_window("Assignments", self._clone_table(self.enterprise_assignments_table))), 0, 2)
+        ops_cases_layout.addWidget(self._panel_card("Tasks", self.enterprise_tasks_table, lambda: self._open_panel_window("Tasks", self._clone_table(self.enterprise_tasks_table))), 1, 0)
+        ops_cases_layout.addWidget(self._panel_card("Case Board", self.enterprise_case_board, lambda: self._open_panel_window("Case Board", self._clone_text_view(self.enterprise_case_board))), 1, 1)
+        ops_cases_layout.addWidget(self._panel_card("Notifications", self.enterprise_notifications_cases_table, lambda: self._open_panel_window("Notification Center", self._clone_table(self.enterprise_notifications_cases_table))), 1, 2)
+        ops_cases_layout.setColumnStretch(0, 1)
+        ops_cases_layout.setColumnStretch(1, 1)
+        ops_cases_layout.setColumnStretch(2, 1)
+        ops_cases_layout.setRowStretch(0, 1)
+        ops_cases_layout.setRowStretch(1, 1)
 
-        intel_page = QWidget()
-        intel_layout = QHBoxLayout(intel_page)
-        intel_layout.setContentsMargins(0, 0, 0, 0)
-        intel_layout.setSpacing(8)
-        intel_split = QSplitter(Qt.Horizontal)
-        intel_left = QWidget(); intel_left_layout = QVBoxLayout(intel_left)
-        intel_left_layout.setContentsMargins(0, 0, 0, 0)
-        intel_left_layout.setSpacing(8)
-        intel_left_layout.addWidget(self._panel_card("Critical Assets", self.enterprise_assets_table, lambda: self._open_panel_window("Enterprise Assets", self._clone_table(self.enterprise_assets_table))))
-        intel_left_layout.addWidget(self._panel_card("Detection Lifecycle", self.enterprise_detections_table, lambda: self._open_panel_window("Enterprise Detections", self._clone_table(self.enterprise_detections_table))))
-        intel_left_layout.addWidget(self._panel_card("ATT&CK Coverage", self.enterprise_mitre_summary, lambda: self._open_panel_window("ATT&CK Coverage", self._clone_text_view(self.enterprise_mitre_summary))))
-        intel_left_layout.addWidget(self._panel_card("Case Timeline", self.enterprise_case_timeline, lambda: self._open_panel_window("Case Timeline", self._clone_table(self.enterprise_case_timeline))))
-        intel_left_layout.addWidget(self._panel_card("Entity Links", self.enterprise_entity_links, lambda: self._open_panel_window("Entity Links", self._clone_table(self.enterprise_entity_links))))
-        intel_right = QWidget(); intel_right_layout = QVBoxLayout(intel_right)
-        intel_right_layout.setContentsMargins(0, 0, 0, 0)
-        intel_right_layout.setSpacing(8)
-        intel_right_layout.addWidget(self._panel_card("Case ATT&CK", self.enterprise_case_mitre, lambda: self._open_panel_window("Case ATT&CK", self._clone_text_view(self.enterprise_case_mitre))))
-        intel_right_layout.addWidget(self._panel_card("Graph Correlation", self.enterprise_graph_summary, lambda: self._open_panel_window("Graph Correlation", self._clone_text_view(self.enterprise_graph_summary))))
-        intel_right_layout.addWidget(self._panel_card("Graph Focus Processes", self.enterprise_graph_focus, lambda: self._open_panel_window("Graph Focus Processes", self._clone_table(self.enterprise_graph_focus))))
-        intel_right_layout.addWidget(self._panel_card("Investigation Notes", self.enterprise_notes_table, lambda: self._open_panel_window("Investigation Notes", self._clone_table(self.enterprise_notes_table))))
-        intel_right_layout.addWidget(self._panel_card("Investigation Stories", self.enterprise_stories_table, lambda: self._open_panel_window("Investigation Stories", self._clone_table(self.enterprise_stories_table))))
-        intel_split.addWidget(intel_left)
-        intel_split.addWidget(intel_right)
-        intel_split.setStretchFactor(0, 2)
-        intel_split.setStretchFactor(1, 3)
-        intel_layout.addWidget(intel_split)
+        ops_activity_page = QWidget()
+        ops_activity_layout = QHBoxLayout(ops_activity_page)
+        ops_activity_layout.setContentsMargins(0, 0, 0, 0)
+        ops_activity_layout.setSpacing(8)
+        ops_activity_split = QSplitter(Qt.Horizontal)
+        ops_activity_left = QWidget(); ops_activity_left_layout = QVBoxLayout(ops_activity_left)
+        ops_activity_left_layout.setContentsMargins(0, 0, 0, 0)
+        ops_activity_left_layout.setSpacing(8)
+        ops_activity_left_layout.addWidget(self._panel_card("Activity Feed", self.enterprise_activity_table, lambda: self._open_panel_window("Activity Feed", self._clone_table(self.enterprise_activity_table))))
+        ops_activity_left_layout.addWidget(self._panel_card("Notification Center", self.enterprise_notifications_table, lambda: self._open_panel_window("Notification Center", self._clone_table(self.enterprise_notifications_table))))
+        ops_activity_right = QWidget(); ops_activity_right_layout = QVBoxLayout(ops_activity_right)
+        ops_activity_right_layout.setContentsMargins(0, 0, 0, 0)
+        ops_activity_right_layout.setSpacing(8)
+        ops_activity_right_layout.addWidget(self._panel_card("Case JSON Detail", self.enterprise_detail, lambda: self._open_panel_window("Case JSON Detail", self._clone_text_view(self.enterprise_detail))))
+        ops_activity_right_layout.addWidget(self._panel_card("Investigation Notes", self.enterprise_notes_table, lambda: self._open_panel_window("Investigation Notes", self._clone_table(self.enterprise_notes_table))))
+        ops_activity_right_layout.addWidget(self._panel_card("Investigation Stories", self.enterprise_stories_table, lambda: self._open_panel_window("Investigation Stories", self._clone_table(self.enterprise_stories_table))))
+        ops_activity_split.addWidget(ops_activity_left)
+        ops_activity_split.addWidget(ops_activity_right)
+        ops_activity_split.setStretchFactor(0, 2)
+        ops_activity_split.setStretchFactor(1, 3)
+        ops_activity_layout.addWidget(ops_activity_split)
 
-        enterprise_sections.addTab(ops_page, "Enterprise Ops")
-        enterprise_sections.addTab(intel_page, "Enterprise Intel")
+        intel_coverage_page = QWidget()
+        intel_coverage_layout = QHBoxLayout(intel_coverage_page)
+        intel_coverage_layout.setContentsMargins(0, 0, 0, 0)
+        intel_coverage_layout.setSpacing(8)
+        intel_coverage_left = QWidget(); intel_coverage_left_layout = QVBoxLayout(intel_coverage_left)
+        intel_coverage_left_layout.setContentsMargins(0, 0, 0, 0)
+        intel_coverage_left_layout.setSpacing(8)
+        intel_coverage_left_layout.addWidget(self._panel_card("Critical Assets", self.enterprise_assets_table, lambda: self._open_panel_window("Enterprise Assets", self._clone_table(self.enterprise_assets_table))))
+        intel_coverage_left_layout.addWidget(self._panel_card("Detection Lifecycle", self.enterprise_detections_table, lambda: self._open_panel_window("Enterprise Detections", self._clone_table(self.enterprise_detections_table))))
+        intel_coverage_right = QWidget(); intel_coverage_right_layout = QVBoxLayout(intel_coverage_right)
+        intel_coverage_right_layout.setContentsMargins(0, 0, 0, 0)
+        intel_coverage_right_layout.setSpacing(8)
+        intel_coverage_right_layout.addWidget(self._panel_card("ATT&CK Coverage", self.enterprise_mitre_summary, lambda: self._open_panel_window("ATT&CK Coverage", self._clone_text_view(self.enterprise_mitre_summary))))
+        intel_coverage_right_layout.addWidget(self._panel_card("Case ATT&CK", self.enterprise_case_mitre, lambda: self._open_panel_window("Case ATT&CK", self._clone_text_view(self.enterprise_case_mitre))))
+        intel_coverage_layout.addWidget(intel_coverage_left, 1)
+        intel_coverage_layout.addWidget(intel_coverage_right, 1)
+
+        intel_analysis_page = QWidget()
+        intel_analysis_layout = QHBoxLayout(intel_analysis_page)
+        intel_analysis_layout.setContentsMargins(0, 0, 0, 0)
+        intel_analysis_layout.setSpacing(8)
+        intel_analysis_left = QWidget(); intel_analysis_left_layout = QVBoxLayout(intel_analysis_left)
+        intel_analysis_left_layout.setContentsMargins(0, 0, 0, 0)
+        intel_analysis_left_layout.setSpacing(8)
+        intel_analysis_left_layout.addWidget(self._panel_card("Case Timeline", self.enterprise_case_timeline, lambda: self._open_panel_window("Case Timeline", self._clone_table(self.enterprise_case_timeline))))
+        intel_analysis_left_layout.addWidget(self._panel_card("Entity Links", self.enterprise_entity_links, lambda: self._open_panel_window("Entity Links", self._clone_table(self.enterprise_entity_links))))
+        intel_analysis_right = QWidget(); intel_analysis_right_layout = QVBoxLayout(intel_analysis_right)
+        intel_analysis_right_layout.setContentsMargins(0, 0, 0, 0)
+        intel_analysis_right_layout.setSpacing(8)
+        intel_analysis_right_layout.addWidget(self._panel_card("Graph Correlation", self.enterprise_graph_summary, lambda: self._open_panel_window("Graph Correlation", self._clone_text_view(self.enterprise_graph_summary))))
+        intel_analysis_right_layout.addWidget(self._panel_card("Graph Focus Processes", self.enterprise_graph_focus, lambda: self._open_panel_window("Graph Focus Processes", self._clone_table(self.enterprise_graph_focus))))
+        intel_analysis_layout.addWidget(intel_analysis_left, 1)
+        intel_analysis_layout.addWidget(intel_analysis_right, 1)
+
+        enterprise_sections.addTab(overview_section, "Overview")
+        enterprise_sections.addTab(ops_cases_page, "Ops Cases")
+        enterprise_sections.addTab(ops_activity_page, "Ops Activity")
+        enterprise_sections.addTab(intel_coverage_page, "Intel Coverage")
+        enterprise_sections.addTab(intel_analysis_page, "Intel Graph")
         l.addWidget(enterprise_sections, 1)
         return w
 
@@ -1571,45 +1866,56 @@ class ShadowLabDesktop(QMainWindow):
         w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(8, 8, 8, 8); l.setSpacing(8)
         self._tab_header(l, "Security Ops & Platform Readiness", "Signed integrity, observability, migrations, database readiness and secret lifecycle operations without disturbing existing workspaces.")
         controls = QWidget(); row = QHBoxLayout(controls); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
-        refresh_btn = QPushButton("Refresh Security Ops"); refresh_btn.clicked.connect(self.refresh_security_ops_workspace); self._bind_capability(refresh_btn, "can_manage_integrations")
-        export_btn = QPushButton("Export Ops Report"); export_btn.clicked.connect(self.export_security_ops_report); self._bind_capability(export_btn, "can_manage_integrations")
-        refresh_integrity_btn = QPushButton("Refresh Integrity"); refresh_integrity_btn.clicked.connect(self.refresh_integrity_manifest); self._bind_capability(refresh_integrity_btn, "can_manage_integrations")
-        rotate_btn = QPushButton("Rotate Secrets"); rotate_btn.clicked.connect(self.rotate_security_secrets); self._bind_capability(rotate_btn, "can_manage_integrations")
-        clear_webhook_btn = QPushButton("Clear Webhook"); clear_webhook_btn.clicked.connect(self.clear_alert_webhook_secret); self._bind_capability(clear_webhook_btn, "can_manage_integrations")
+        refresh_btn = QPushButton("Refresh Security Ops"); refresh_btn.clicked.connect(self.refresh_security_ops_workspace)
+        export_btn = QPushButton("Export Ops Report"); export_btn.clicked.connect(self.export_security_ops_report)
+        refresh_integrity_btn = QPushButton("Refresh Integrity"); refresh_integrity_btn.clicked.connect(self.refresh_integrity_manifest)
+        rotate_btn = QPushButton("Rotate Secrets"); rotate_btn.clicked.connect(self.rotate_security_secrets)
+        clear_webhook_btn = QPushButton("Clear Webhook"); clear_webhook_btn.clicked.connect(self.clear_alert_webhook_secret)
         for btn in [refresh_btn, export_btn, refresh_integrity_btn, rotate_btn, clear_webhook_btn]:
             row.addWidget(btn)
         row.addStretch(1)
-        l.addWidget(self._panel_card("Security Ops Controls", controls, lambda: self._open_panel_window("Security Ops Controls", QLabel("Use Security Ops controls in main workspace."))))
+        controls_cards_row = QWidget()
+        controls_cards_layout = QHBoxLayout(controls_cards_row)
+        controls_cards_layout.setContentsMargins(0, 0, 0, 0)
+        controls_cards_layout.setSpacing(8)
+        controls_cards_layout.addWidget(self._panel_card("Security Ops Controls", controls, None), 1)
 
         yara_controls = QWidget(); yara_row = QHBoxLayout(yara_controls); yara_row.setContentsMargins(0, 0, 0, 0); yara_row.setSpacing(8)
-        refresh_yara_btn = QPushButton("Refresh YARA Ops"); refresh_yara_btn.clicked.connect(self.refresh_yara_ops_workspace); self._bind_capability(refresh_yara_btn, "can_run_hunt")
-        load_yara_policy_btn = QPushButton("Load YARA Policy"); load_yara_policy_btn.clicked.connect(self.load_local_yara_policy); self._bind_capability(load_yara_policy_btn, "can_manage_integrations")
-        save_yara_policy_btn = QPushButton("Save YARA Policy"); save_yara_policy_btn.clicked.connect(self.save_local_yara_policy); self._bind_capability(save_yara_policy_btn, "can_manage_integrations")
-        load_yara_errors_btn = QPushButton("YARA Errors"); load_yara_errors_btn.clicked.connect(self.load_local_yara_errors); self._bind_capability(load_yara_errors_btn, "can_run_hunt")
+        refresh_yara_btn = QPushButton("Refresh YARA Ops"); refresh_yara_btn.clicked.connect(self.refresh_yara_ops_workspace)
+        load_yara_policy_btn = QPushButton("Load YARA Policy"); load_yara_policy_btn.clicked.connect(self.load_local_yara_policy)
+        save_yara_policy_btn = QPushButton("Save YARA Policy"); save_yara_policy_btn.clicked.connect(self.save_local_yara_policy)
+        load_yara_errors_btn = QPushButton("YARA Errors"); load_yara_errors_btn.clicked.connect(self.load_local_yara_errors)
         for btn in [refresh_yara_btn, load_yara_policy_btn, save_yara_policy_btn, load_yara_errors_btn]:
             yara_row.addWidget(btn)
         yara_row.addStretch(1)
-        l.addWidget(self._panel_card("Local YARA Controls", yara_controls, lambda: self._open_panel_window("Local YARA Controls", QLabel("Use YARA controls in main workspace."))))
+        controls_cards_layout.addWidget(self._panel_card("Local YARA Controls", yara_controls, None), 1)
+        l.addWidget(controls_cards_row)
 
-        self.security_ops_summary = QTextBrowser(); self.security_ops_summary.setProperty("role", "brief"); self.security_ops_summary.setMinimumHeight(150)
-        l.addWidget(self._panel_card("Security Ops Summary", self.security_ops_summary, lambda: self._open_panel_window("Security Ops Summary", self._clone_text_view(self.security_ops_summary))))
-
-        split = QSplitter(Qt.Horizontal)
-        left = QWidget(); ll = QVBoxLayout(left)
-        self.security_integrity_table = QTableWidget(0, 2); self.security_integrity_table.setHorizontalHeaderLabels(["Bucket", "Count"]); self._style_table(self.security_integrity_table)
-        self.security_platform_table = QTableWidget(0, 2); self.security_platform_table.setHorizontalHeaderLabels(["Domain", "Status"]); self._style_table(self.security_platform_table)
-        self.security_yara_table = QTableWidget(0, 4); self.security_yara_table.setHorizontalHeaderLabels(["Source", "Hits", "Suppressed", "Avg Score"]); self._style_table(self.security_yara_table)
-        ll.addWidget(self._panel_card("Integrity Drift", self.security_integrity_table, lambda: self._open_panel_window("Integrity Drift", self._clone_table(self.security_integrity_table))))
-        ll.addWidget(self._panel_card("Platform Readiness", self.security_platform_table, lambda: self._open_panel_window("Platform Readiness", self._clone_table(self.security_platform_table))))
-        ll.addWidget(self._panel_card("YARA Source Analytics", self.security_yara_table, lambda: self._open_panel_window("YARA Source Analytics", self._clone_table(self.security_yara_table))))
-        right = QWidget(); rl = QVBoxLayout(right)
+        self.security_ops_summary = QTextBrowser(); self.security_ops_summary.setProperty("role", "brief"); self.security_ops_summary.setMinimumHeight(180)
+        self.security_integrity_table = QTableWidget(0, 2); self.security_integrity_table.setHorizontalHeaderLabels(["Bucket", "Count"]); self._style_table(self.security_integrity_table); self.security_integrity_table.setMinimumHeight(180)
+        self.security_platform_table = QTableWidget(0, 2); self.security_platform_table.setHorizontalHeaderLabels(["Domain", "Status"]); self._style_table(self.security_platform_table); self.security_platform_table.setMinimumHeight(180)
+        self.security_yara_table = QTableWidget(0, 4); self.security_yara_table.setHorizontalHeaderLabels(["Source", "Hits", "Suppressed", "Avg Score"]); self._style_table(self.security_yara_table); self.security_yara_table.setMinimumHeight(180)
         self.security_yara_policy = QTextEdit(); self.security_yara_policy.setPlaceholderText('{"allowlist_rule_patterns":[],"boost_rule_patterns":{}}')
         self.security_yara_policy.setMinimumHeight(180)
-        rl.addWidget(self._panel_card("Local YARA Policy", self.security_yara_policy, lambda: self._open_panel_window("Local YARA Policy", self._clone_text_view(self.security_yara_policy))))
-        self.security_ops_detail = QTextEdit(); self.security_ops_detail.setReadOnly(True)
-        rl.addWidget(self._panel_card("Security Ops Detail", self.security_ops_detail, lambda: self._open_panel_window("Security Ops Detail", self._clone_text_view(self.security_ops_detail))))
-        split.addWidget(left); split.addWidget(right); split.setStretchFactor(0, 2); split.setStretchFactor(1, 3)
-        l.addWidget(split, 1)
+        self.security_ops_detail = QTextEdit(); self.security_ops_detail.setReadOnly(True); self.security_ops_detail.setMinimumHeight(180)
+
+        top_row = QWidget()
+        top_row_layout = QHBoxLayout(top_row)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(8)
+        top_row_layout.addWidget(self._panel_card("Security Ops Summary", self.security_ops_summary, lambda: self._open_panel_window("Security Ops Summary", self._clone_text_view(self.security_ops_summary))), 1)
+        top_row_layout.addWidget(self._panel_card("Integrity Drift", self.security_integrity_table, lambda: self._open_panel_window("Integrity Drift", self._clone_table(self.security_integrity_table))), 1)
+        top_row_layout.addWidget(self._panel_card("Platform Readiness", self.security_platform_table, lambda: self._open_panel_window("Platform Readiness", self._clone_table(self.security_platform_table))), 1)
+        l.addWidget(top_row)
+
+        bottom_row = QWidget()
+        bottom_row_layout = QHBoxLayout(bottom_row)
+        bottom_row_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_row_layout.setSpacing(8)
+        bottom_row_layout.addWidget(self._panel_card("YARA Source Analytics", self.security_yara_table, lambda: self._open_panel_window("YARA Source Analytics", self._clone_table(self.security_yara_table))), 1)
+        bottom_row_layout.addWidget(self._panel_card("Local YARA Policy", self.security_yara_policy, lambda: self._open_panel_window("Local YARA Policy", self._clone_text_view(self.security_yara_policy))), 1)
+        bottom_row_layout.addWidget(self._panel_card("Security Ops Detail", self.security_ops_detail, lambda: self._open_panel_window("Security Ops Detail", self._clone_text_view(self.security_ops_detail))), 1)
+        l.addWidget(bottom_row, 1)
         return w
 
     def _scenario_tab(self) -> QWidget:
@@ -1620,8 +1926,15 @@ class ShadowLabDesktop(QMainWindow):
         r.setSpacing(8)
         self.scenario = QComboBox(); self.scenario.addItems(["balanced","cpu-heavy","network-heavy","file-heavy","memory-heavy"])
         self.scenario_duration = QSpinBox(); self.scenario_duration.setRange(5, 300); self.scenario_duration.setValue(30)
-        btn = QPushButton("Run Scenario"); btn.clicked.connect(self.run_scenario); self._bind_capability(btn, "can_run_scenarios"); r.addWidget(QLabel("Scenario")); r.addWidget(self.scenario); r.addWidget(QLabel("Duration")); r.addWidget(self.scenario_duration); r.addWidget(btn); r.addStretch(1)
-        self.scenario_out = QTextEdit(); self.scenario_out.setReadOnly(True); l.addWidget(self._panel_card("Scenario Controls", row, lambda: self._open_panel_window("Scenario Controls", QLabel("Use scenario controls in main workspace.")))); l.addWidget(self._panel_card("Scenario Output", self.scenario_out, lambda: self._open_panel_window("Scenario Output", self._clone_text_view(self.scenario_out))), 1); return w
+        btn = QPushButton("Run Scenario"); btn.clicked.connect(self.run_scenario)
+        clear_btn = QPushButton("Clear Output"); clear_btn.clicked.connect(lambda: self.scenario_out.clear())
+        r.addWidget(QLabel("Scenario")); r.addWidget(self.scenario)
+        r.addWidget(QLabel("Duration")); r.addWidget(self.scenario_duration)
+        r.addWidget(btn); r.addWidget(clear_btn); r.addStretch(1)
+        self.scenario_out = QTextEdit(); self.scenario_out.setReadOnly(True)
+        l.addWidget(self._panel_card("Scenario Controls", row, None))
+        l.addWidget(self._panel_card("Scenario Output", self.scenario_out, lambda: self._open_panel_window("Scenario Output", self._clone_text_view(self.scenario_out))), 1)
+        return w
 
     def _about_tab(self) -> QWidget:
         w = QWidget(); root = QHBoxLayout(w)
@@ -1632,20 +1945,26 @@ class ShadowLabDesktop(QMainWindow):
         about_title = QLabel("About ShadowLab")
         about_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
         about_body = QLabel(
-            "<p><b>ShadowLab</b> is a modern defensive operations platform for detection engineering, threat hunting, incident response, enterprise triage, and security research.</p>"
-            "<p>It combines host telemetry, process intelligence, persistence review, layered YARA analysis, threat intelligence enrichment, graph investigation, evidence handling, and structured case workflows in one operator-focused workspace.</p>"
-            "<p><b>Stack</b><br>"
-            "Backend &amp; API: Python · FastAPI · Uvicorn · SQLite · PostgreSQL<br>"
-            "Desktop Client: PySide6 · pywin32 · psutil · Watchdog<br>"
-            "Detection &amp; Analysis: YARA Python · Scapy · scikit-learn · Pandas · NumPy<br>"
-            "Visualization: Plotly · Matplotlib · Pyvis<br>"
-            "AI &amp; Enrichment: OpenAI · OTLP HTTP<br>"
-            "Reporting &amp; Export: ReportLab<br>"
-            "Infrastructure: Docker · GitHub Actions</p>"
+            "<p><b>ShadowLab</b> is a Windows-focused defensive operations workspace built around a local FastAPI backend and a PySide6 desktop client. It is designed for operators who want triage, investigation, evidence handling, enterprise casework, and security-operations controls in one environment instead of fragmented tools.</p>"
+            "<p>The current project is broader than the older platform description. It now combines host telemetry, process intelligence, persistence review, threat-intel enrichment, quarantine and artifacts, graph and timeline correlation, ATT&amp;CK coverage, enterprise workflow, approval-aware actions, workspace-aware policy, and security-ops readiness reporting.</p>"
+            "<p><b>Core Capabilities</b><br>"
+            "Dashboards and operator views for daily triage and investigation flow<br>"
+            "Process, persistence, static-analysis, graph, timeline, deception, and network workspaces<br>"
+            "WHIDS and HIDS integration with live validation and response-aware workflows<br>"
+            "Enterprise case operations with assignments, tasks, notes, stories, notifications, and exports<br>"
+            "MITRE ATT&amp;CK coverage, Navigator export, and Workbench export for investigation reporting<br>"
+            "Security Ops tooling for integrity, observability, secrets, retention, YARA policy, and readiness checks</p>"
+            "<p><b>Runtime Shape</b><br>"
+            "Backend &amp; API: Python | FastAPI | Uvicorn | SQLite / PostgreSQL<br>"
+            "Desktop Client: PySide6 | pywin32 | psutil | watchdog<br>"
+            "Analysis Layer: YARA Python | Scapy | pandas | NumPy | scikit-learn | die-python<br>"
+            "Visualization &amp; Reporting: Plotly | Matplotlib | Pyvis | ReportLab<br>"
+            "Security Controls: signed mutations, approvals, role-aware access, workspace scoping, and tenant-aware exports</p>"
             "<p><b>FAQ</b><br>"
-            "<b>What is ShadowLab?</b> API-first cyber defense and security operations platform.<br>"
-            "<b>Who is it for?</b> Detection engineers, threat hunters, SOC analysts, incident responders, and defensive researchers.<br>"
-            "<b>Can it be packaged?</b> Yes. The desktop client is ready to be used as the packaging base for EXE delivery.</p>"
+            "<b>What is ShadowLab?</b> A local operator platform for Windows investigation, detection engineering, incident response, and enterprise case operations.<br>"
+            "<b>Who is it for?</b> Detection engineers, threat hunters, SOC analysts, incident responders, malware analysts, and defensive researchers.<br>"
+            "<b>What changed from the older version?</b> The project now includes enterprise workflows, ATT&amp;CK lifecycle tooling, security-ops readiness, richer exports, and role-aware controls instead of just a narrower defensive lab surface.<br>"
+            "<b>Can it be packaged?</b> Yes. The PySide6 desktop remains the main operator client and packaging base for EXE delivery.</p>"
         )
         about_body.setWordWrap(True)
         about_body.setTextFormat(Qt.RichText)
@@ -1663,12 +1982,26 @@ class ShadowLabDesktop(QMainWindow):
         right_card = QFrame(); right_card.setProperty("card", True)
         right_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout = QVBoxLayout(right_card)
+        right_layout.setContentsMargins(12, 12, 12, 12)
+        right_layout.setSpacing(4)
         photo_title = QLabel("Creator Profile")
         photo_title.setStyleSheet("font-size:16px;font-weight:700;color:#f4f7fb;")
         photo_sub = QLabel("Ulfat Ibadov")
-        photo_sub.setStyleSheet("color:#f4f7fb;font-size:14px;font-weight:700;")
+        photo_sub.setStyleSheet("color:#f4f7fb;font-size:15px;font-weight:700;")
         creator_role = QLabel("Offensive Security Expert")
-        creator_role.setStyleSheet("color:#96a5b8;font-size:12px;")
+        creator_role.setStyleSheet("color:#96a5b8;font-size:13px;")
+        creator_bio = QLabel(
+            "<div style='margin:0;padding:0;'>"
+            "<b>Profile:</b> Offensive security practitioner and detection engineer with hands-on experience in penetration testing, red team operations, and behavioral threat detection.<br>"
+            "<b>Certifications:</b> EC-Council certified (CEH Master, WAHS Professional), currently pursuing CPENT and Hack The Box CPTS.<br>"
+            "<b>Ranking:</b> Global Top 1% on both Hack The Box and TryHackMe.<br>"
+            "<b>Focus:</b> Builds systems that detect what is discovered on the offensive side, most notably ShadowLab, a security operations platform correlating host telemetry with ML-assisted behavioral scoring for detection engineering and incident response."
+            "</div>"
+        )
+        creator_bio.setWordWrap(True)
+        creator_bio.setTextFormat(Qt.RichText)
+        creator_bio.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        creator_bio.setStyleSheet("color:#e5edf5;font-size:13px;line-height:1.45;")
         profile_image = QLabel()
         static_dir = Path(__file__).resolve().parent.parent / "static"
         image_path = static_dir / "ulfat-profile.png"
@@ -1678,10 +2011,19 @@ class ShadowLabDesktop(QMainWindow):
         if not pixmap.isNull():
             profile_image.setPixmap(pixmap.scaled(320, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         profile_image.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(photo_title)
-        right_layout.addWidget(photo_sub)
-        right_layout.addWidget(creator_role)
-        right_layout.addWidget(profile_image)
+        creator_header = QWidget()
+        creator_header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        creator_header_layout = QVBoxLayout(creator_header)
+        creator_header_layout.setContentsMargins(0, 0, 0, 0)
+        creator_header_layout.setSpacing(3)
+        creator_header_layout.addWidget(photo_title)
+        creator_header_layout.addWidget(photo_sub)
+        creator_header_layout.addWidget(creator_role)
+        right_layout.addWidget(creator_header)
+        right_layout.addWidget(profile_image, 0, Qt.AlignCenter)
+        right_layout.addSpacing(24)
+        right_layout.addWidget(creator_bio)
+        right_layout.addStretch(1)
         creator_actions = QWidget(); creator_row = QHBoxLayout(creator_actions)
         creator_row.setContentsMargins(0, 0, 0, 0)
         creator_row.setSpacing(8)
@@ -1701,7 +2043,7 @@ class ShadowLabDesktop(QMainWindow):
 
     def _load_secret(self, key: str) -> str:
         if win32cred is None:
-            return str(self.settings.value(f"secret_fallback_{key}", ""))
+            return ""
         try:
             result = win32cred.CredRead(self._secret_name(key), win32cred.CRED_TYPE_GENERIC, 0)
             blob = result.get("CredentialBlob", b"")
@@ -1713,7 +2055,6 @@ class ShadowLabDesktop(QMainWindow):
 
     def _save_secret(self, key: str, value: str) -> None:
         if win32cred is None:
-            self.settings.setValue(f"secret_fallback_{key}", value)
             return
         credential = {
             "Type": win32cred.CRED_TYPE_GENERIC,
@@ -1726,7 +2067,6 @@ class ShadowLabDesktop(QMainWindow):
 
     def _delete_secret(self, key: str) -> None:
         if win32cred is None:
-            self.settings.remove(f"secret_fallback_{key}")
             return
         try:
             win32cred.CredDelete(self._secret_name(key), win32cred.CRED_TYPE_GENERIC, 0)
@@ -1805,6 +2145,16 @@ class ShadowLabDesktop(QMainWindow):
             return {}
         return {"X-ShadowLab-Approval-Id": approval_id}
 
+    def _workspace_headers(self) -> dict[str, str]:
+        workspace_id = self.workspace_id.text().strip().lower()
+        if not workspace_id:
+            workspace_id = "default"
+        headers = {"X-ShadowLab-Workspace": workspace_id}
+        actor = self.actor_name.text().strip().lower()
+        if actor:
+            headers["X-ShadowLab-Actor"] = actor
+        return headers
+
     def _raise_for_api_error(self, response: Response) -> None:
         if response.ok:
             return
@@ -1825,6 +2175,7 @@ class ShadowLabDesktop(QMainWindow):
         should_raise = kwargs.pop("raise_for_status", True)
         headers = dict(kwargs.pop("headers", {}) or {})
         headers.update(self._auth_headers())
+        headers.update(self._workspace_headers())
         headers.update(self._signed_headers(method, path, kwargs))
         headers.update(self._approval_headers(method))
         response = requests.request(
@@ -1928,13 +2279,15 @@ class ShadowLabDesktop(QMainWindow):
         block = QWidget()
         block.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(block)
-        layout.setContentsMargins(0, 0, 0, 2)
-        layout.setSpacing(3)
+        layout.setContentsMargins(0, 0, 0, 1)
+        layout.setSpacing(2)
         label = QLabel(label_text)
         label.setStyleSheet("color:#96a5b8;font-size:10px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;")
         label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         if isinstance(widget, (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox)):
-            widget.setMinimumHeight(34)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            widget.setMinimumHeight(24)
+            widget.setMaximumHeight(24)
             widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         else:
             widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -1945,14 +2298,15 @@ class ShadowLabDesktop(QMainWindow):
     def _metric_card(self, label_text: str, accent: str) -> tuple[QFrame, QLabel]:
         card = QFrame()
         card.setProperty("card", True)
-        card.setMinimumHeight(88)
+        card.setMinimumHeight(66)
+        card.setMaximumHeight(76)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(2)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(0)
         label = QLabel(label_text)
-        label.setStyleSheet("color:#96a5b8;font-size:10px;font-weight:700;letter-spacing:0.5px;")
+        label.setStyleSheet("color:#96a5b8;font-size:9px;font-weight:700;letter-spacing:0.4px;")
         value = QLabel("0")
-        value.setStyleSheet(f"color:{accent};font-size:24px;font-weight:800;")
+        value.setStyleSheet(f"color:{accent};font-size:18px;font-weight:800;")
         layout.addWidget(label)
         layout.addWidget(value)
         layout.addStretch(1)
@@ -2010,14 +2364,21 @@ class ShadowLabDesktop(QMainWindow):
         self.controls_row.setSpacing(10 if stacked else 12)
         self.ops_card.setMinimumWidth(0 if stacked else 560)
         self.advanced_card.setMinimumWidth(0 if stacked else 560)
-        self.ops_card.setMaximumHeight(16777215)
-        self.advanced_card.setMaximumHeight(16777215)
-        self.ops_card.setMinimumHeight(self.ops_card.sizeHint().height())
-        self.advanced_card.setMinimumHeight(self.advanced_card.sizeHint().height())
-        if not stacked and self.advanced_card.isVisible():
-            equal_height = max(self.ops_card.height(), self.advanced_card.height())
-            self.ops_card.setMinimumHeight(equal_height)
-            self.advanced_card.setMinimumHeight(equal_height)
+        viewport_height = max(720, self.height())
+        max_controls_zone = int(viewport_height * (0.42 if stacked else 0.33))
+        max_controls_zone = max(220, min(max_controls_zone, 360))
+        ops_hint = self.ops_card.sizeHint().height()
+        adv_hint = self.advanced_card.sizeHint().height()
+        natural_equal_h = max(ops_hint, adv_hint, 1)
+        if stacked:
+            equal_h = min(natural_equal_h, max_controls_zone)
+        else:
+            compact_floor = min(ops_hint, adv_hint)
+            equal_h = min(max(compact_floor, 1), max_controls_zone)
+        self.ops_card.setFixedHeight(equal_h)
+        self.advanced_card.setFixedHeight(equal_h)
+        self.controls.setMaximumHeight(equal_h if stacked else equal_h + 4)
+        self.controls.setMinimumHeight(equal_h if stacked else equal_h + 4)
 
     def _update_tab_bar_layout(self) -> None:
         if not hasattr(self, "tabs"):
@@ -2717,17 +3078,35 @@ class ShadowLabDesktop(QMainWindow):
         self.health.setText(text)
         self.health.setStyleSheet(f"background:{color};color:white;padding:6px 10px;border-radius:8px;font-weight:700;")
 
+    def _set_role_badge(self, role: str) -> None:
+        normalized = (role or "viewer").strip().lower()
+        if normalized == "admin":
+            bg = "#2f9e67"
+        elif normalized == "analyst":
+            bg = "#2d79d5"
+        else:
+            bg = "#d6a23c"
+        self.auth_role.setText(f"Role: {normalized}")
+        self.auth_role.setStyleSheet(
+            f"background:{bg};color:white;border:1px solid #355179;"
+            "border-radius:10px;padding:6px 14px;font-weight:700;font-size:12px;"
+        )
+
     def _apply_auth_context(self, payload: dict) -> None:
         self.auth_context = payload
         role = str(payload.get("role", "viewer") or "viewer")
+        actor = str(payload.get("actor", self.actor_name.text().strip().lower()) or "")
+        workspace_id = str(payload.get("workspace_id", self.workspace_id.text().strip() or "default") or "default")
+        if actor:
+            self.actor_name.setText(actor)
+        self.workspace_id.setText(workspace_id)
         capabilities = payload.get("capabilities", {}) if isinstance(payload.get("capabilities"), dict) else {}
         if role == "viewer" and not self.auth_active:
-            self.auth_role.setText("Role: viewer")
-            self.auth_role.setStyleSheet("color:#f4c26b;font-weight:700;")
+            self._set_role_badge("viewer")
             self.auth_summary.setText("Capabilities: read-only preview mode until you press OK")
             self.auth_mode_badge.setText("Mode: viewer")
             self.auth_mode_badge.setStyleSheet("color:#f4c26b;font-weight:700;")
-            self.auth_mode_hint.setText("Default mode stays in viewer/read-only. Paste an API key and press OK to switch access level.")
+            self.auth_mode_hint.setText("Read-only until a valid key is applied.")
         else:
             enabled = [
                 label
@@ -2742,18 +3121,17 @@ class ShadowLabDesktop(QMainWindow):
                 if capabilities.get(capability)
             ]
             summary = ", ".join(enabled[:4]) if enabled else "read-only"
-            self.auth_role.setText(f"Role: {role}")
-            self.auth_role.setStyleSheet("color:#9fd0ff;font-weight:700;")
-            self.auth_summary.setText(f"Capabilities: {summary}")
+            self._set_role_badge(role)
+            self.auth_summary.setText(f"Capabilities: {summary} | Workspace: {workspace_id}")
             accent = "#7fe39d" if role == "admin" else "#9fd0ff" if role == "analyst" else "#f4c26b"
             self.auth_mode_badge.setText(f"Mode: {role}")
             self.auth_mode_badge.setStyleSheet(f"color:{accent};font-weight:700;")
             if role == "admin":
-                self.auth_mode_hint.setText("Admin mode is active. All protected workflows and response controls are available.")
+                self.auth_mode_hint.setText("Full operator workflow enabled.")
             elif role == "analyst":
-                self.auth_mode_hint.setText("Analyst mode is active. Hunt, triage and investigation workflows are unlocked.")
+                self.auth_mode_hint.setText("Hunt and investigation workflow enabled.")
             else:
-                self.auth_mode_hint.setText("Viewer mode is active. Read-only views stay visible and destructive actions stay hidden.")
+                self.auth_mode_hint.setText("Read-only workspace is active.")
         if hasattr(self, "enterprise_role_banner"):
             access_text = "Read-only workspace" if role == "viewer" else "Investigation workspace" if role == "analyst" else "Full response workspace"
             self.enterprise_role_banner.setText(f"Enterprise role: {role} | {access_text}")
@@ -2821,7 +3199,7 @@ class ShadowLabDesktop(QMainWindow):
             self.custom_toolbar_buttons = []
         self._rebuild_toolbar()
         self.base.setText(self.settings.value("base", self.base.text()))
-        remember_api_key = str(self.settings.value("remember_api_key", "false")).lower() == "true"
+        remember_api_key = win32cred is not None and str(self.settings.value("remember_api_key", "false")).lower() == "true"
         self.remember_api_key.setChecked(remember_api_key)
         self.api_key.setText(self._load_secret("api_key") if remember_api_key else "")
         self.duration.setValue(int(self.settings.value("duration", self.duration.value())))
@@ -2844,6 +3222,8 @@ class ShadowLabDesktop(QMainWindow):
         self.block_target.setText(self.settings.value("block_target", ""))
         self.block_gateway.setText(self.settings.value("block_gateway", ""))
         self.approval_id.setText(self.settings.value("approval_id", ""))
+        self.actor_name.setText(self.settings.value("actor_name", ""))
+        self.workspace_id.setText(self.settings.value("workspace_id", self.workspace_id.text()))
         self.whids_manager_url.setText(self.settings.value("whids_manager_url", self.whids_manager_url.text()))
         self.whids_endpoint_uuid.setText(self.settings.value("whids_endpoint_uuid", ""))
         self.whids_artifact_since.setText(self.settings.value("whids_artifact_since", ""))
@@ -2875,7 +3255,7 @@ class ShadowLabDesktop(QMainWindow):
     def _save_settings(self) -> None:
         self.settings.setValue("custom_toolbar_buttons", json.dumps(self.custom_toolbar_buttons))
         self.settings.setValue("base", self.base.text())
-        self.settings.setValue("remember_api_key", self.remember_api_key.isChecked())
+        self.settings.setValue("remember_api_key", self.remember_api_key.isChecked() and win32cred is not None)
         self.settings.remove("api_key")
         self.settings.remove("vt_key")
         self.settings.remove("malwarebazaar_key")
@@ -2906,6 +3286,8 @@ class ShadowLabDesktop(QMainWindow):
         self.settings.setValue("block_target", self.block_target.text())
         self.settings.setValue("block_gateway", self.block_gateway.text())
         self.settings.setValue("approval_id", self.approval_id.text().strip())
+        self.settings.setValue("actor_name", self.actor_name.text().strip().lower())
+        self.settings.setValue("workspace_id", self.workspace_id.text().strip().lower() or "default")
         self.settings.setValue("whids_manager_url", self.whids_manager_url.text())
         self.settings.setValue("whids_endpoint_uuid", self.whids_endpoint_uuid.text())
         self.settings.setValue("whids_artifact_since", self.whids_artifact_since.text())
@@ -3154,6 +3536,74 @@ class ShadowLabDesktop(QMainWindow):
         value = str(self.selected_process.get("sha256", "-")) if self.selected_process else f"PID {pid}"
         self._record_threat_history("process", value, source, result)
         self._switch_to_tab("Threat Intel")
+
+    def _selected_process_ids(self) -> list[int]:
+        ids: list[int] = []
+        for item in self.proc_table.selectedItems():
+            if item.column() != 0:
+                continue
+            try:
+                ids.append(int(item.text()))
+            except Exception:
+                continue
+        return sorted(set(ids))
+
+    def _scan_payload(self) -> dict[str, str | None]:
+        return {
+            "virustotal_api_key": self.vt_key.text().strip() or None,
+            "malwarebazaar_auth_key": self.malwarebazaar_key.text().strip() or None,
+            "yaraify_auth_key": self.yaraify_key.text().strip() or None,
+        }
+
+    def _scan_process_ids_bulk(self, process_ids: list[int], scope_label: str) -> None:
+        payload = self._scan_payload()
+        if not (payload.get("virustotal_api_key") or payload.get("malwarebazaar_auth_key") or payload.get("yaraify_auth_key")):
+            self.statusBar().showMessage("Enter at least one threat-intel API key")
+            return
+        if not process_ids:
+            self.statusBar().showMessage("No processes selected for scan")
+            return
+        results: list[dict] = []
+        failed: list[dict[str, str]] = []
+        for pid in process_ids:
+            try:
+                results.append({"pid": pid, "scan": self._post(f"/processes/{pid}/scan", json=payload, timeout=60).json()})
+            except Exception as exc:
+                failed.append({"pid": str(pid), "error": str(exc)})
+        summary = {
+            "scope": scope_label,
+            "requested": len(process_ids),
+            "succeeded": len(results),
+            "failed": len(failed),
+            "results": results,
+            "errors": failed,
+        }
+        self._show_json(self.proc_detail, summary)
+        self.statusBar().showMessage(f"{scope_label}: scanned {len(results)}/{len(process_ids)} process(es)")
+
+    def scan_selected_processes_vt(self) -> None:
+        selected = self._selected_process_ids()
+        if not selected:
+            self.statusBar().showMessage("Select one or more process rows first")
+            return
+        self._scan_process_ids_bulk(selected, "Selected VT scan")
+
+    def scan_all_processes_vt(self) -> None:
+        process_ids: list[int] = []
+        for row in range(self.proc_table.rowCount()):
+            pid_item = self.proc_table.item(row, 0)
+            if not pid_item:
+                continue
+            try:
+                process_ids.append(int(pid_item.text()))
+            except Exception:
+                continue
+        if not process_ids:
+            self.statusBar().showMessage("Load processes first")
+            return
+        if QMessageBox.question(self, "Confirm Bulk VT Scan", f"Scan all loaded processes ({len(process_ids)}) with configured intel providers?") != QMessageBox.Yes:
+            return
+        self._scan_process_ids_bulk(process_ids, "All-process VT scan")
 
     def run_memory_analysis(self) -> None:
         ident = self._selected_process_or_warn()
@@ -4059,6 +4509,7 @@ class ShadowLabDesktop(QMainWindow):
             triage = self._get("/enterprise/triage", timeout=10).json()
             assets = self._get("/enterprise/assets", timeout=10).json()
             cases = self._get("/enterprise/cases", timeout=10).json()
+            approvals = self._get("/enterprise/approvals", timeout=10).json()
             detections = self._get("/enterprise/detections/lifecycle", timeout=10).json()
             mitre_status = self._get("/enterprise/mitre/status", timeout=10).json()
             mitre_summary = self._get("/enterprise/mitre/summary", timeout=10).json()
@@ -4068,13 +4519,31 @@ class ShadowLabDesktop(QMainWindow):
             self._show_error(self.enterprise_detail, "Enterprise workspace failed", exc)
             self.enterprise_live_status.setText("Live sync failed")
             return
-        attention = "".join(f"<li>{html.escape(str(item))}</li>" for item in triage.get("what_needs_attention_now", []))
+        attention_items = triage.get("what_needs_attention_now", [])
+        attention = "".join(f"<li>{html.escape(str(item))}</li>" for item in attention_items)
+        auth_anomalies = triage.get("auth_anomalies", [])
+        auth_items = "".join(
+            f"<li>{html.escape(str(item.get('message') or item.get('summary') or item.get('actor') or 'Anomalous authentication pattern detected'))}</li>"
+            for item in auth_anomalies[:3]
+            if isinstance(item, dict)
+        )
+        pending_approvals = [
+            item for item in approvals
+            if str(item.get("status", "")).strip().lower() in {"pending", "requested", "open"}
+        ] if isinstance(approvals, list) else []
         self.enterprise_summary.setHtml(
             f"<h3>Triage First</h3><ul>{attention or '<li>No immediate triage items.</li>'}</ul>"
-            f"<p><b>Open cases:</b> {len(cases)}<br><b>Top auth anomalies:</b> {len(triage.get('auth_anomalies', []))}</p>"
+            f"<p><b>Open cases:</b> {len(cases)}"
+            f"<br><b>Top auth anomalies:</b> {len(auth_anomalies)}"
+            f"<br><b>Pending approvals:</b> {len(pending_approvals)}</p>"
+            f"<h4>Authentication Watch</h4><ul>{auth_items or '<li>No recent authentication anomalies in focus.</li>'}</ul>"
         )
         self._set_metric_label(self.enterprise_open_cases_value, str(len(cases)))
         self._set_metric_label(self.enterprise_high_risk_value, str(len([item for item in assets.get('top_assets', []) if float(item.get('criticality_score', 0) or 0) >= 85])))
+        self._set_metric_label(self.enterprise_selected_case_value, f"#{preferred_case_id}" if preferred_case_id else "None")
+        self._set_metric_label(self.enterprise_auth_anomalies_value, str(len(auth_anomalies)))
+        self._set_metric_label(self.enterprise_pending_approvals_value, str(len(pending_approvals)))
+        self._set_metric_label(self.enterprise_event_pressure_value, "0")
         self.enterprise_cases_data = cases
         self._populate_enterprise_cases_table(cases)
         top_assets = assets.get("top_assets", [])
@@ -4108,7 +4577,7 @@ class ShadowLabDesktop(QMainWindow):
             "<p><b>Raw detail:</b> use the left-side tables, case board, and notification inbox for operational depth. Run <b>Replay Artifact</b> only when you explicitly want replay analysis.</p>"
         )
         self.enterprise_mitre_summary.setHtml(self._render_enterprise_mitre_summary(mitre_status, mitre_summary, mitre_compare, mitre_discover))
-        self._show_json(self.enterprise_detail, {"triage": triage, "assets": assets, "detections": detections, "mitre_status": mitre_status, "mitre_summary": mitre_summary, "mitre_discover": mitre_discover, "mitre_compare": mitre_compare, "story": story})
+        self._show_json(self.enterprise_detail, {"triage": triage, "assets": assets, "approvals": approvals, "detections": detections, "mitre_status": mitre_status, "mitre_summary": mitre_summary, "mitre_discover": mitre_discover, "mitre_compare": mitre_compare, "story": story})
         if cases:
             selected_row = next((idx for idx, item in enumerate(cases) if int(item.get("id", 0) or 0) == preferred_case_id), 0)
             self.enterprise_cases_table.selectRow(selected_row)
@@ -4209,6 +4678,8 @@ class ShadowLabDesktop(QMainWindow):
             f"<h4>Next Steps</h4><ul>{next_steps or '<li>No recommended next steps.</li>'}</ul>"
         )
         self.enterprise_case_mitre.setHtml(self._render_enterprise_case_mitre(mitre))
+        self._set_metric_label(self.enterprise_selected_case_value, f"#{case_id}")
+        self._set_metric_label(self.enterprise_event_pressure_value, str(kpis.get("high_or_critical_events", 0)))
         self._set_metric_label(self.enterprise_overdue_value, str(queue.get("overdue_tasks", 0)))
         self._set_metric_label(self.enterprise_assignments_value, str(queue.get("assignments", 0)))
         self._apply_enterprise_filters()
@@ -4234,6 +4705,8 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_case_board.setHtml(
             "<h3>Case Board</h3><p>No case selected yet. Pick a case on the left or create a new one.</p>"
         )
+        self._set_metric_label(self.enterprise_selected_case_value, "None")
+        self._set_metric_label(self.enterprise_event_pressure_value, "0")
         self.enterprise_mitre_summary.setHtml(
             "<h3>ATT&CK Coverage</h3><p>Load a MITRE ATT&CK bundle to see enterprise coverage, tactics, mitigations, and software overlap.</p>"
         )
@@ -4262,6 +4735,7 @@ class ShadowLabDesktop(QMainWindow):
         self.enterprise_activity_table.setRowCount(0)
         self.enterprise_notes_table.setRowCount(0)
         self.enterprise_stories_table.setRowCount(0)
+        self.enterprise_notifications_cases_table.setRowCount(0)
         self.enterprise_notifications_table.setRowCount(0)
         self.enterprise_case_timeline.setRowCount(0)
         self.enterprise_entity_links.setRowCount(0)
@@ -4436,7 +4910,8 @@ class ShadowLabDesktop(QMainWindow):
         self._show_enterprise_cached_item("enterprise_activity_data", self.enterprise_activity_table)
 
     def show_selected_enterprise_notification(self) -> None:
-        self._show_enterprise_cached_item("enterprise_notifications_data", self.enterprise_notifications_table)
+        table = self.sender() if isinstance(self.sender(), QTableWidget) else self.enterprise_notifications_table
+        self._show_enterprise_cached_item("enterprise_notifications_data", table)
 
     def show_selected_enterprise_timeline(self) -> None:
         self._show_enterprise_cached_item("enterprise_timeline_data", self.enterprise_case_timeline)
@@ -4534,12 +5009,13 @@ class ShadowLabDesktop(QMainWindow):
             item for item in getattr(self, "enterprise_notifications_data", [])
             if not activity_filter or activity_filter in json.dumps(item).lower()
         ]
-        self.enterprise_notifications_table.setRowCount(len(notifications))
-        for r, item in enumerate(notifications):
-            values = [item.get("created_at", ""), item.get("severity", ""), item.get("category", ""), item.get("message", "")]
-            for c, value in enumerate(values):
-                self.enterprise_notifications_table.setItem(r, c, QTableWidgetItem(str(value)))
-            self._paint_row(self.enterprise_notifications_table, r, self._severity_color(str(item.get("severity", "low"))))
+        for table in [self.enterprise_notifications_cases_table, self.enterprise_notifications_table]:
+            table.setRowCount(len(notifications))
+            for r, item in enumerate(notifications):
+                values = [item.get("created_at", ""), item.get("severity", ""), item.get("category", ""), item.get("message", "")]
+                for c, value in enumerate(values):
+                    table.setItem(r, c, QTableWidgetItem(str(value)))
+                self._paint_row(table, r, self._severity_color(str(item.get("severity", "low"))))
         self._enterprise_table_updating = False
         self._persist_enterprise_ui_state()
 

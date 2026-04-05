@@ -35,8 +35,10 @@ def main() -> None:
             "services/malware_analyst_service.py",
             "services/static_pe_service.py",
             "scripts/backup_shadowlab_data.py",
+            "scripts/export_audit_bundle.py",
             "scripts/restore_shadowlab_data.py",
             "scripts/smoke_test_postgres_runtime.py",
+            "scripts/validate_enterprise_postgres_readiness.py",
             "scripts/validate_detection_corpus.py",
         ]
     )

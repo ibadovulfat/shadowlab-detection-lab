@@ -119,130 +119,133 @@ The screenshots below now map directly to the updated desktop image set in `imag
 
 ### Dashboards Workspace
 
-![Dashboards Workspace](../images/dashboards-workspace.png)
+![Dashboards Workspace](../images/shadowlab-dashboard-wall.png)
 
 The dashboards surface is the quickest status board in the product. It condenses platform health, threat posture, auth state, and short investigation summaries into one operator-facing wall so the next pivot is obvious.
 
 ### WHIDS Workspace
 
-![WHIDS Workspace](../images/whids-workspace.png)
+![WHIDS Workspace](../images/shadowlab-whids-integration.png)
 
 The WHIDS workspace is the EDR-oriented integration panel. It brings manager sync, reports, artifacts, scheduler state, IoC/rule lifecycle, and enterprise jump-off into a single admin-facing control area.
 
 ### HIDS Workspace
 
-![HIDS Workspace](../images/hids-workspace.png)
+![HIDS Workspace](../images/shadowlab-hids-integration.png)
 
 The HIDS workspace is centered on OSSEC-style ingest and response planning. Operators use it to import alert streams, monitor live-ingest state, and pivot normalized incidents into the rest of the platform.
 
 ### Overview Incident Brief
 
-![Overview Incident Brief](../images/overview-incident-brief.png)
+![Overview Incident Brief](../images/shadowlab-monitor-overview.png)
 
 Overview is the high-signal telemetry reading area. It highlights incident posture, monitor results, and the current detection story in a cleaner briefing format than the dashboard wall.
 
 ### Process Intelligence Workspace
 
-![Process Intelligence Workspace](../images/process-intelligence-workspace.png)
+![Process Intelligence Workspace](../images/shadowlab-advanced-hunt.png)
 
 This is the main suspicious-process analysis surface. The process list, selected-process detail, triage output, and action strip work together here, making it the most common starting point for host-level investigation.
 
 ### Advanced Hunt Workspace
 
-![Advanced Hunt Workspace](../images/advanced-hunt-workspace.png)
+![Advanced Hunt Workspace](../images/shadowlab-advanced-hunt.png)
 
 Advanced Hunt acts like a compact analyst console. It keeps deeper process review and hunt output close together so internals, strings, sandbox, YARA, and AI-assisted reasoning can be reviewed in one iterative workspace.
 
 ### Persistence Workspace
 
-![Persistence Workspace](../images/persistence-workspace.png)
+![Persistence Workspace](../images/shadowlab-persistence-remediatio.png)
 
 Persistence gives the operator a dedicated post-compromise review area for autoruns, tasks, services, and rollback-aware remediation. It is where long-lived footholds are verified or cleaned up.
 
 ### Threat Intel Workspace
 
-![Threat Intel Workspace](../images/threat-intel-workspace.png)
+![Threat Intel Workspace](../images/shadowlab-threat-intel-enrichmen.png)
 
 Threat Intel connects hashes, IPs, and process context to outside enrichment. It is designed for fast reputation checks, provider comparison, and operator-readable correlation rather than raw feed browsing.
 
 ### Static Analysis Workspace
 
-![Static Analysis Workspace](../images/static-analysis-workspace.png)
+![Static Analysis Workspace](../images/shadowlab-static-pe-analysis.png)
 
 Static Analysis is the file-focused malware-analysis section. It presents Detect It Easy readiness, file/process submission, highlight extraction, and raw output in a way that complements live triage without overloading the process workspace.
 
 ### Deception And Evidence Workspace
 
-![Deception And Evidence Workspace](../images/deception-evidence-workspace.png)
+![Deception And Evidence Workspace](../images/shadowlab-deception-evidence-ops.png)
 
 This workspace joins deception and evidence handling on purpose. Honeypots, canaries, evidence capture, evidence review, and related output sit together so testing and collection stay in the same operator flow.
 
 ### Network Workspace
 
-![Network Workspace](../images/network-workspace.png)
+![Network Workspace](../images/shadowlab-network-telemetry-bloc.png)
 
 Network gives connection and discovery context that process views alone cannot provide. It helps the operator evaluate suspicious hosts or processes through packet, socket, and device perspective.
 
 ### Hosts Inventory Workspace
 
-![Hosts Inventory Workspace](../images/hosts-inventory-workspace.png)
+![Hosts Inventory Workspace](../images/shadowlab-network-telemetry-bloc.png)
 
 Hosts is the fleet-oriented inventory layer. It is especially useful in multi-host lab setups where the operator needs a compact view of platform, IP, role, version, and current state.
 
 ### Graph Interactive Browser
 
-![Graph Interactive Browser](../images/graph-interactive-browser.png)
+![Graph Interactive Browser](../images/shadowlab-attack-surface-graph.png)
 
 Graph visualizes relationships across entities, incidents, persistence items, and remote endpoints. It turns investigative context into a shape the operator can read and explain quickly.
 
 ### Timeline Event Story Workspace
 
-![Timeline Event Story Workspace](../images/timeline-event-story-workspace.png)
+![Timeline Event Story Workspace](../images/shadowlab-timeline-story.png)
 
 Timeline reconstructs the incident story chronologically. It helps the operator move from “what is suspicious” to “what happened first, what followed, and what matters next.”
 
 ### Quarantine Alert Workspace
 
-![Quarantine Alert Workspace](../images/quarantine-alert-workspace.png)
+![Quarantine Alert Workspace](../images/shadowlab-quarantine-alert-workf.png)
 
 Quarantine is the containment follow-through surface. Restore, delete, and related alerting actions are visible in one place so isolated items remain auditable and manageable.
 
 ### History And Incident Log
 
-![History And Incident Log](../images/history-incident-log.png)
+![History And Incident Log](../images/shadowlab-incident-history-audit.png)
 
 History centralizes incident, action, and telemetry traces. It is the place to revisit decisions, confirm who changed what, and support retrospective incident review.
 
 ### Artifacts And Evidence Store
 
-![Artifacts And Evidence Store](../images/artifacts-evidence-store.png)
+![Artifacts And Evidence Store](../images/shadowlab-artifact-evidence-stor.png)
 
 Artifacts stores reports, exports, and collected evidence in an operator-friendly repository. Preview and detail panels make it practical to inspect outputs without leaving the product.
 
 ### Enterprise Case Ops Workspace
 
-![Enterprise Case Ops Workspace](../images/enterprise-case-ops-workspace.png)
+![Enterprise Case Ops Workspace](../images/shadowlab-enterprise-case-ops.png)
 
 Enterprise is the structured investigation suite. The screenshot reflects the case-centric operations side, where tasks, approvals, assignments, notes, export actions, and case workflow are managed.
 
 ### Security Ops Workspace
 
-![Security Ops Workspace](../images/security-ops-workspace.png)
+![Security Ops Workspace](../images/shadowlab-security-ops-readiness.png)
 
 Security Ops is the platform-readiness and operational-maturity area. Integrity, observability, local YARA health, secret handling, and report/export controls are grouped here for operators and administrators.
 
 ### Attack Scenario Simulator
 
-![Attack Scenario Simulator](../images/attack-scenario-simulator.png)
+![Attack Scenario Simulator](../images/shadowlab-attack-scenario-simula.png)
 
 Scenarios provides a controlled telemetry-generation surface for testing and demonstrations. It is valuable when detections, integrations, or workflows need a repeatable stimulus.
 
 ### About Creator Profile
 
-![About Creator Profile](../images/about-creator-profile.png)
+![About Creator Profile](../images/shadowlab-about-faq-profile.png)
 
 The About / FAQ area now cleanly separates product identity from creator identity. ShadowLab messaging, project links, and quick FAQ stay on the left, while the creator profile and personal links stay on the right.
 
 ## What This Guide Is Useful For
 
 This guide works well for product presentation, onboarding, and answering the question of what the project really does on GitHub. The README can remain a shorter project entry point. This guide serves as the broader, more product-oriented explanation.
+
+updated
+

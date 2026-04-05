@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -11,7 +12,10 @@ from typing import Iterable
 from urllib.parse import parse_qsl
 
 import database as db
+from core.policy_matrix import POLICY_MATRIX
+from core.workspace_context import WORKSPACE_HEADER, workspace_required_for_profile, resolve_workspace_access
 from fastapi import Depends, Header, HTTPException, Request, status
+from services.identity_provider import IdentityPrincipal, identity_provider
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,7 @@ class SecuritySettings:
     api_keys: dict[str, str]
     api_keys_sha256: dict[str, str]
     auth_required: bool
+    require_tls: bool
     enable_dangerous_actions: bool
     enable_network_warfare: bool
     allow_destructive_file_delete: bool
@@ -29,18 +34,27 @@ class SecuritySettings:
     protected_process_names: list[str]
     policy_profile: str
     noauth_default_role: str
+    oidc_enabled: bool
 
 
 @dataclass(frozen=True)
 class SecurityContext:
     token: str
     role: str
+    actor: str = ""
+    workspace_id: str = "default"
+    allowed_workspaces: tuple[str, ...] = ("default",)
+    approval_workspaces: tuple[str, ...] = ()
+    subject: str = ""
+    auth_source: str = "api_key"
+    token_id: str = ""
+    session_expires_at: float = 0.0
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 DEFAULT_ROLE = "viewer"
 ALLOWED_ROLES = {"viewer", "analyst", "admin"}
-ALLOWED_POLICY_PROFILES = {"lab", "corp", "prod"}
+ALLOWED_POLICY_PROFILES = set(POLICY_MATRIX.keys())
 AUTH_FAILURE_LIMIT = 8
 AUTH_FAILURE_WINDOW_SECONDS = 60
 DANGEROUS_ACTION_LIMIT = 6
@@ -48,29 +62,8 @@ DANGEROUS_ACTION_WINDOW_SECONDS = 60
 _RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
 _SIGNATURE_NONCES: dict[str, float] = {}
 SIGNED_REQUEST_WINDOW_SECONDS = 300
-POLICY_PROFILES: dict[str, dict[str, bool]] = {
-    "lab": {
-        "dangerous_actions": True,
-        "network_warfare": True,
-        "deception": True,
-        "external_connectors": True,
-        "approval_required": False,
-    },
-    "corp": {
-        "dangerous_actions": True,
-        "network_warfare": False,
-        "deception": True,
-        "external_connectors": True,
-        "approval_required": True,
-    },
-    "prod": {
-        "dangerous_actions": False,
-        "network_warfare": False,
-        "deception": False,
-        "external_connectors": True,
-        "approval_required": True,
-    },
-}
+logger = logging.getLogger(__name__)
+POLICY_PROFILES = POLICY_MATRIX
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -135,13 +128,19 @@ def _validate_settings(settings: SecuritySettings) -> SecuritySettings:
     if settings.api_key_role not in ALLOWED_ROLES:
         raise ValueError("SHADOWLAB_API_KEY_ROLE must be one of: viewer, analyst, admin")
     if settings.auth_required and not any(
-        [settings.api_key, settings.api_key_sha256, settings.api_keys, settings.api_keys_sha256]
+        [settings.api_key, settings.api_key_sha256, settings.api_keys, settings.api_keys_sha256, settings.oidc_enabled]
     ):
-        raise ValueError("SHADOWLAB_REQUIRE_AUTH=true requires at least one API key configuration")
+        raise ValueError("SHADOWLAB_REQUIRE_AUTH=true requires at least one API key or OIDC configuration")
+    if settings.require_tls and not settings.auth_required:
+        logger.warning("TLS is required while authentication is disabled; unauthenticated traffic will still be restricted to viewer role.")
     if settings.policy_profile not in ALLOWED_POLICY_PROFILES:
         raise ValueError("SHADOWLAB_POLICY_PROFILE must be one of: lab, corp, prod")
     if settings.noauth_default_role not in ALLOWED_ROLES:
         raise ValueError("SHADOWLAB_NOAUTH_DEFAULT_ROLE must be one of: viewer, analyst, admin")
+    if not settings.auth_required and settings.noauth_default_role != DEFAULT_ROLE:
+        raise ValueError("SHADOWLAB_NOAUTH_DEFAULT_ROLE must remain viewer when authentication is disabled")
+    if settings.oidc_enabled and not os.environ.get("SHADOWLAB_OIDC_ISSUER_URL", "").strip() and not os.environ.get("SHADOWLAB_OIDC_DISCOVERY_URL", "").strip():
+        raise ValueError("OIDC requires SHADOWLAB_OIDC_ISSUER_URL or SHADOWLAB_OIDC_DISCOVERY_URL")
     return settings
 
 
@@ -157,6 +156,7 @@ def load_security_settings() -> SecuritySettings:
             hashed=True,
         ),
         auth_required=False,
+        require_tls=_as_bool(os.environ.get("SHADOWLAB_REQUIRE_TLS"), False),
         enable_dangerous_actions=_as_bool(os.environ.get("SHADOWLAB_ENABLE_DANGEROUS_ACTIONS"), False),
         enable_network_warfare=_as_bool(os.environ.get("SHADOWLAB_ENABLE_NETWORK_WARFARE"), False),
         allow_destructive_file_delete=_as_bool(os.environ.get("SHADOWLAB_ALLOW_FILE_DELETE"), False),
@@ -164,12 +164,14 @@ def load_security_settings() -> SecuritySettings:
         protected_process_names=_normalize_process_names(os.environ.get("SHADOWLAB_PROTECTED_PROCESS_NAMES")),
         policy_profile=os.environ.get("SHADOWLAB_POLICY_PROFILE", "lab").strip().lower() or "lab",
         noauth_default_role=os.environ.get("SHADOWLAB_NOAUTH_DEFAULT_ROLE", DEFAULT_ROLE).strip().lower() or DEFAULT_ROLE,
+        oidc_enabled=identity_provider.enabled(),
     )
     auth_required = _as_bool(
         os.environ.get("SHADOWLAB_REQUIRE_AUTH"),
-        bool(settings.api_key or settings.api_key_sha256 or settings.api_keys or settings.api_keys_sha256),
+        bool(settings.api_key or settings.api_key_sha256 or settings.api_keys or settings.api_keys_sha256 or settings.oidc_enabled),
     )
-    return _validate_settings(
+    effective_noauth_role = settings.noauth_default_role if auth_required else DEFAULT_ROLE
+    validated = _validate_settings(
         SecuritySettings(
             api_key=settings.api_key,
             api_key_sha256=settings.api_key_sha256,
@@ -177,15 +179,20 @@ def load_security_settings() -> SecuritySettings:
             api_keys=settings.api_keys,
             api_keys_sha256=settings.api_keys_sha256,
             auth_required=auth_required,
+            require_tls=settings.require_tls,
             enable_dangerous_actions=settings.enable_dangerous_actions,
             enable_network_warfare=settings.enable_network_warfare,
             allow_destructive_file_delete=settings.allow_destructive_file_delete,
             allowed_origins=settings.allowed_origins,
             protected_process_names=settings.protected_process_names,
             policy_profile=settings.policy_profile,
-            noauth_default_role=settings.noauth_default_role,
+            noauth_default_role=effective_noauth_role,
+            oidc_enabled=settings.oidc_enabled,
         )
     )
+    if not validated.auth_required:
+        logger.warning("ShadowLab authentication is disabled; unauthenticated requests will be limited to the viewer role.")
+    return validated
 
 
 security_settings = load_security_settings()
@@ -222,6 +229,12 @@ def build_capabilities(role: str, settings: SecuritySettings | None = None) -> d
 def build_auth_context_payload(context: SecurityContext, request: Request | None = None) -> dict[str, object]:
     return {
         "role": context.role,
+        "actor": context.actor,
+        "subject": context.subject,
+        "auth_source": context.auth_source,
+        "workspace_id": context.workspace_id,
+        "allowed_workspaces": list(context.allowed_workspaces),
+        "approval_workspaces": list(context.approval_workspaces),
         "auth_required": security_settings.auth_required,
         "client_ip": _client_ip(request) if request is not None else "",
         "features": {
@@ -231,6 +244,9 @@ def build_auth_context_payload(context: SecurityContext, request: Request | None
             "protected_process_names": security_settings.protected_process_names,
             "policy_profile": security_settings.policy_profile,
             "policy": get_active_policy(),
+            "workspace_header": WORKSPACE_HEADER,
+            "workspace_explicit_required": workspace_required_for_profile(security_settings.policy_profile),
+            "oidc_enabled": security_settings.oidc_enabled,
         },
         "capabilities": build_capabilities(context.role),
     }
@@ -256,23 +272,32 @@ def require_api_key(
     request: Request,
     x_api_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
+    x_shadowlab_workspace: str | None = Header(default=None),
+    x_shadowlab_actor: str | None = Header(default=None),
 ) -> SecurityContext:
     if request.url.path in {"/health"}:
         return SecurityContext(token="", role="public")
-    provided = x_api_key or _extract_bearer_token(authorization)
+    bearer_token = _extract_bearer_token(authorization)
+    provided = x_api_key or bearer_token
     if not security_settings.auth_required:
         if provided:
             resolved = _resolve_context(provided)
+            if resolved is None and bearer_token and security_settings.oidc_enabled:
+                resolved = _resolve_oidc_context(bearer_token)
             if resolved is not None:
+                resolved = _attach_workspace_context(resolved, x_shadowlab_workspace, x_shadowlab_actor, request)
                 request.state.security_context = resolved
-                _log_auth_event("auth_success", "allowed", resolved.role, _client_ip(request), request.url.path, "authenticated (auth disabled)")
+                request.state.workspace_id = resolved.workspace_id
+                _log_auth_event("auth_success", "allowed", resolved.role, _client_ip(request), request.url.path, "authenticated (auth disabled)", workspace_id=resolved.workspace_id)
                 return resolved
-            context = SecurityContext(token="", role="viewer")
+            context = _attach_workspace_context(SecurityContext(token="", role="viewer", actor=_normalize_actor(x_shadowlab_actor)), x_shadowlab_workspace, x_shadowlab_actor, request)
             request.state.security_context = context
-            _log_auth_event("auth_failure", "denied", context.role, _client_ip(request), request.url.path, "invalid_api_key_auth_disabled")
+            request.state.workspace_id = context.workspace_id
+            _log_auth_event("auth_failure", "denied", context.role, _client_ip(request), request.url.path, "invalid_api_key_auth_disabled", workspace_id=context.workspace_id)
             return context
-        context = SecurityContext(token="", role=security_settings.noauth_default_role)
+        context = _attach_workspace_context(SecurityContext(token="", role=security_settings.noauth_default_role, actor=_normalize_actor(x_shadowlab_actor)), x_shadowlab_workspace, x_shadowlab_actor, request)
         request.state.security_context = context
+        request.state.workspace_id = context.workspace_id
         return context
 
     _enforce_auth_failure_limit(request)
@@ -281,12 +306,16 @@ def require_api_key(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
     context = _resolve_context(provided)
+    if context is None and bearer_token and security_settings.oidc_enabled:
+        context = _resolve_oidc_context(bearer_token)
     if context is None:
         _record_auth_failure(request, detail="invalid_api_key")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
+    context = _attach_workspace_context(context, x_shadowlab_workspace, x_shadowlab_actor, request)
     request.state.security_context = context
-    _log_auth_event("auth_success", "allowed", context.role, _client_ip(request), request.url.path, "authenticated")
+    request.state.workspace_id = context.workspace_id
+    _log_auth_event("auth_success", "allowed", context.role, _client_ip(request), request.url.path, "authenticated", workspace_id=context.workspace_id)
     return context
 
 
@@ -302,6 +331,7 @@ async def require_analyst_or_admin(
             _client_ip(request),
             request.url.path,
             "Analyst or admin role required",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analyst or admin role required")
     if request.method.upper() in {"POST", "PATCH", "DELETE"}:
@@ -321,6 +351,7 @@ async def require_admin(
             _client_ip(request),
             request.url.path,
             "Admin role required",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
     if request.method.upper() in {"POST", "PATCH", "DELETE"}:
@@ -344,6 +375,7 @@ def ensure_dangerous_actions_enabled(request: Request) -> None:
             _client_ip(request),
             request.url.path,
             "Dangerous host response actions are disabled by policy",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -357,6 +389,7 @@ def ensure_dangerous_actions_enabled(request: Request) -> None:
             _client_ip(request),
             request.url.path,
             f"Dangerous actions disabled by active profile: {get_active_policy_name()}",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -378,6 +411,7 @@ def ensure_network_warfare_enabled(request: Request) -> None:
             _client_ip(request),
             request.url.path,
             "Network warfare controls are disabled by policy",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -391,6 +425,7 @@ def ensure_network_warfare_enabled(request: Request) -> None:
             _client_ip(request),
             request.url.path,
             f"Network warfare disabled by active profile: {get_active_policy_name()}",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -407,6 +442,7 @@ def ensure_delete_enabled(request: Request) -> None:
             _client_ip(request),
             request.url.path,
             "Destructive file deletion is disabled by policy",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -423,6 +459,7 @@ def ensure_deception_enabled(request: Request) -> None:
             _client_ip(request),
             request.url.path,
             f"Deception controls disabled by active profile: {get_active_policy_name()}",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -454,6 +491,7 @@ def enforce_process_action_policy(request: Request, process_name: str) -> None:
             _client_ip(request),
             request.url.path,
             f"Protected process action denied for {process_name}",
+            workspace_id=_context_workspace(request),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -485,6 +523,25 @@ def _resolve_context(provided: str) -> SecurityContext | None:
     return None
 
 
+def _resolve_oidc_context(provided: str) -> SecurityContext | None:
+    try:
+        principal = identity_provider.authenticate_token(provided)
+        _ensure_identity_not_revoked(principal)
+    except Exception:
+        return None
+    return SecurityContext(
+        token=provided,
+        role=principal.role,
+        actor=principal.actor,
+        allowed_workspaces=principal.allowed_workspaces or ("default",),
+        approval_workspaces=principal.approval_workspaces,
+        subject=principal.subject,
+        auth_source="oidc",
+        token_id=principal.token_id,
+        session_expires_at=principal.expires_at,
+    )
+
+
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -509,6 +566,37 @@ def _context_role(request: Request | None) -> str:
         return ""
     context = getattr(request.state, "security_context", None)
     return getattr(context, "role", "")
+
+
+def _context_workspace(request: Request | None) -> str:
+    if request is None:
+        return "default"
+    context = getattr(request.state, "security_context", None)
+    return getattr(context, "workspace_id", "default") or "default"
+
+
+def current_actor(request: Request | None) -> str:
+    if request is None:
+        return ""
+    context = getattr(request.state, "security_context", None)
+    return str(getattr(context, "actor", "") or "")
+
+
+def current_subject(request: Request | None) -> str:
+    if request is None:
+        return ""
+    context = getattr(request.state, "security_context", None)
+    return str(getattr(context, "subject", "") or "")
+
+
+def can_approve_workspace(request: Request | None, workspace_id: str) -> bool:
+    if request is None:
+        return False
+    context = getattr(request.state, "security_context", None)
+    allowed = tuple(getattr(context, "approval_workspaces", ()) or ())
+    if not allowed:
+        return getattr(context, "role", "") == "admin"
+    return str(workspace_id or "").strip().lower() in {str(item).strip().lower() for item in allowed}
 
 
 def _bucket_key(bucket: str, subject: str) -> str:
@@ -561,7 +649,7 @@ def _enforce_request_rate_limit(
         return
     hits = _prune_rate_limit(bucket, subject, window_seconds)
     if len(hits) >= limit:
-        _log_auth_event("rate_limited", "denied", _context_role(request), subject, request.url.path, detail)
+        _log_auth_event("rate_limited", "denied", _context_role(request), subject, request.url.path, detail, workspace_id=_context_workspace(request))
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
     _record_rate_limit_hit(bucket, subject)
     consumed.add(marker)
@@ -573,29 +661,84 @@ def _enforce_auth_failure_limit(request: Request) -> None:
     hits = _prune_rate_limit("auth_fail", subject, AUTH_FAILURE_WINDOW_SECONDS)
     if len(hits) >= AUTH_FAILURE_LIMIT:
         detail = "Too many failed authentication attempts. Retry after a short cooldown."
-        _log_auth_event("rate_limited", "denied", "", subject, request.url.path, detail)
+        _log_auth_event("rate_limited", "denied", "", subject, request.url.path, detail, workspace_id=_context_workspace(request))
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
 
 
 def _record_auth_failure(request: Request, *, detail: str) -> None:
     subject = _client_ip(request)
     _record_rate_limit_hit("auth_fail", subject)
-    _log_auth_event("auth_failure", "denied", "", subject, request.url.path, detail)
+    _log_auth_event("auth_failure", "denied", "", subject, request.url.path, detail, workspace_id=_context_workspace(request))
 
 
-def _log_auth_event(event_type: str, outcome: str, role: str, client_ip: str, path: str, detail: str) -> None:
+def _log_auth_event(event_type: str, outcome: str, role: str, client_ip: str, path: str, detail: str, workspace_id: str = "default") -> None:
     try:
         import database as db
 
         conn = db.create_connection()
         if conn is None:
+            logger.warning("Auth event not persisted because the database connection is unavailable.")
             return
         try:
-            db.log_auth_event(conn, event_type, outcome, role, client_ip, path, detail)
+            db.log_auth_event(conn, event_type, outcome, role, client_ip, path, detail, workspace_id=workspace_id)
         finally:
             conn.close()
     except Exception:
+        logger.exception("Failed to persist auth event")
         return
+
+
+def _attach_workspace_context(context: SecurityContext, requested_workspace: str | None, requested_actor: str | None, request: Request) -> SecurityContext:
+    actor = _normalize_actor(requested_actor or context.actor)
+    try:
+        access = resolve_workspace_access(
+            context.role,
+            requested_workspace,
+            security_settings.policy_profile,
+            actor=actor,
+            allowed_workspaces=context.allowed_workspaces if context.auth_source == "oidc" else None,
+        )
+    except ValueError as exc:
+        _log_auth_event("workspace_denied", "denied", context.role, _client_ip(request), request.url.path, str(exc), workspace_id="default")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    request.state.workspace_access = access
+    return SecurityContext(
+        token=context.token,
+        role=context.role,
+        actor=actor,
+        workspace_id=access.workspace_id,
+        allowed_workspaces=access.allowed_workspaces,
+        approval_workspaces=context.approval_workspaces,
+        subject=context.subject,
+        auth_source=context.auth_source,
+        token_id=context.token_id,
+        session_expires_at=context.session_expires_at,
+    )
+
+
+def _normalize_actor(value: str | None) -> str:
+    candidate = str(value or "").strip().lower()
+    if not candidate:
+        return ""
+    cleaned = "".join(ch for ch in candidate if ch.isalnum() or ch in {".", "_", "-", "@"})
+    return cleaned[:120]
+
+
+def _ensure_identity_not_revoked(principal: IdentityPrincipal) -> None:
+    conn = db.create_connection()
+    if conn is None:
+        return
+    try:
+        if db.is_identity_token_revoked(
+            conn,
+            issuer=principal.issuer,
+            subject=principal.subject,
+            token_id=principal.token_id,
+            issued_at=principal.issued_at,
+        ):
+            raise ValueError("OIDC token has been revoked")
+    finally:
+        conn.close()
 
 
 async def _require_signed_request(request: Request, context: SecurityContext) -> None:

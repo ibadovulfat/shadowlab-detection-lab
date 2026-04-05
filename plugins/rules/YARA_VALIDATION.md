@@ -83,3 +83,6 @@ The current YARA state is a good fit for ShadowLab's Windows-focused detection a
 - `Inceptor_*` and `Memory_*` rules stay high signal
 - noisy utility rules no longer dominate verdicts
 - compile health is clean
+
+updated
+

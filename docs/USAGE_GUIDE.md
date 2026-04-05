@@ -150,3 +150,6 @@ Useful commands:
 ## Safety
 
 ShadowLab includes containment, deception, packet inspection, and network-assessment features. Keep it in controlled environments and assume every destructive action needs a second look before you run it.
+
+updated
+

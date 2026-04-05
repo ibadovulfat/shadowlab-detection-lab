@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import logging
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
@@ -9,6 +11,7 @@ from typing import Any
 import pandas as pd
 
 DEFAULT_DB_FILE = "shadowlab.db"
+logger = logging.getLogger(__name__)
 
 
 def _epoch_now_sql(backend: str) -> str:
@@ -145,7 +148,7 @@ def create_connection():
         else:
             raise RuntimeError(f"Unsupported database backend: {profile['backend']}")
     except Exception as exc:
-        print(exc)
+        logger.exception("Failed to create database connection: %s", exc)
     return conn
 
 
@@ -174,6 +177,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS telemetry (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 ts REAL NOT NULL,
                 cpu REAL,
                 mem_percent REAL,
@@ -192,6 +196,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS response_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 action TEXT NOT NULL,
                 pid INTEGER,
@@ -206,6 +211,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS incidents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 incident_id TEXT NOT NULL UNIQUE,
+                workspace_id TEXT DEFAULT 'default',
                 created_at REAL,
                 severity TEXT,
                 title TEXT,
@@ -225,6 +231,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS quarantine_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 pid INTEGER,
                 process_name TEXT,
@@ -240,6 +247,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS host_inventory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 host_id TEXT NOT NULL UNIQUE,
+                workspace_id TEXT DEFAULT 'default',
                 host TEXT NOT NULL,
                 platform TEXT,
                 role TEXT,
@@ -257,6 +265,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS alert_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
+                workspace_id TEXT DEFAULT 'default',
                 destination TEXT,
                 destination_type TEXT,
                 severity TEXT,
@@ -272,6 +281,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS remediation_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
+                workspace_id TEXT DEFAULT 'default',
                 item_type TEXT,
                 target TEXT,
                 backup_path TEXT DEFAULT '',
@@ -286,6 +296,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS integration_export_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
+                workspace_id TEXT DEFAULT 'default',
                 integration_name TEXT NOT NULL,
                 export_type TEXT NOT NULL,
                 target TEXT,
@@ -300,6 +311,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS auth_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
+                workspace_id TEXT DEFAULT 'default',
                 event_type TEXT NOT NULL,
                 outcome TEXT NOT NULL,
                 role TEXT DEFAULT '',
@@ -335,6 +347,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS action_audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
+                workspace_id TEXT DEFAULT 'default',
                 method TEXT NOT NULL,
                 path TEXT NOT NULL,
                 status_code INTEGER,
@@ -350,6 +363,7 @@ def create_table(conn):
             CREATE TABLE IF NOT EXISTS external_request_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL DEFAULT (strftime('%s', 'now')),
+                workspace_id TEXT DEFAULT 'default',
                 service TEXT NOT NULL,
                 method TEXT NOT NULL,
                 target TEXT NOT NULL,
@@ -363,6 +377,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS case_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 incident_id TEXT DEFAULT '',
                 title TEXT NOT NULL,
                 priority TEXT DEFAULT 'medium',
@@ -484,6 +499,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS case_activity_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 case_id INTEGER NOT NULL,
                 event_type TEXT NOT NULL,
                 actor TEXT DEFAULT '',
@@ -513,6 +529,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS approval_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 case_id INTEGER NOT NULL,
                 action TEXT NOT NULL,
                 requested_by TEXT DEFAULT '',
@@ -559,7 +576,8 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS connector_registry (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                workspace_id TEXT DEFAULT 'default',
                 kind TEXT NOT NULL,
                 enabled INTEGER DEFAULT 0,
                 config_json TEXT DEFAULT '{}',
@@ -572,6 +590,7 @@ def create_table(conn):
             """
             CREATE TABLE IF NOT EXISTS connector_delivery_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT DEFAULT 'default',
                 connector_name TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
@@ -591,6 +610,22 @@ def create_table(conn):
                 key TEXT PRIMARY KEY,
                 value TEXT DEFAULT '',
                 updated_at REAL DEFAULT (strftime('%s', 'now'))
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS identity_revocation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issuer TEXT DEFAULT '',
+                subject TEXT DEFAULT '',
+                token_id TEXT DEFAULT '',
+                workspace_id TEXT DEFAULT 'default',
+                actor TEXT DEFAULT '',
+                reason TEXT DEFAULT '',
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                expires_at REAL DEFAULT 0
             );
             """
         )
@@ -657,11 +692,30 @@ def create_table(conn):
         _ensure_column(conn, "incidents", "attack_chain", "TEXT DEFAULT ''")
         _ensure_column(conn, "incidents", "mitre_mapping", "TEXT DEFAULT ''")
         _ensure_column(conn, "incidents", "correlation_story", "TEXT DEFAULT ''")
+        _ensure_column(conn, "incidents", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "host_inventory", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "case_records", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "case_activity_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "connector_registry", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "integration_export_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "auth_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "action_audit_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "external_request_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "approval_requests", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "connector_delivery_queue", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "telemetry", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "response_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "quarantine_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "alert_log", "workspace_id", "TEXT DEFAULT 'default'")
+        _ensure_column(conn, "remediation_log", "workspace_id", "TEXT DEFAULT 'default'")
         _ensure_column(conn, "telemetry", "remote_ips", "TEXT DEFAULT ''")
         _ensure_column(conn, "approval_requests", "expires_at", "REAL DEFAULT 0")
         _ensure_column(conn, "approval_requests", "used_at", "REAL DEFAULT 0")
+        _migrate_connector_registry_workspace_schema(conn)
         _ensure_indexes(conn)
         _record_migration(conn, "2026_03_backend_hardening")
+        _record_migration(conn, "2026_04_policy_workspace_foundation")
+        _record_migration(conn, "2026_04_tenant_storage_cleanup")
     except sqlite3.Error as exc:
         print(exc)
 
@@ -688,11 +742,112 @@ def _ensure_column(conn, table: str, column: str, definition: str):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _migrate_connector_registry_workspace_schema(conn) -> None:
+    backend = getattr(conn, "backend", "sqlite")
+    if backend == "postgresql":
+        try:
+            conn.execute("UPDATE connector_registry SET workspace_id = COALESCE(NULLIF(workspace_id, ''), 'default')")
+            rows = conn.execute("SELECT id, name, workspace_id FROM connector_registry").fetchall()
+            for row in rows:
+                if len(row) < 3:
+                    continue
+                connector_id = int(row[0])
+                raw_name = str(row[1] or "").strip().lower()
+                workspace_id = str(row[2] or "default").strip().lower() or "default"
+                normalized_workspace = workspace_id
+                normalized_name = raw_name
+                if "::" in raw_name:
+                    prefix, suffix = raw_name.split("::", 1)
+                    if prefix:
+                        normalized_workspace = prefix.strip().lower() or workspace_id
+                    normalized_name = suffix.strip().lower()
+                conn.execute(
+                    "UPDATE connector_registry SET workspace_id = ?, name = ? WHERE id = ?",
+                    (normalized_workspace, normalized_name, connector_id),
+                )
+        except Exception:
+            pass
+        conn.execute("DROP INDEX IF EXISTS idx_connector_registry_workspace_name")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_registry_workspace_name ON connector_registry(workspace_id, name)")
+        conn.commit()
+        return
+    index_rows = conn.execute("PRAGMA index_list(connector_registry)").fetchall()
+    unique_on_name = False
+    for index_row in index_rows:
+        index_name = str(index_row[1] or "")
+        is_unique = int(index_row[2] or 0) == 1
+        if not is_unique:
+            continue
+        column_rows = conn.execute(f"PRAGMA index_info({index_name})").fetchall()
+        columns = [str(item[2] or "") for item in column_rows]
+        if columns == ["name"]:
+            unique_on_name = True
+            break
+    if unique_on_name:
+        conn.execute("ALTER TABLE connector_registry RENAME TO connector_registry_legacy")
+        conn.execute(
+            """
+            CREATE TABLE connector_registry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                workspace_id TEXT DEFAULT 'default',
+                kind TEXT NOT NULL,
+                enabled INTEGER DEFAULT 0,
+                config_json TEXT DEFAULT '{}',
+                updated_at REAL DEFAULT (strftime('%s', 'now'))
+            )
+            """
+        )
+        legacy_rows = conn.execute(
+            """
+            SELECT id, name, workspace_id, kind, enabled, config_json, updated_at
+            FROM connector_registry_legacy
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        for row in legacy_rows:
+            raw_name = str(row[1] or "").strip().lower()
+            workspace_id = str(row[2] or "default").strip().lower() or "default"
+            normalized_name = raw_name
+            if "::" in raw_name:
+                prefix, suffix = raw_name.split("::", 1)
+                if prefix:
+                    workspace_id = prefix.strip().lower() or workspace_id
+                normalized_name = suffix.strip().lower()
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO connector_registry (id, name, workspace_id, kind, enabled, config_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (row[0], normalized_name, workspace_id, row[3], row[4], row[5], row[6]),
+            )
+        conn.execute("DROP TABLE connector_registry_legacy")
+    else:
+        rows = conn.execute("SELECT id, name, workspace_id FROM connector_registry").fetchall()
+        for row in rows:
+            connector_id = int(row[0])
+            raw_name = str(row[1] or "").strip().lower()
+            workspace_id = str(row[2] or "default").strip().lower() or "default"
+            normalized_name = raw_name
+            if "::" in raw_name:
+                prefix, suffix = raw_name.split("::", 1)
+                if prefix:
+                    workspace_id = prefix.strip().lower() or workspace_id
+                normalized_name = suffix.strip().lower()
+            conn.execute(
+                "UPDATE connector_registry SET workspace_id = ?, name = ? WHERE id = ?",
+                (workspace_id, normalized_name, connector_id),
+            )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_registry_workspace_name ON connector_registry(workspace_id, name)")
+    conn.commit()
+
+
 def _create_table_postgres(conn) -> None:
     statements = [
         """
         CREATE TABLE IF NOT EXISTS telemetry (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             ts DOUBLE PRECISION NOT NULL,
             cpu DOUBLE PRECISION,
             mem_percent DOUBLE PRECISION,
@@ -708,6 +863,7 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS response_log (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             action TEXT NOT NULL,
             pid INTEGER,
@@ -719,6 +875,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS incidents (
             id BIGSERIAL PRIMARY KEY,
             incident_id TEXT NOT NULL UNIQUE,
+            workspace_id TEXT DEFAULT 'default',
             created_at DOUBLE PRECISION,
             severity TEXT,
             title TEXT,
@@ -735,6 +892,7 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS quarantine_log (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             pid INTEGER,
             process_name TEXT,
@@ -747,6 +905,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS host_inventory (
             id BIGSERIAL PRIMARY KEY,
             host_id TEXT NOT NULL UNIQUE,
+            workspace_id TEXT DEFAULT 'default',
             host TEXT NOT NULL,
             platform TEXT,
             role TEXT,
@@ -761,6 +920,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS alert_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            workspace_id TEXT DEFAULT 'default',
             destination TEXT,
             destination_type TEXT,
             severity TEXT,
@@ -773,6 +933,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS remediation_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            workspace_id TEXT DEFAULT 'default',
             item_type TEXT,
             target TEXT,
             backup_path TEXT DEFAULT '',
@@ -784,6 +945,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS integration_export_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            workspace_id TEXT DEFAULT 'default',
             integration_name TEXT NOT NULL,
             export_type TEXT NOT NULL,
             target TEXT,
@@ -795,6 +957,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS auth_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            workspace_id TEXT DEFAULT 'default',
             event_type TEXT NOT NULL,
             outcome TEXT NOT NULL,
             role TEXT DEFAULT '',
@@ -821,6 +984,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS action_audit_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            workspace_id TEXT DEFAULT 'default',
             method TEXT NOT NULL,
             path TEXT NOT NULL,
             status_code INTEGER,
@@ -833,6 +997,7 @@ def _create_table_postgres(conn) -> None:
         CREATE TABLE IF NOT EXISTS external_request_log (
             id BIGSERIAL PRIMARY KEY,
             created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            workspace_id TEXT DEFAULT 'default',
             service TEXT NOT NULL,
             method TEXT NOT NULL,
             target TEXT NOT NULL,
@@ -843,6 +1008,7 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS case_records (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             incident_id TEXT DEFAULT '',
             title TEXT NOT NULL,
             priority TEXT DEFAULT 'medium',
@@ -943,6 +1109,7 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS case_activity_log (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             case_id BIGINT NOT NULL,
             event_type TEXT NOT NULL,
             actor TEXT DEFAULT '',
@@ -966,6 +1133,7 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS approval_requests (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             case_id BIGINT NOT NULL,
             action TEXT NOT NULL,
             requested_by TEXT DEFAULT '',
@@ -1003,7 +1171,8 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS connector_registry (
             id BIGSERIAL PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            workspace_id TEXT DEFAULT 'default',
             kind TEXT NOT NULL,
             enabled INTEGER DEFAULT 0,
             config_json TEXT DEFAULT '{}',
@@ -1013,6 +1182,7 @@ def _create_table_postgres(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS connector_delivery_queue (
             id BIGSERIAL PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'default',
             connector_name TEXT NOT NULL,
             event_type TEXT NOT NULL,
             payload_json TEXT NOT NULL,
@@ -1029,6 +1199,19 @@ def _create_table_postgres(conn) -> None:
             key TEXT PRIMARY KEY,
             value TEXT DEFAULT '',
             updated_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS identity_revocation_log (
+            id BIGSERIAL PRIMARY KEY,
+            issuer TEXT DEFAULT '',
+            subject TEXT DEFAULT '',
+            token_id TEXT DEFAULT '',
+            workspace_id TEXT DEFAULT 'default',
+            actor TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            created_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW()),
+            expires_at DOUBLE PRECISION DEFAULT 0
         )
         """,
         """
@@ -1082,8 +1265,27 @@ def _create_table_postgres(conn) -> None:
     for statement in statements:
         conn.execute(statement)
     conn.commit()
+    _ensure_column(conn, "incidents", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "host_inventory", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "case_records", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "case_activity_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "connector_registry", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "integration_export_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "auth_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "action_audit_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "external_request_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "approval_requests", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "connector_delivery_queue", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "telemetry", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "response_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "quarantine_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "alert_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "remediation_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _migrate_connector_registry_workspace_schema(conn)
     _ensure_indexes(conn)
     _record_migration(conn, "2026_03_backend_hardening")
+    _record_migration(conn, "2026_04_policy_workspace_foundation")
+    _record_migration(conn, "2026_04_tenant_storage_cleanup")
 
 
 def _ensure_indexes(conn) -> None:
@@ -1094,10 +1296,17 @@ def _ensure_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_action_audit_created_at ON action_audit_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_external_request_created_at ON external_request_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_alert_log_created_at ON alert_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_workspace_ts ON telemetry(workspace_id, ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_response_workspace_timestamp ON response_log(workspace_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_quarantine_workspace_created_at ON quarantine_log(workspace_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_workspace_created_at ON alert_log(workspace_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_remediation_workspace_created_at ON remediation_log(workspace_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents(created_at DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_registry_workspace_name ON connector_registry(workspace_id, name)",
         "CREATE INDEX IF NOT EXISTS idx_connector_queue_status_retry ON connector_delivery_queue(status, next_retry_at, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_approval_status_created_at ON approval_requests(status, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_secret_rotation_created_at ON secret_rotation_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_identity_revocation_lookup ON identity_revocation_log(issuer, subject, token_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_yara_scan_created_at ON yara_scan_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_yara_rule_hit_created_at ON yara_rule_hit_log(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_yara_rule_hit_rule_id ON yara_rule_hit_log(rule_id, created_at DESC)",
@@ -1115,13 +1324,14 @@ def _record_migration(conn, version: str) -> None:
     conn.commit()
 
 
-def insert_telemetry(conn, telemetry_data: list[dict]):
+def insert_telemetry(conn, telemetry_data: list[dict], workspace_id: str = "default"):
     try:
         rows = []
         for row in telemetry_data:
             item = dict(row)
             rows.append(
                 (
+                    workspace_id,
                     float(item.get("ts", 0)),
                     item.get("cpu"),
                     item.get("mem_percent"),
@@ -1138,9 +1348,9 @@ def insert_telemetry(conn, telemetry_data: list[dict]):
             conn.executemany(
                 """
                 INSERT INTO telemetry (
-                    ts, cpu, mem_percent, proc_threads, proc_handles,
+                    workspace_id, ts, cpu, mem_percent, proc_threads, proc_handles,
                     open_files, tcp_conns, bytes_sent_rate, bytes_recv_rate, remote_ips
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1149,23 +1359,27 @@ def insert_telemetry(conn, telemetry_data: list[dict]):
         print(exc)
 
 
-def log_response_action(conn, action, pid, process_name, details=""):
+def log_response_action(conn, action, pid, process_name, details="", workspace_id: str = "default"):
     try:
         conn.execute(
-            "INSERT INTO response_log (action, pid, process_name, details) VALUES (?, ?, ?, ?)",
-            (action, pid, process_name, details),
+            "INSERT INTO response_log (workspace_id, action, pid, process_name, details) VALUES (?, ?, ?, ?, ?)",
+            (workspace_id, action, pid, process_name, details),
         )
         conn.commit()
     except Exception as exc:
         print(f"Log Error: {exc}")
 
 
-def get_response_logs(conn) -> pd.DataFrame:
+def get_response_logs(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM response_log WHERE workspace_id = ? ORDER BY timestamp DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM response_log ORDER BY timestamp DESC")
 
 
-def get_historical_data(conn) -> pd.DataFrame:
-    return _read_sql_query(conn, "SELECT * FROM telemetry")
+def get_historical_data(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM telemetry WHERE workspace_id = ? ORDER BY ts DESC", (workspace_id,))
+    return _read_sql_query(conn, "SELECT * FROM telemetry ORDER BY ts DESC")
 
 
 def upsert_incident(
@@ -1182,16 +1396,18 @@ def upsert_incident(
     attack_chain="",
     mitre_mapping="",
     correlation_story="",
+    workspace_id="default",
 ):
     try:
         conn.execute(
             """
             INSERT INTO incidents (
-                incident_id, created_at, severity, title, summary, status, notes, owner,
+                incident_id, workspace_id, created_at, severity, title, summary, status, notes, owner,
                 recommended_actions, attack_chain, mitre_mapping, correlation_story
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(incident_id) DO UPDATE SET
+                workspace_id=excluded.workspace_id,
                 severity=excluded.severity,
                 title=excluded.title,
                 summary=excluded.summary,
@@ -1205,6 +1421,7 @@ def upsert_incident(
             """,
             (
                 incident_id,
+                workspace_id,
                 created_at,
                 severity,
                 title,
@@ -1242,24 +1459,31 @@ def update_incident(conn, incident_id, status=None, notes=None, owner=None):
     conn.commit()
 
 
-def get_incidents(conn) -> pd.DataFrame:
+def get_incidents(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM incidents WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM incidents ORDER BY created_at DESC")
 
 
-def log_quarantine(conn, pid, process_name, original_path, quarantine_path, status="active"):
+def log_quarantine(conn, pid, process_name, original_path, quarantine_path, status="active", workspace_id: str = "default"):
     conn.execute(
-        "INSERT INTO quarantine_log (pid, process_name, original_path, quarantine_path, status) VALUES (?, ?, ?, ?, ?)",
-        (pid, process_name, original_path, quarantine_path, status),
+        "INSERT INTO quarantine_log (workspace_id, pid, process_name, original_path, quarantine_path, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (workspace_id, pid, process_name, original_path, quarantine_path, status),
     )
     conn.commit()
 
 
-def update_quarantine(conn, quarantine_id, status):
-    conn.execute("UPDATE quarantine_log SET status = ? WHERE id = ?", (status, quarantine_id))
+def update_quarantine(conn, quarantine_id, status, workspace_id: str = ""):
+    if workspace_id:
+        conn.execute("UPDATE quarantine_log SET status = ? WHERE id = ? AND workspace_id = ?", (status, quarantine_id, workspace_id))
+    else:
+        conn.execute("UPDATE quarantine_log SET status = ? WHERE id = ?", (status, quarantine_id))
     conn.commit()
 
 
-def get_quarantine(conn) -> pd.DataFrame:
+def get_quarantine(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM quarantine_log WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM quarantine_log ORDER BY created_at DESC")
 
 
@@ -1274,12 +1498,20 @@ def upsert_host(
     agent_version: str,
     boot_time: float,
     last_seen: float,
+    workspace_id: str = "default",
 ):
+    existing = conn.execute("SELECT workspace_id FROM host_inventory WHERE host_id = ?", (host_id,)).fetchone()
+    if existing is not None:
+        current_workspace = str(existing[0] or "default").strip().lower() or "default"
+        requested_workspace = str(workspace_id or "default").strip().lower() or "default"
+        if current_workspace != requested_workspace:
+            raise ValueError(f"host_id `{host_id}` is already owned by workspace `{current_workspace}`")
     conn.execute(
         """
-        INSERT INTO host_inventory (host_id, host, platform, role, ip_address, api_status, agent_version, boot_time, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO host_inventory (host_id, workspace_id, host, platform, role, ip_address, api_status, agent_version, boot_time, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(host_id) DO UPDATE SET
+            workspace_id=excluded.workspace_id,
             host=excluded.host,
             platform=excluded.platform,
             role=excluded.role,
@@ -1289,41 +1521,50 @@ def upsert_host(
             boot_time=excluded.boot_time,
             last_seen=excluded.last_seen
         """,
-        (host_id, host, platform, role, ip_address, api_status, agent_version, boot_time, last_seen),
+        (host_id, workspace_id, host, platform, role, ip_address, api_status, agent_version, boot_time, last_seen),
     )
     conn.commit()
 
 
-def get_hosts(conn) -> pd.DataFrame:
+def get_hosts(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM host_inventory WHERE workspace_id = ? ORDER BY last_seen DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM host_inventory ORDER BY last_seen DESC")
 
 
-def log_alert(conn, destination: str, destination_type: str, severity: str, title: str, status: str, detail: str):
+def log_alert(conn, destination: str, destination_type: str, severity: str, title: str, status: str, detail: str, workspace_id: str = "default"):
     conn.execute(
-        "INSERT INTO alert_log (destination, destination_type, severity, title, status, detail) VALUES (?, ?, ?, ?, ?, ?)",
-        (destination, destination_type, severity, title, status, detail),
+        "INSERT INTO alert_log (workspace_id, destination, destination_type, severity, title, status, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (workspace_id, destination, destination_type, severity, title, status, detail),
     )
     conn.commit()
 
 
-def get_alerts(conn) -> pd.DataFrame:
+def get_alerts(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM alert_log WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM alert_log ORDER BY created_at DESC")
 
 
-def log_remediation(conn, item_type: str, target: str, backup_path: str = "", rollback_data: str = "", status: str = "applied") -> int:
+def log_remediation(conn, item_type: str, target: str, backup_path: str = "", rollback_data: str = "", status: str = "applied", workspace_id: str = "default") -> int:
     return _insert_returning_id(
         conn,
-        "INSERT INTO remediation_log (item_type, target, backup_path, rollback_data, status) VALUES (?, ?, ?, ?, ?)",
-        (item_type, target, backup_path, rollback_data, status),
+        "INSERT INTO remediation_log (workspace_id, item_type, target, backup_path, rollback_data, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (workspace_id, item_type, target, backup_path, rollback_data, status),
     )
 
 
-def update_remediation_status(conn, remediation_id: int, status: str):
-    conn.execute("UPDATE remediation_log SET status = ? WHERE id = ?", (status, remediation_id))
+def update_remediation_status(conn, remediation_id: int, status: str, workspace_id: str = ""):
+    if workspace_id:
+        conn.execute("UPDATE remediation_log SET status = ? WHERE id = ? AND workspace_id = ?", (status, remediation_id, workspace_id))
+    else:
+        conn.execute("UPDATE remediation_log SET status = ? WHERE id = ?", (status, remediation_id))
     conn.commit()
 
 
-def get_remediations(conn) -> pd.DataFrame:
+def get_remediations(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM remediation_log WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM remediation_log ORDER BY created_at DESC")
 
 
@@ -1334,18 +1575,25 @@ def log_integration_export(
     target: str,
     status: str,
     detail: str,
+    workspace_id: str = "default",
 ):
     conn.execute(
         """
-        INSERT INTO integration_export_log (integration_name, export_type, target, status, detail)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO integration_export_log (workspace_id, integration_name, export_type, target, status, detail)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (integration_name, export_type, target, status, detail),
+        (workspace_id, integration_name, export_type, target, status, detail),
     )
     conn.commit()
 
 
-def get_integration_exports(conn) -> pd.DataFrame:
+def get_integration_exports(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(
+            conn,
+            "SELECT * FROM integration_export_log WHERE workspace_id = ? ORDER BY created_at DESC",
+            (workspace_id,),
+        )
     return _read_sql_query(conn, "SELECT * FROM integration_export_log ORDER BY created_at DESC")
 
 
@@ -1357,18 +1605,21 @@ def log_auth_event(
     client_ip: str = "",
     path: str = "",
     detail: str = "",
+    workspace_id: str = "default",
 ):
     conn.execute(
         """
-        INSERT INTO auth_log (event_type, outcome, role, client_ip, path, detail)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO auth_log (workspace_id, event_type, outcome, role, client_ip, path, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (event_type, outcome, role, client_ip, path, detail),
+        (workspace_id, event_type, outcome, role, client_ip, path, detail),
     )
     conn.commit()
 
 
-def get_auth_logs(conn) -> pd.DataFrame:
+def get_auth_logs(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM auth_log WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM auth_log ORDER BY created_at DESC")
 
 
@@ -1438,18 +1689,21 @@ def log_action_audit(
     role: str = "",
     client_ip: str = "",
     detail: str = "",
+    workspace_id: str = "default",
 ):
     conn.execute(
         """
-        INSERT INTO action_audit_log (method, path, status_code, role, client_ip, detail)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO action_audit_log (workspace_id, method, path, status_code, role, client_ip, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (method, path, status_code, role, client_ip, detail),
+        (workspace_id, method, path, status_code, role, client_ip, detail),
     )
     conn.commit()
 
 
-def get_action_audits(conn) -> pd.DataFrame:
+def get_action_audits(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM action_audit_log WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM action_audit_log ORDER BY created_at DESC")
 
 
@@ -1460,24 +1714,28 @@ def log_external_request(
     target: str,
     status: str,
     detail: str = "",
+    workspace_id: str = "default",
 ):
     conn.execute(
         """
-        INSERT INTO external_request_log (service, method, target, status, detail)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO external_request_log (workspace_id, service, method, target, status, detail)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (service, method, target, status, detail),
+        (workspace_id, service, method, target, status, detail),
     )
     conn.commit()
 
 
-def get_external_requests(conn) -> pd.DataFrame:
+def get_external_requests(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM external_request_log WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM external_request_log ORDER BY created_at DESC")
 
 
 def create_case_record(
     conn,
     title: str,
+    workspace_id: str = "default",
     incident_id: str = "",
     priority: str = "medium",
     stage: str = "triage",
@@ -1493,11 +1751,12 @@ def create_case_record(
         conn,
         """
         INSERT INTO case_records (
-            incident_id, title, priority, stage, owner, sla_deadline, asset_criticality,
+            workspace_id, incident_id, title, priority, stage, owner, sla_deadline, asset_criticality,
             tags_json, approvers_json, narrative, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            workspace_id,
             incident_id,
             title,
             priority,
@@ -1532,7 +1791,13 @@ def update_case_record(conn, case_id: int, **fields) -> None:
     conn.commit()
 
 
-def get_case_records(conn) -> pd.DataFrame:
+def get_case_records(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(
+            conn,
+            "SELECT * FROM case_records WHERE workspace_id = ? ORDER BY updated_at DESC, created_at DESC",
+            (workspace_id,),
+        )
     return _read_sql_query(conn, "SELECT * FROM case_records ORDER BY updated_at DESC, created_at DESC")
 
 
@@ -1788,6 +2053,7 @@ def update_case_task(
 def log_case_activity(
     conn,
     *,
+    workspace_id: str = "default",
     case_id: int,
     event_type: str,
     actor: str = "",
@@ -1797,14 +2063,20 @@ def log_case_activity(
     return _insert_returning_id(
         conn,
         """
-        INSERT INTO case_activity_log (case_id, event_type, actor, summary, detail_json)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO case_activity_log (workspace_id, case_id, event_type, actor, summary, detail_json)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (case_id, event_type, actor, summary, detail_json),
+        (workspace_id, case_id, event_type, actor, summary, detail_json),
     )
 
 
-def get_case_activity(conn, case_id: int) -> pd.DataFrame:
+def get_case_activity(conn, case_id: int, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(
+            conn,
+            "SELECT * FROM case_activity_log WHERE case_id = ? AND workspace_id = ? ORDER BY created_at DESC",
+            (case_id, workspace_id),
+        )
     return _read_sql_query(conn, "SELECT * FROM case_activity_log WHERE case_id = ? ORDER BY created_at DESC", (case_id,))
 
 
@@ -1816,14 +2088,15 @@ def create_approval_request(
     approver: str = "",
     reason: str = "",
     expires_at: float = 0,
+    workspace_id: str = "default",
 ) -> int:
     return _insert_returning_id(
         conn,
         """
-        INSERT INTO approval_requests (case_id, action, requested_by, approver, reason, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO approval_requests (workspace_id, case_id, action, requested_by, approver, reason, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (case_id, action, requested_by, approver, reason, float(expires_at)),
+        (workspace_id, case_id, action, requested_by, approver, reason, float(expires_at)),
     )
 
 
@@ -1839,7 +2112,9 @@ def resolve_approval_request(conn, approval_id: int, status: str, approver: str 
     conn.commit()
 
 
-def get_approval_requests(conn) -> pd.DataFrame:
+def get_approval_requests(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM approval_requests WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM approval_requests ORDER BY created_at DESC")
 
 
@@ -1855,9 +2130,13 @@ def mark_approval_used(conn, approval_id: int, used_at: float) -> None:
     conn.commit()
 
 
-def reserve_approval_request(conn, approval_id: int, action: str, now_value: float) -> bool:
+def reserve_approval_request(conn, approval_id: int, action: str, now_value: float, workspace_id: str = "") -> bool:
+    workspace_clause = " AND workspace_id = ?" if workspace_id else ""
+    params: list[Any] = [int(approval_id), str(action or ""), float(now_value)]
+    if workspace_id:
+        params.append(workspace_id)
     cursor = conn.execute(
-        """
+        f"""
         UPDATE approval_requests
         SET used_at = -1
         WHERE id = ?
@@ -1865,8 +2144,9 @@ def reserve_approval_request(conn, approval_id: int, action: str, now_value: flo
           AND LOWER(TRIM(status)) IN ('approved', 'allow', 'granted')
           AND COALESCE(used_at, 0) = 0
           AND (COALESCE(expires_at, 0) = 0 OR expires_at >= ?)
+          {workspace_clause}
         """,
-        (int(approval_id), str(action or ""), float(now_value)),
+        tuple(params),
     )
     conn.commit()
     return bool(getattr(cursor, "rowcount", 0))
@@ -1943,23 +2223,36 @@ def get_false_positive_feedback(conn) -> pd.DataFrame:
     return _read_sql_query(conn, "SELECT * FROM false_positive_feedback ORDER BY created_at DESC")
 
 
-def upsert_connector(conn, name: str, kind: str, enabled: bool, config_json: str = "{}") -> None:
-    conn.execute(
-        f"""
-        INSERT INTO connector_registry (name, kind, enabled, config_json)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            kind=excluded.kind,
-            enabled=excluded.enabled,
-            config_json=excluded.config_json,
-            updated_at=({_epoch_now_sql(getattr(conn, 'backend', 'sqlite'))})
-        """,
-        (name, kind, 1 if enabled else 0, config_json),
-    )
+def upsert_connector(conn, name: str, kind: str, enabled: bool, config_json: str = "{}", workspace_id: str = "default") -> None:
+    normalized_name = str(name or "").strip().lower()
+    normalized_workspace = str(workspace_id or "default").strip().lower() or "default"
+    existing = conn.execute(
+        "SELECT id FROM connector_registry WHERE name = ? AND workspace_id = ?",
+        (normalized_name, normalized_workspace),
+    ).fetchone()
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO connector_registry (name, workspace_id, kind, enabled, config_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (normalized_name, normalized_workspace, kind, 1 if enabled else 0, config_json),
+        )
+    else:
+        conn.execute(
+            f"""
+            UPDATE connector_registry
+            SET kind = ?, enabled = ?, config_json = ?, updated_at = ({_epoch_now_sql(getattr(conn, 'backend', 'sqlite'))})
+            WHERE name = ? AND workspace_id = ?
+            """,
+            (kind, 1 if enabled else 0, config_json, normalized_name, normalized_workspace),
+        )
     conn.commit()
 
 
-def get_connectors(conn) -> pd.DataFrame:
+def get_connectors(conn, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(conn, "SELECT * FROM connector_registry WHERE workspace_id = ? ORDER BY name ASC", (workspace_id,))
     return _read_sql_query(conn, "SELECT * FROM connector_registry ORDER BY name ASC")
 
 
@@ -1982,6 +2275,73 @@ def get_app_setting(conn, key: str) -> str:
     if row is None:
         return ""
     return str(row[0] or "")
+
+
+def revoke_identity_token(
+    conn,
+    *,
+    issuer: str,
+    subject: str,
+    token_id: str = "",
+    workspace_id: str = "default",
+    actor: str = "",
+    reason: str = "",
+    expires_at: float = 0,
+) -> int:
+    return _insert_returning_id(
+        conn,
+        """
+        INSERT INTO identity_revocation_log (
+            issuer, subject, token_id, workspace_id, actor, reason, expires_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (issuer, subject, token_id, workspace_id, actor, reason, float(expires_at or 0)),
+    )
+
+
+def get_identity_revocations(conn, workspace_id: str = "", subject: str = "", issuer: str = "") -> pd.DataFrame:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if workspace_id:
+        clauses.append("workspace_id = ?")
+        params.append(workspace_id)
+    if subject:
+        clauses.append("subject = ?")
+        params.append(subject)
+    if issuer:
+        clauses.append("issuer = ?")
+        params.append(issuer)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return _read_sql_query(
+        conn,
+        f"SELECT * FROM identity_revocation_log {where} ORDER BY created_at DESC",
+        tuple(params),
+    )
+
+
+def is_identity_token_revoked(
+    conn,
+    *,
+    issuer: str,
+    subject: str,
+    token_id: str = "",
+    issued_at: float = 0,
+) -> bool:
+    now_value = float(time.time())
+    rows = get_identity_revocations(conn, subject=subject, issuer=issuer).fillna("").to_dict(orient="records")
+    token_value = str(token_id or "").strip()
+    issued_value = float(issued_at or 0)
+    for item in rows:
+        expires_at = float(item.get("expires_at", 0) or 0)
+        if expires_at and expires_at < now_value:
+            continue
+        revoked_token = str(item.get("token_id", "") or "").strip()
+        if revoked_token and token_value and revoked_token == token_value:
+            return True
+        if not revoked_token and issued_value and float(item.get("created_at", 0) or 0) >= issued_value:
+            return True
+    return False
 
 
 def log_yara_scan(
@@ -2101,20 +2461,32 @@ def enqueue_connector_delivery(
     attempts: int = 0,
     next_retry_at: float = 0,
     last_error: str = "",
+    workspace_id: str = "default",
 ) -> int:
     return _insert_returning_id(
         conn,
         """
         INSERT INTO connector_delivery_queue (
-            connector_name, event_type, payload_json, status, attempts, next_retry_at, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            workspace_id, connector_name, event_type, payload_json, status, attempts, next_retry_at, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (connector_name, event_type, payload_json, status, attempts, next_retry_at, last_error),
+        (workspace_id, connector_name, event_type, payload_json, status, attempts, next_retry_at, last_error),
     )
 
 
-def get_connector_delivery_queue(conn, status: str = "", limit: int = 200) -> pd.DataFrame:
+def get_connector_delivery_queue(conn, status: str = "", limit: int = 200, workspace_id: str = "") -> pd.DataFrame:
     if status:
+        if workspace_id:
+            return _read_sql_query(
+                conn,
+                """
+                SELECT * FROM connector_delivery_queue
+                WHERE status = ? AND workspace_id = ?
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (status, workspace_id, int(limit)),
+            )
         return _read_sql_query(
             conn,
             """
@@ -2124,6 +2496,17 @@ def get_connector_delivery_queue(conn, status: str = "", limit: int = 200) -> pd
             LIMIT ?
             """,
             (status, int(limit)),
+        )
+    if workspace_id:
+        return _read_sql_query(
+            conn,
+            """
+            SELECT * FROM connector_delivery_queue
+            WHERE workspace_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (workspace_id, int(limit)),
         )
     return _read_sql_query(
         conn,
@@ -2136,7 +2519,20 @@ def get_connector_delivery_queue(conn, status: str = "", limit: int = 200) -> pd
     )
 
 
-def get_pending_connector_deliveries(conn, now_ts: float, limit: int = 50) -> pd.DataFrame:
+def get_pending_connector_deliveries(conn, now_ts: float, limit: int = 50, workspace_id: str = "") -> pd.DataFrame:
+    if workspace_id:
+        return _read_sql_query(
+            conn,
+            """
+            SELECT * FROM connector_delivery_queue
+            WHERE status IN ('pending', 'retry')
+              AND workspace_id = ?
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            ORDER BY updated_at ASC
+            LIMIT ?
+            """,
+            (workspace_id, float(now_ts), int(limit)),
+        )
     return _read_sql_query(
         conn,
         """
@@ -2219,21 +2615,33 @@ def purge_old_records(conn, retention_days: dict[str, int]) -> dict[str, int]:
     return purged
 
 
-def get_incident_by_id(conn, incident_id: str) -> dict[str, Any] | None:
-    row = conn.execute(
-        """
-        SELECT incident_id, created_at, severity, title, summary, status, notes, owner,
-               recommended_actions, attack_chain, mitre_mapping, correlation_story
-        FROM incidents
-        WHERE incident_id = ?
-        """,
-        (incident_id,),
-    ).fetchone()
+def get_incident_by_id(conn, incident_id: str, workspace_id: str = "") -> dict[str, Any] | None:
+    if workspace_id:
+        row = conn.execute(
+            """
+            SELECT incident_id, workspace_id, created_at, severity, title, summary, status, notes, owner,
+                   recommended_actions, attack_chain, mitre_mapping, correlation_story
+            FROM incidents
+            WHERE incident_id = ? AND workspace_id = ?
+            """,
+            (incident_id, workspace_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT incident_id, workspace_id, created_at, severity, title, summary, status, notes, owner,
+                   recommended_actions, attack_chain, mitre_mapping, correlation_story
+            FROM incidents
+            WHERE incident_id = ?
+            """,
+            (incident_id,),
+        ).fetchone()
     if row is None:
         return None
 
     columns = [
         "incident_id",
+        "workspace_id",
         "created_at",
         "severity",
         "title",

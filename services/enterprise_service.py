@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 import requests
 
 import database as db
+from core.policy_matrix import build_policy_matrix
+from core.workspace_context import DEFAULT_WORKSPACE_ID, filter_rows_by_workspace, workspace_matches_row
 from services.connector_delivery_service import ConnectorDeliveryService
 from services.outbound_security import normalize_outbound_url
 from services.secret_store import secret_store
@@ -25,44 +27,16 @@ class EnterpriseService:
         self.base_dir = Path(base_dir)
         self.process_service = process_service
         self.fleet_service = fleet_service
-        self.policy_profiles = {
-            "lab": {
-                "dangerous_actions": True,
-                "network_warfare": True,
-                "deception": True,
-                "external_connectors": True,
-                "approval_required": False,
-            },
-            "corp": {
-                "dangerous_actions": False,
-                "network_warfare": False,
-                "deception": True,
-                "external_connectors": True,
-                "approval_required": True,
-            },
-            "prod": {
-                "dangerous_actions": False,
-                "network_warfare": False,
-                "deception": False,
-                "external_connectors": True,
-                "approval_required": True,
-            },
-        }
+        self.policy_profiles = build_policy_matrix()["profiles"]
         self.connector_delivery = ConnectorDeliveryService(timeout=10)
 
     def get_policy_profiles(self) -> dict[str, Any]:
         active_profile = os.environ.get("SHADOWLAB_POLICY_PROFILE", "lab").strip().lower() or "lab"
         if active_profile not in self.policy_profiles:
             active_profile = "lab"
-        return {
-            "active_profile_hint": active_profile,
-            "profiles": self.policy_profiles,
-            "recommendations": [
-                "Use lab for safe adversary simulation and canary exercises.",
-                "Use corp to require approval for destructive containment.",
-                "Use prod to disable offensive-style controls and force review-heavy workflows.",
-            ],
-        }
+        matrix = build_policy_matrix()
+        matrix["active_profile_hint"] = active_profile
+        return matrix
 
     def assess_asset_criticality(self) -> dict[str, Any]:
         processes = self.process_service.snapshot_processes(include_deep_fields=True)
@@ -105,6 +79,7 @@ class EnterpriseService:
     def create_case(
         self,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         title: str,
         incident_id: str = "",
         owner: str = "",
@@ -120,8 +95,16 @@ class EnterpriseService:
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            if incident_id:
+                incidents = db.get_incidents(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+                incident = next((item for item in incidents if str(item.get("incident_id", "")) == incident_id), None)
+                if incident is None:
+                    raise KeyError(f"Incident `{incident_id}` not found")
+                if not workspace_matches_row(incident, workspace_id):
+                    raise ValueError("Incident belongs to a different workspace")
             case_id = db.create_case_record(
                 conn,
+                workspace_id=workspace_id,
                 title=title,
                 incident_id=incident_id,
                 priority=priority,
@@ -134,34 +117,38 @@ class EnterpriseService:
                 narrative=narrative,
             )
             db.log_evidence_chain(conn, case_id, "case_created", actor=owner, notes="Enterprise case opened")
-            frame = db.get_case_records(conn)
+            frame = db.get_case_records(conn, workspace_id=workspace_id)
             self._seed_case_checklist(conn, case_id, owner=owner or "unassigned", created_by=owner or "system")
             db.log_case_activity(
                 conn,
+                workspace_id=workspace_id,
                 case_id=case_id,
                 event_type="case_created",
                 actor=owner,
                 summary=f"Case '{title}' created",
                 detail_json=json.dumps({"priority": priority, "stage": stage}),
             )
-            return frame[frame["id"] == case_id].fillna("").to_dict(orient="records")[0]
+            return frame[(frame["id"] == case_id) & (frame["workspace_id"] == workspace_id)].fillna("").to_dict(orient="records")[0]
         finally:
             conn.close()
 
-    def list_cases(self) -> list[dict[str, Any]]:
+    def list_cases(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
-            return db.get_case_records(conn).fillna("").to_dict(orient="records")
+            return filter_rows_by_workspace(db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
         finally:
             conn.close()
 
-    def add_chain_of_custody_event(self, case_id: int, event_type: str, actor: str, artifact_path: str = "", notes: str = "") -> dict[str, Any]:
+    def add_chain_of_custody_event(self, case_id: int, event_type: str, actor: str, artifact_path: str = "", notes: str = "", workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
         conn = db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            case_rows = filter_rows_by_workspace(db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
+            if not any(int(item.get("id", 0) or 0) == case_id for item in case_rows):
+                raise KeyError("Case not found")
             artifact_hash = ""
             path = Path(artifact_path)
             if artifact_path and path.exists() and path.is_file():
@@ -169,6 +156,7 @@ class EnterpriseService:
             db.log_evidence_chain(conn, case_id, event_type, actor=actor, artifact_path=artifact_path, artifact_hash=artifact_hash, notes=notes)
             db.log_case_activity(
                 conn,
+                workspace_id=workspace_id,
                 case_id=case_id,
                 event_type="chain_of_custody",
                 actor=actor,
@@ -179,20 +167,26 @@ class EnterpriseService:
         finally:
             conn.close()
 
-    def get_chain_of_custody(self, case_id: int) -> list[dict[str, Any]]:
+    def get_chain_of_custody(self, case_id: int, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
+            case_rows = filter_rows_by_workspace(db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
+            if not any(int(item.get("id", 0) or 0) == case_id for item in case_rows):
+                return []
             return db.get_evidence_chain(conn, case_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
 
-    def request_approval(self, case_id: int, action: str, requested_by: str, approver: str, reason: str) -> dict[str, Any]:
+    def request_approval(self, case_id: int, action: str, requested_by: str, approver: str, reason: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
         conn = db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
+            case_rows = filter_rows_by_workspace(db.get_case_records(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
+            if not any(int(item.get("id", 0) or 0) == case_id for item in case_rows):
+                raise KeyError("Case not found")
             expires_at = time.time() + (8 * 3600)
             approval_id = db.create_approval_request(
                 conn,
@@ -202,9 +196,11 @@ class EnterpriseService:
                 approver=approver,
                 reason=reason,
                 expires_at=expires_at,
+                workspace_id=workspace_id,
             )
             db.log_case_activity(
                 conn,
+                workspace_id=workspace_id,
                 case_id=case_id,
                 event_type="approval_requested",
                 actor=requested_by,
@@ -215,17 +211,20 @@ class EnterpriseService:
         finally:
             conn.close()
 
-    def resolve_approval(self, approval_id: int, status: str, approver: str) -> dict[str, Any]:
+    def resolve_approval(self, approval_id: int, status: str, approver: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
         conn = db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            approvals = db.get_approval_requests(conn).fillna("").to_dict(orient="records")
+            approvals = db.get_approval_requests(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
             approval = next((item for item in approvals if int(item.get("id", 0) or 0) == approval_id), None)
+            if approval is None:
+                raise KeyError("Approval not found")
             db.resolve_approval_request(conn, approval_id, status, approver)
             if approval:
                 db.log_case_activity(
                     conn,
+                    workspace_id=workspace_id,
                     case_id=int(approval.get("case_id", 0) or 0),
                     event_type="approval_resolved",
                     actor=approver,
@@ -253,12 +252,12 @@ class EnterpriseService:
                 created_by=created_by,
             )
 
-    def list_approvals(self) -> list[dict[str, Any]]:
+    def list_approvals(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
-            return db.get_approval_requests(conn).fillna("").to_dict(orient="records")
+            return db.get_approval_requests(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
 
@@ -316,7 +315,7 @@ class EnterpriseService:
         finally:
             conn.close()
 
-    def list_connectors(self) -> list[dict[str, Any]]:
+    def list_connectors(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         defaults = [
             {"name": "splunk", "kind": "siem", "enabled": False, "config_json": "{}"},
             {"name": "sentinel", "kind": "siem", "enabled": False, "config_json": "{}"},
@@ -330,25 +329,57 @@ class EnterpriseService:
         try:
             existing = {
                 str(item.get("name", "")).strip().lower()
-                for item in db.get_connectors(conn).fillna("").to_dict(orient="records")
+                for item in filter_rows_by_workspace(db.get_connectors(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
             }
             for item in defaults:
-                if item["name"] not in existing:
-                    db.upsert_connector(conn, item["name"], item["kind"], item["enabled"], item["config_json"])
-            return [self._serialize_connector(item) for item in db.get_connectors(conn).fillna("").to_dict(orient="records")]
+                normalized_name = str(item["name"]).strip().lower()
+                if normalized_name not in existing:
+                    db.upsert_connector(conn, normalized_name, item["kind"], item["enabled"], item["config_json"], workspace_id=workspace_id)
+            rows = filter_rows_by_workspace(db.get_connectors(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
+            return [self._serialize_connector(item) for item in rows]
         finally:
             conn.close()
 
-    def configure_connector(self, name: str, kind: str, enabled: bool, config: dict[str, Any]) -> dict[str, Any]:
+    def configure_connector(self, name: str, kind: str, enabled: bool, config: dict[str, Any], workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
+        sanitized = self._validate_connector_config(name, config or {})
+        normalized_name = str(name or "").strip().lower()
         conn = db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            protected_config = secret_store.protect_config(config or {})
-            db.upsert_connector(conn, name, kind, enabled, json.dumps(protected_config))
-            return {"name": name, "kind": kind, "enabled": enabled, "config": secret_store.redact_config(config or {})}
+            protected_config = secret_store.protect_config(sanitized)
+            db.upsert_connector(conn, normalized_name, kind, enabled, json.dumps(protected_config), workspace_id=workspace_id)
+            return {"name": normalized_name, "kind": kind, "enabled": enabled, "workspace_id": workspace_id, "config": secret_store.redact_config(sanitized)}
         finally:
             conn.close()
+
+    def _validate_connector_config(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(config or {})
+        connector_name = str(name or "").strip().lower()
+        profile = os.environ.get("SHADOWLAB_POLICY_PROFILE", "lab").strip().lower() or "lab"
+        url_fields = {
+            "splunk": ["hec_url"],
+            "elastic": ["endpoint"],
+            "thehive": ["url"],
+            "shuffle": ["webhook_url"],
+        }
+        for field_name in url_fields.get(connector_name, []):
+            raw_value = normalized.get(field_name, "")
+            if raw_value:
+                safe_url = normalize_outbound_url(raw_value)
+                if not safe_url:
+                    raise ValueError(f"{connector_name}.{field_name} must be a safe http(s) destination")
+                normalized[field_name] = safe_url
+        verify_tls = bool(normalized.get("verify_tls", True))
+        if profile in {"corp", "prod"} and not verify_tls:
+            raise ValueError("verify_tls=false is not allowed outside the lab profile")
+        if connector_name == "sentinel":
+            workspace_id = str(normalized.get("workspace_id", "")).strip()
+            if not workspace_id:
+                raise ValueError("sentinel.workspace_id is required")
+            if not re.fullmatch(r"[A-Za-z0-9-]{3,120}", workspace_id):
+                raise ValueError("sentinel.workspace_id contains unsupported characters")
+        return normalized
 
     def dispatch_connector_event(
         self,
@@ -356,6 +387,7 @@ class EnterpriseService:
         payload: dict[str, Any],
         source: str = "shadowlab",
         severity: str = "info",
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> dict[str, Any]:
         event = {
             "event_type": event_type,
@@ -365,12 +397,13 @@ class EnterpriseService:
             "ts": time.time(),
             "payload": payload,
             "title": payload.get("title") if isinstance(payload, dict) else event_type,
+            "workspace_id": workspace_id,
         }
         conn = db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            connectors = db.get_connectors(conn).fillna("").to_dict(orient="records")
+            connectors = filter_rows_by_workspace(db.get_connectors(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records"), workspace_id)
             enabled = [item for item in connectors if bool(item.get("enabled"))]
             delivered = []
             queued = []
@@ -378,18 +411,20 @@ class EnterpriseService:
             for item in enabled:
                 result = self.connector_delivery.deliver(item, event)
                 name = str(item.get("name", "unknown"))
+                display_name = self._connector_display_name(name)
                 if result.get("ok"):
-                    delivered.append({"name": name, "status": result.get("status", "ok")})
+                    delivered.append({"name": display_name, "status": result.get("status", "ok")})
                     db.log_integration_export(
                         conn,
-                        name,
+                        display_name,
                         export_type=event_type,
-                        target=name,
+                        target=display_name,
                         status="delivered",
                         detail=str(result.get("detail", ""))[:500],
+                        workspace_id=workspace_id,
                     )
                     continue
-                failed.append({"name": name, "status": result.get("status", "failed"), "detail": result.get("detail", "")})
+                failed.append({"name": display_name, "status": result.get("status", "failed"), "detail": result.get("detail", "")})
                 next_retry = time.time() + 30
                 queue_id = db.enqueue_connector_delivery(
                     conn,
@@ -400,15 +435,17 @@ class EnterpriseService:
                     attempts=1,
                     next_retry_at=next_retry,
                     last_error=str(result.get("detail", ""))[:600],
+                    workspace_id=workspace_id,
                 )
-                queued.append({"name": name, "queue_id": queue_id})
+                queued.append({"name": display_name, "queue_id": queue_id})
                 db.log_integration_export(
                     conn,
-                    name,
+                    display_name,
                     export_type=event_type,
-                    target=name,
+                    target=display_name,
                     status="queued",
                     detail=str(result.get("detail", ""))[:500],
+                    workspace_id=workspace_id,
                 )
             return {
                 "event_type": event_type,
@@ -420,13 +457,16 @@ class EnterpriseService:
         finally:
             conn.close()
 
-    def process_connector_queue(self, limit: int = 50) -> dict[str, Any]:
+    def process_connector_queue(self, limit: int = 50, workspace_id: str = "") -> dict[str, Any]:
         conn = db.create_connection()
         if conn is None:
             raise RuntimeError("Database unavailable")
         try:
-            connectors = {str(item.get("name", "")): item for item in db.get_connectors(conn).fillna("").to_dict(orient="records")}
-            pending = db.get_pending_connector_deliveries(conn, now_ts=time.time(), limit=limit).fillna("").to_dict(orient="records")
+            connector_rows = db.get_connectors(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records") if workspace_id else db.get_connectors(conn).fillna("").to_dict(orient="records")
+            if workspace_id:
+                connector_rows = filter_rows_by_workspace(connector_rows, workspace_id)
+            connectors = {str(item.get("name", "")): item for item in connector_rows}
+            pending = db.get_pending_connector_deliveries(conn, now_ts=time.time(), limit=limit, workspace_id=workspace_id).fillna("").to_dict(orient="records")
             processed = []
             for item in pending:
                 queue_id = int(item.get("id", 0) or 0)
@@ -435,7 +475,7 @@ class EnterpriseService:
                 connector = connectors.get(connector_name)
                 if not connector or not bool(connector.get("enabled")):
                     db.update_connector_delivery(conn, queue_id, status="failed", attempts=attempts + 1, last_error="Connector disabled or missing")
-                    processed.append({"id": queue_id, "connector": connector_name, "status": "failed"})
+                    processed.append({"id": queue_id, "connector": self._connector_display_name(connector_name), "status": "failed"})
                     continue
                 try:
                     event = json.loads(str(item.get("payload_json", "{}")))
@@ -446,13 +486,14 @@ class EnterpriseService:
                     db.update_connector_delivery(conn, queue_id, status="delivered", attempts=attempts + 1, last_error="")
                     db.log_integration_export(
                         conn,
-                        connector_name,
+                        self._connector_display_name(connector_name),
                         export_type=str(item.get("event_type", "queued_event")),
-                        target=connector_name,
+                        target=self._connector_display_name(connector_name),
                         status="delivered",
                         detail=str(result.get("detail", ""))[:500],
+                        workspace_id=str(item.get("workspace_id", workspace_id or DEFAULT_WORKSPACE_ID) or DEFAULT_WORKSPACE_ID),
                     )
-                    processed.append({"id": queue_id, "connector": connector_name, "status": "delivered"})
+                    processed.append({"id": queue_id, "connector": self._connector_display_name(connector_name), "status": "delivered"})
                     continue
                 next_retry = time.time() + min(300, 30 * (attempts + 1)) + random.randint(0, 10)
                 status = "retry" if attempts < 5 else "dead_letter"
@@ -464,17 +505,20 @@ class EnterpriseService:
                     next_retry_at=next_retry,
                     last_error=str(result.get("detail", ""))[:600],
                 )
-                processed.append({"id": queue_id, "connector": connector_name, "status": status})
+                processed.append({"id": queue_id, "connector": self._connector_display_name(connector_name), "status": status})
             return {"processed": processed, "count": len(processed)}
         finally:
             conn.close()
 
-    def connector_queue_status(self, status: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    def connector_queue_status(self, status: str = "", limit: int = 100, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if conn is None:
             return []
         try:
-            return db.get_connector_delivery_queue(conn, status=status, limit=limit).fillna("").to_dict(orient="records")
+            rows = db.get_connector_delivery_queue(conn, status=status, limit=limit, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+            for item in rows:
+                item["connector_name"] = self._connector_display_name(str(item.get("connector_name", "")))
+            return rows
         finally:
             conn.close()
 
@@ -543,17 +587,17 @@ class EnterpriseService:
             "dns_arp_anomalies": self._dns_arp_anomalies(),
         }
 
-    def triage_dashboard(self) -> dict[str, Any]:
+    def triage_dashboard(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
         asset_view = self.assess_asset_criticality()
-        cases = self.list_cases()
+        cases = self.list_cases(workspace_id=workspace_id)
         auth_anomalies = []
         conn = db.create_connection()
         if conn:
             try:
                 from api.main import _build_auth_anomalies
 
-                auth_rows = db.get_auth_logs(conn).fillna("").to_dict(orient="records")
-                action_rows = db.get_action_audits(conn).fillna("").to_dict(orient="records")
+                auth_rows = db.get_auth_logs(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+                action_rows = db.get_action_audits(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
                 auth_anomalies = _build_auth_anomalies(auth_rows, action_rows)
             finally:
                 conn.close()
@@ -568,15 +612,15 @@ class EnterpriseService:
             "auth_anomalies": auth_anomalies[:5],
         }
 
-    def abuse_summary(self) -> dict[str, Any]:
+    def abuse_summary(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
         conn = db.create_connection()
         if conn is None:
             return {"status": "database_unavailable"}
         try:
-            auth_rows = db.get_auth_logs(conn).fillna("").to_dict(orient="records")
-            action_rows = db.get_action_audits(conn).fillna("").to_dict(orient="records")
-            external_rows = db.get_external_requests(conn).fillna("").to_dict(orient="records")
-            queue_rows = db.get_connector_delivery_queue(conn, status="", limit=500).fillna("").to_dict(orient="records")
+            auth_rows = db.get_auth_logs(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+            action_rows = db.get_action_audits(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+            external_rows = db.get_external_requests(conn, workspace_id=workspace_id).fillna("").to_dict(orient="records")
+            queue_rows = db.get_connector_delivery_queue(conn, status="", limit=500, workspace_id=workspace_id).fillna("").to_dict(orient="records")
         finally:
             conn.close()
         anomalies = []
@@ -791,6 +835,7 @@ class EnterpriseService:
 
     def _serialize_connector(self, connector: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(connector)
+        normalized["name"] = self._connector_display_name(str(normalized.get("name", "")))
         raw_config = normalized.get("config_json", "{}")
         if isinstance(raw_config, str):
             try:
@@ -804,3 +849,6 @@ class EnterpriseService:
         normalized["config"] = secret_store.redact_config(secret_store.reveal_config(parsed))
         normalized["config_json"] = json.dumps(normalized["config"])
         return normalized
+
+    def _connector_display_name(self, storage_name: str) -> str:
+        return str(storage_name or "").strip().lower()

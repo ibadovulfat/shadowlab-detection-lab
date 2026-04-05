@@ -31,9 +31,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install cyclonedx-bom
 
       - name: Verify backend suite
         run: python scripts/ci_verify.py
+
+      - name: Build dependency SBOM
+        run: |
+          mkdir -p ci_artifacts
+          cyclonedx-py requirements -i requirements.txt -o ci_artifacts/shadowlab-sbom.json
 
       - name: Build CI evidence bundle
         if: github.event_name == 'push'
@@ -56,11 +62,25 @@ jobs:
           path: ci_artifacts/verify-evidence.txt
           if-no-files-found: error
 
+      - name: Upload SBOM artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadowlab-sbom
+          path: ci_artifacts/shadowlab-sbom.json
+          if-no-files-found: error
+
       - name: Attest CI evidence artifact
         if: github.event_name == 'push'
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: ci_artifacts/verify-evidence.txt
+
+      - name: Attest SBOM artifact
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ci_artifacts/shadowlab-sbom.json
 
   postgres-smoke:
     runs-on: ubuntu-latest
@@ -95,4 +115,6 @@ jobs:
       - name: Smoke test PostgreSQL runtime
         env:
           SHADOWLAB_DATABASE_URL: postgresql://shadowlab:shadowlab@127.0.0.1:5432/shadowlab
-        run: python scripts/smoke_test_postgres_runtime.py
+        run: |
+          python scripts/smoke_test_postgres_runtime.py
+          python scripts/validate_enterprise_postgres_readiness.py

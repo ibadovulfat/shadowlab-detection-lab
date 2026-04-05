@@ -6,6 +6,8 @@
 
 ShadowLab is a Windows-focused security operations and research platform built around a local FastAPI backend and a PySide6 desktop client. It brings host telemetry, process investigation, persistence review, threat enrichment, response controls, graph and timeline context, deception tooling, and enterprise casework into one stack.
 
+The platform is built for detection engineers, threat hunters, and security researchers who want one environment for studying how Windows tradecraft unfolds, where telemetry breaks down, and how case-driven response should look once detections become real investigations.
+
 ## What It Covers
 
 - local telemetry collection and incident artifact generation
@@ -16,6 +18,7 @@ ShadowLab is a Windows-focused security operations and research platform built a
 - case-driven enterprise workflow with assignments, tasks, notes, stories, pins, and exports
 - `MITRE ATT&CK` lifecycle, coverage, Navigator export, and Workbench export
 - security-operations controls for integrity, observability, secrets, readiness, and retention
+- workspace-aware enterprise workflow, approval scoping, tenant-aware exports, and identity-backed RBAC groundwork
 
 ## Desktop Sections
 
@@ -145,6 +148,11 @@ Relevant environment variables:
 - `SHADOWLAB_ALLOWED_ORIGINS`
 - `SHADOWLAB_POLICY_PROFILE`
 - `SHADOWLAB_NOAUTH_DEFAULT_ROLE`
+- `SHADOWLAB_OIDC_ENABLED`
+- `SHADOWLAB_OIDC_ISSUER`
+- `SHADOWLAB_OIDC_AUDIENCE`
+- `SHADOWLAB_ROLE_WORKSPACES`
+- `SHADOWLAB_ACTOR_WORKSPACES`
 
 Recommended practice:
 
@@ -152,8 +160,16 @@ Recommended practice:
 2. store SHA-256 digests instead of raw keys where possible
 3. keep `viewer` and `analyst` keys separate from admin workflows
 4. use approval IDs for higher-risk actions in stricter policy profiles
+5. in `corp` and `prod`, pass explicit workspace context and prefer OIDC-backed identity over shared API keys
 
 Authenticated write operations now require signed requests. The desktop client handles that automatically.
+
+Current enterprise hardening highlights:
+
+- OIDC scaffold and identity revocation support exist alongside API key auth
+- `lab`, `corp`, and `prod` policy profiles now share one matrix
+- enterprise records, approvals, connector queue state, artifacts, and audit exports are workspace-aware
+- connector storage now uses tenant-aware `workspace_id + name` persistence rather than a prefixed storage key workaround
 
 ## Validation
 
@@ -183,6 +199,9 @@ Related files:
 - [docs/PLATFORM_GUIDE.md](docs/PLATFORM_GUIDE.md)
 - [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)
 - [docs/PRODUCTION_RUNBOOK.md](docs/PRODUCTION_RUNBOOK.md)
+- [docs/ENTERPRISE_ROADMAP.md](docs/ENTERPRISE_ROADMAP.md)
+- [docs/POLICY_MATRIX.md](docs/POLICY_MATRIX.md)
+- [docs/ShadowLab.pdf](docs/ShadowLab.pdf)
 - [desktop/README.md](desktop/README.md)
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [TOP10_ROADMAP.md](TOP10_ROADMAP.md)
@@ -194,11 +213,66 @@ An Apache 2.0 text copy is also included in [LICENSE-APACHE](LICENSE-APACHE) for
 
 ## Screenshots
 
-![Overview Incident Brief](images/overview-incident-brief.png)
-![Process Intelligence Workspace](images/process-intelligence-workspace.png)
-![Graph Interactive Browser](images/graph-interactive-browser.png)
-![About Creator Profile](images/about-creator-profile.png)
+![Dashboards Workspace](images/shadowlab-dashboard-wall.png)
+Quick SOC wall for platform health, threat posture, and workflow entry points.
+
+![WHIDS Workspace](images/shadowlab-whids-integration.png)
+WHIDS manager sync, report ingest, artifact pull, and scheduler controls.
+
+![HIDS Workspace](images/shadowlab-hids-integration.png)
+OSSEC/HIDS alert ingestion, live status, and response-oriented operations.
+
+![Overview Workspace](images/shadowlab-monitor-overview.png)
+High-signal incident brief with triage context and operator summary.
+
+![Advanced Hunt Workspace](images/shadowlab-advanced-hunt.png)
+Deep-dive investigation area for process internals, strings, and hunt output.
+
+![Persistence Workspace](images/shadowlab-persistence-remediatio.png)
+Persistence discovery and remediation workflow for long-lived footholds.
+
+![Threat Intel Workspace](images/shadowlab-threat-intel-enrichmen.png)
+Hash/IP enrichment and provider-backed threat correlation workflow.
+
+![Static Analysis Workspace](images/shadowlab-static-pe-analysis.png)
+Detect It Easy and PE-focused static malware analysis panel.
+
+![Deception Workspace](images/shadowlab-deception-evidence-ops.png)
+Deception and evidence capture workspace for controlled detection tests.
+
+![Network Workspace](images/shadowlab-network-telemetry-bloc.png)
+Network telemetry and device visibility for lateral context.
+
+![Graph Workspace](images/shadowlab-attack-surface-graph.png)
+Relationship graph for entities, incidents, and attack-surface correlation.
+
+![Timeline Workspace](images/shadowlab-timeline-story.png)
+Chronological event story for incident reconstruction.
+
+![Quarantine Workspace](images/shadowlab-quarantine-alert-workf.png)
+Containment, restore, and quarantine tracking operations.
+
+![History Workspace](images/shadowlab-incident-history-audit.png)
+Incident, action, and audit history for retrospective investigation.
+
+![Artifacts Workspace](images/shadowlab-artifact-evidence-stor.png)
+Central store for reports, evidence, and exported investigation artifacts.
+
+![Enterprise Workspace](images/shadowlab-enterprise-case-ops.png)
+Case-centric enterprise workflow with assignments, tasks, and approvals.
+
+![Security Ops Workspace](images/shadowlab-security-ops-readiness.png)
+Operational readiness view for integrity, secrets, and security controls.
+
+![Scenarios Workspace](images/shadowlab-attack-scenario-simula.png)
+Adversary simulation runner for repeatable telemetry generation.
+
+![About FAQ Workspace](images/shadowlab-about-faq-profile.png)
+Product overview and creator profile with quick project links.
 
 ## Safety
 
 This repository includes lab-only features such as response actions, deception controls, packet inspection, and network assessment helpers. Keep it in isolated environments and treat it like a security tool, not a general-purpose desktop app.
+
+updated
+

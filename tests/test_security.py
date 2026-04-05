@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import api.main
 import api.security as security
 from api.security import SecuritySettings
+from services.identity_provider import IdentityPrincipal
 
 
 def make_settings(**overrides) -> SecuritySettings:
@@ -25,6 +26,7 @@ def make_settings(**overrides) -> SecuritySettings:
         api_keys={},
         api_keys_sha256={},
         auth_required=True,
+        require_tls=False,
         enable_dangerous_actions=True,
         enable_network_warfare=False,
         allow_destructive_file_delete=False,
@@ -32,6 +34,7 @@ def make_settings(**overrides) -> SecuritySettings:
         protected_process_names=["lsass.exe", "wininit.exe"],
         policy_profile="lab",
         noauth_default_role="viewer",
+        oidc_enabled=False,
     )
     return SecuritySettings(**{**base.__dict__, **overrides})
 
@@ -100,6 +103,7 @@ class AuthApiTests(unittest.TestCase):
         try:
             conn.execute("DELETE FROM rate_limit_log")
             conn.execute("DELETE FROM request_nonce_log")
+            conn.execute("DELETE FROM identity_revocation_log")
             conn.commit()
         finally:
             conn.close()
@@ -123,8 +127,234 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["role"], "viewer")
+        self.assertEqual(payload["workspace_id"], "default")
         self.assertFalse(payload["capabilities"]["can_manage_process_actions"])
         self.assertFalse(payload["capabilities"]["can_run_monitor"])
+
+    def test_corp_profile_requires_explicit_workspace_header(self) -> None:
+        admin_key = "admin-secret"
+        settings = make_settings(
+            api_keys_sha256={"admin": hashlib.sha256(admin_key.encode("utf-8")).hexdigest()},
+            policy_profile="corp",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/auth/context", headers={"X-API-Key": admin_key})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("X-ShadowLab-Workspace is required", response.text)
+
+    def test_role_workspace_mapping_limits_requested_workspace(self) -> None:
+        analyst_key = "analyst-secret"
+        settings = make_settings(
+            api_keys_sha256={"analyst": hashlib.sha256(analyst_key.encode("utf-8")).hexdigest()},
+            policy_profile="corp",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.dict(os.environ, {"SHADOWLAB_ROLE_WORKSPACES": "analyst:tenant-a"}, clear=False):
+            with mock.patch.object(security, "security_settings", settings):
+                denied = self.client.get(
+                    "/auth/context",
+                    headers={"X-API-Key": analyst_key, "X-ShadowLab-Workspace": "tenant-b"},
+                )
+                allowed = self.client.get(
+                    "/auth/context",
+                    headers={"X-API-Key": analyst_key, "X-ShadowLab-Workspace": "tenant-a"},
+                )
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json()["workspace_id"], "tenant-a")
+
+    def test_actor_workspace_mapping_overrides_role_workspace_mapping(self) -> None:
+        admin_key = "admin-secret"
+        settings = make_settings(
+            api_keys_sha256={"admin": hashlib.sha256(admin_key.encode("utf-8")).hexdigest()},
+            policy_profile="corp",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SHADOWLAB_ROLE_WORKSPACES": "admin:tenant-a",
+                "SHADOWLAB_ACTOR_WORKSPACES": "alice@corp:tenant-b",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.get(
+                    "/auth/context",
+                    headers={
+                        "X-API-Key": admin_key,
+                        "X-ShadowLab-Workspace": "tenant-b",
+                        "X-ShadowLab-Actor": "alice@corp",
+                    },
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["actor"], "alice@corp")
+        self.assertEqual(response.json()["workspace_id"], "tenant-b")
+
+    def test_global_history_endpoints_are_workspace_scoped_in_corp(self) -> None:
+        analyst_key = "analyst-secret"
+        settings = make_settings(
+            api_keys_sha256={"analyst": hashlib.sha256(analyst_key.encode("utf-8")).hexdigest()},
+            policy_profile="corp",
+            enable_dangerous_actions=True,
+        )
+        headers = {"X-API-Key": analyst_key, "X-ShadowLab-Workspace": "tenant-a"}
+        db = __import__("database")
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.insert_telemetry(conn, [{"ts": time.time(), "cpu": 1.0, "mem_percent": 2.0}], workspace_id="tenant-a")
+            db.log_response_action(conn, "suspend", 11, "cmd.exe", "test", workspace_id="tenant-a")
+            db.log_quarantine(conn, 11, "cmd.exe", "c:/a.exe", "c:/q/a.exe", workspace_id="tenant-a")
+        finally:
+            conn.close()
+        with mock.patch.object(security, "security_settings", settings):
+            telemetry_response = self.client.get("/history/telemetry", headers=headers)
+            timeline_response = self.client.get("/timeline", headers=headers)
+            quarantine_response = self.client.get("/quarantine", headers=headers)
+        for response in (telemetry_response, timeline_response, quarantine_response):
+            self.assertEqual(response.status_code, 200)
+        self.assertTrue(telemetry_response.json())
+        self.assertTrue(quarantine_response.json())
+
+    def test_integrity_history_is_workspace_scoped_in_corp(self) -> None:
+        admin_key = "admin-secret"
+        settings = make_settings(
+            api_keys_sha256={"admin": hashlib.sha256(admin_key.encode("utf-8")).hexdigest()},
+            policy_profile="corp",
+            enable_dangerous_actions=True,
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            api.main.integrity_service.refresh_manifest(workspace_id="tenant-a")
+            response = self.client.get(
+                "/integrity/history",
+                headers={"X-API-Key": admin_key, "X-ShadowLab-Workspace": "tenant-a"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(str(item.get("workspace_id", "")) == "tenant-a" for item in response.json()))
+
+    def test_global_history_endpoints_are_isolated_between_workspaces(self) -> None:
+        analyst_key = "analyst-secret"
+        settings = make_settings(
+            api_keys_sha256={"analyst": hashlib.sha256(analyst_key.encode("utf-8")).hexdigest()},
+            policy_profile="corp",
+            enable_dangerous_actions=True,
+        )
+        db = __import__("database")
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.insert_telemetry(conn, [{"ts": time.time(), "cpu": 3.0, "mem_percent": 3.0}], workspace_id="tenant-a")
+            db.insert_telemetry(conn, [{"ts": time.time(), "cpu": 7.0, "mem_percent": 7.0}], workspace_id="tenant-b")
+        finally:
+            conn.close()
+        with mock.patch.object(security, "security_settings", settings):
+            tenant_a = self.client.get("/history/telemetry", headers={"X-API-Key": analyst_key, "X-ShadowLab-Workspace": "tenant-a"})
+            tenant_b = self.client.get("/history/telemetry", headers={"X-API-Key": analyst_key, "X-ShadowLab-Workspace": "tenant-b"})
+        self.assertEqual(tenant_a.status_code, 200)
+        self.assertEqual(tenant_b.status_code, 200)
+        self.assertNotEqual(tenant_a.json(), tenant_b.json())
+
+    def test_oidc_bearer_token_can_resolve_identity_and_workspace(self) -> None:
+        settings = make_settings(
+            auth_required=True,
+            oidc_enabled=True,
+            policy_profile="corp",
+        )
+        principal = IdentityPrincipal(
+            subject="user-123",
+            actor="alice@corp",
+            role="admin",
+            allowed_workspaces=("tenant-a",),
+            approval_workspaces=("tenant-a",),
+            issuer="https://issuer.example",
+            audience="shadowlab",
+            token_id="jti-1",
+            expires_at=time.time() + 3600,
+            issued_at=time.time() - 60,
+            claims={"sub": "user-123"},
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            with mock.patch.object(security.identity_provider, "authenticate_token", return_value=principal):
+                response = self.client.get(
+                    "/auth/context",
+                    headers={"Authorization": "Bearer oidc-token", "X-ShadowLab-Workspace": "tenant-a"},
+                )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["auth_source"], "oidc")
+        self.assertEqual(payload["subject"], "user-123")
+        self.assertEqual(payload["workspace_id"], "tenant-a")
+        self.assertEqual(payload["approval_workspaces"], ["tenant-a"])
+
+    def test_oidc_workspace_claim_blocks_unlisted_workspace(self) -> None:
+        settings = make_settings(
+            auth_required=True,
+            oidc_enabled=True,
+            policy_profile="corp",
+        )
+        principal = IdentityPrincipal(
+            subject="user-123",
+            actor="alice@corp",
+            role="analyst",
+            allowed_workspaces=("tenant-a",),
+            approval_workspaces=(),
+            issuer="https://issuer.example",
+            audience="shadowlab",
+            token_id="jti-1",
+            expires_at=time.time() + 3600,
+            issued_at=time.time() - 60,
+            claims={"sub": "user-123"},
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            with mock.patch.object(security.identity_provider, "authenticate_token", return_value=principal):
+                response = self.client.get(
+                    "/auth/context",
+                    headers={"Authorization": "Bearer oidc-token", "X-ShadowLab-Workspace": "tenant-b"},
+                )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("not allowed", response.text)
+
+    def test_revoked_oidc_token_is_rejected(self) -> None:
+        db = __import__("database")
+        db.init_db()
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.revoke_identity_token(
+                conn,
+                issuer="https://issuer.example",
+                subject="user-123",
+                token_id="jti-1",
+                workspace_id="tenant-a",
+                actor="admin@corp",
+                reason="unit test",
+                expires_at=time.time() + 3600,
+            )
+        finally:
+            conn.close()
+        settings = make_settings(auth_required=True, oidc_enabled=True, policy_profile="corp")
+        principal = IdentityPrincipal(
+            subject="user-123",
+            actor="alice@corp",
+            role="admin",
+            allowed_workspaces=("tenant-a",),
+            approval_workspaces=("tenant-a",),
+            issuer="https://issuer.example",
+            audience="shadowlab",
+            token_id="jti-1",
+            expires_at=time.time() + 3600,
+            issued_at=time.time() - 60,
+            claims={"sub": "user-123"},
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            with mock.patch.object(security.identity_provider, "authenticate_token", return_value=principal):
+                response = self.client.get(
+                    "/auth/context",
+                    headers={"Authorization": "Bearer oidc-token", "X-ShadowLab-Workspace": "tenant-a"},
+                )
+        self.assertEqual(response.status_code, 401)
 
     def test_auth_context_uses_role_key_even_when_auth_disabled(self) -> None:
         analyst_key = "analyst-secret"
@@ -375,22 +605,128 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("approved OSSEC import roots", response.text)
 
+    def test_honeypot_deploy_rejects_path_traversal_filename(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.post("/deception/honeypot/deploy", json={"filename": "..\\..\\evil.txt"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("path separators", response.text)
+
     def test_whids_file_import_accepts_paths_within_shadowlab_ingest_root(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         approved_path = Path(api.main.WHIDS_IMPORT_ROOT) / "unit-whids.json"
         approved_path.write_text("[]", encoding="utf-8")
         try:
             with mock.patch.object(security, "security_settings", settings):
-                with mock.patch.object(
-                    api.main.hids_integration_service,
-                    "import_whids_file",
-                    return_value={"integration": "whids", "count": 0},
-                ) as import_mock:
-                    response = self.client.post("/integrations/whids/import/file", json={"file_path": str(approved_path)})
+                with mock.patch.dict(os.environ, {"SHADOWLAB_ALLOWED_WORKSPACES": "tenant-a"}, clear=False):
+                    with mock.patch.object(
+                        api.main.hids_integration_service,
+                        "import_whids_file",
+                        return_value={"integration": "whids", "count": 0},
+                    ) as import_mock:
+                        response = self.client.post(
+                            "/integrations/whids/import/file",
+                            headers={"X-ShadowLab-Workspace": "tenant-a"},
+                            json={"file_path": str(approved_path)},
+                        )
             self.assertEqual(response.status_code, 200)
-            import_mock.assert_called_once_with(str(approved_path.resolve(strict=False)), limit=200)
+            import_mock.assert_called_once_with(str(approved_path.resolve(strict=False)), limit=200, workspace_id="tenant-a")
         finally:
             approved_path.unlink(missing_ok=True)
+
+    def test_artifact_listing_is_scoped_to_workspace_directory(self) -> None:
+        tenant_dir = Path(api.main.OUT_DIR) / "workspaces" / "tenant-a"
+        tenant_dir.mkdir(parents=True, exist_ok=True)
+        default_artifact = Path(api.main.OUT_DIR) / "score.json"
+        tenant_artifact = tenant_dir / "score.json"
+        default_artifact.write_text("{}", encoding="utf-8")
+        tenant_artifact.write_text("{}", encoding="utf-8")
+        try:
+            settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+            with mock.patch.object(api.main, "security_settings", settings):
+                with mock.patch.object(security, "security_settings", settings):
+                    response = self.client.get("/artifacts", headers={"X-ShadowLab-Workspace": "tenant-a"})
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertIn("score.json", payload)
+            self.assertIn("workspaces\\tenant-a", payload["score.json"].lower())
+        finally:
+            default_artifact.unlink(missing_ok=True)
+            tenant_artifact.unlink(missing_ok=True)
+
+    def test_telemetry_fabric_export_history_is_scoped_to_workspace(self) -> None:
+        db = __import__("database")
+        db.init_db()
+        conn = db.create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            db.log_integration_export(conn, "shadowlab-telemetry-fabric", "incident_log", "tenant-a-target", "success", "ok", workspace_id="tenant-a")
+            db.log_integration_export(conn, "shadowlab-telemetry-fabric", "incident_log", "tenant-b-target", "success", "ok", workspace_id="tenant-b")
+        finally:
+            conn.close()
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.get("/integrations/telemetry-fabric/exports", headers={"X-ShadowLab-Workspace": "tenant-a"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(any(item["target"] == "tenant-a-target" for item in payload))
+        self.assertFalse(any(item["target"] == "tenant-b-target" for item in payload))
+
+    def test_security_ops_export_writes_workspace_specific_artifacts(self) -> None:
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.post("/enterprise/report/security-ops/export", headers={"X-ShadowLab-Workspace": "tenant-a"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["workspace_id"], "tenant-a")
+        self.assertIn("workspaces\\tenant-a", payload["json_path"].lower())
+
+    def test_case_report_export_writes_workspace_specific_artifacts(self) -> None:
+        case = api.main.enterprise_service.create_case(title="Scoped report case", workspace_id="tenant-a", owner="alice")
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.post(
+                    f"/enterprise/cases/{int(case['id'])}/investigation-report/export",
+                    headers={"X-ShadowLab-Workspace": "tenant-a"},
+                )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("workspaces\\tenant-a", payload["json_path"].lower())
+
+    def test_agent_registration_rejects_cross_workspace_host_takeover(self) -> None:
+        conn = __import__("database").create_connection()
+        self.assertIsNotNone(conn)
+        try:
+            api.main.fleet_service.register_agent(
+                conn,
+                {
+                    "host_id": "agent-shared-1",
+                    "host": "agent-shared-1",
+                    "platform": "Windows",
+                    "role": "agent",
+                },
+                workspace_id="tenant-a",
+            )
+        finally:
+            conn.close()
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.post(
+                    "/agents/register",
+                    headers={"X-ShadowLab-Workspace": "tenant-b"},
+                    json={
+                        "host_id": "agent-shared-1",
+                        "host": "agent-shared-1",
+                        "platform": "Windows",
+                        "role": "agent",
+                    },
+                )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already owned by workspace", response.text)
 
     def test_threat_hash_lookup_rejects_invalid_sha256(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True)
@@ -406,6 +742,30 @@ class AuthApiTests(unittest.TestCase):
                 json={"name": "Bad Name", "kind": "siem", "enabled": True, "config": {}},
             )
         self.assertEqual(response.status_code, 422)
+
+    def test_connector_configuration_rejects_insecure_tls_bypass_in_corp_profile(self) -> None:
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.dict(os.environ, {"SHADOWLAB_POLICY_PROFILE": "corp"}, clear=False):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.post(
+                    "/enterprise/connectors",
+                    headers={"X-ShadowLab-Workspace": "tenant-a"},
+                    json={
+                        "name": "shuffle",
+                        "kind": "soar",
+                        "enabled": True,
+                        "config": {"webhook_url": "https://localhost:8443/hook", "verify_tls": False},
+                    },
+                )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("verify_tls=false", response.text)
+
+    def test_evidence_capture_rejects_invalid_alert_name(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.post("/evidence/capture", json={"alert_name": "..\\..\\bad"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("alert_name", response.text)
 
     def test_startup_security_validation_rejects_insecure_prod_profile(self) -> None:
         settings = make_settings(
@@ -429,6 +789,17 @@ class AuthApiTests(unittest.TestCase):
                 with mock.patch.object(security, "security_settings", settings):
                     with self.assertRaises(RuntimeError):
                         api.main._validate_startup_security_posture()
+
+    def test_startup_security_validation_rejects_corp_profile_without_tls(self) -> None:
+        settings = make_settings(
+            auth_required=True,
+            policy_profile="corp",
+            require_tls=False,
+        )
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                with self.assertRaises(RuntimeError):
+                    api.main._validate_startup_security_posture()
 
     def test_startup_security_validation_rejects_noauth_admin_override_outside_lab(self) -> None:
         settings = make_settings(
@@ -530,6 +901,43 @@ class AuthApiTests(unittest.TestCase):
                 api.main._consume_pending_approval(request, 500)
                 api.main._require_enterprise_approval(request, "process:kill")
 
+    def test_connector_dispatch_requires_approval_in_corp_profile(self) -> None:
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.post(
+                    "/enterprise/connectors/dispatch",
+                    headers={"X-ShadowLab-Workspace": "tenant-a"},
+                    json={"event_type": "unit_test", "payload": {}, "source": "test", "severity": "info"},
+                )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Approval", response.text)
+
+    def test_approval_resolution_rejects_actor_spoofing(self) -> None:
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                with mock.patch.object(api.main.enterprise_service, "resolve_approval", return_value={"ok": True}):
+                    response = self.client.patch(
+                        "/enterprise/approvals/123",
+                        headers={"X-ShadowLab-Workspace": "tenant-a", "X-ShadowLab-Actor": "alice@corp"},
+                        json={"status": "approved", "approver": "bob@corp"},
+                    )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("approver must match", response.text)
+
+    def test_whids_scheduler_start_requires_approval_in_corp_profile(self) -> None:
+        settings = make_settings(auth_required=False, policy_profile="corp", noauth_default_role="admin")
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = self.client.post(
+                    "/integrations/whids/scheduler/start",
+                    headers={"X-ShadowLab-Workspace": "tenant-a"},
+                    json={"manager_url": "https://whids.local:1520", "api_key": "secret-key", "endpoint_uuid": "", "poll_interval": 300, "verify_tls": True},
+                )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Approval", response.text)
+
     def test_alert_configuration_persists_encrypted_webhook(self) -> None:
         db = __import__("database")
         db.init_db()
@@ -547,7 +955,7 @@ class AuthApiTests(unittest.TestCase):
             stored = db.get_app_setting(conn, "alert_webhook_url_enc")
         finally:
             conn.close()
-        self.assertTrue(stored.startswith("enc:v1:"))
+        self.assertTrue(stored.startswith("enc:v"))
 
     def test_triage_respond_executes_policy_plan(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True, policy_profile="lab", noauth_default_role="admin")

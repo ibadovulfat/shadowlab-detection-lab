@@ -48,3 +48,6 @@ In the desktop client, a native-ready state is shown as `Runtime: ready (native)
 ## Packaging Notes
 
 [desktop/shadowlab.spec](/C:/Users/ulfat/Documents/shadowlab-detection-lab/desktop/shadowlab.spec) bundles the `die-python` database when the package is installed.
+
+updated
+
