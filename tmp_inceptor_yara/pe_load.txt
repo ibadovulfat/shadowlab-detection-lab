@@ -1,1 +1,0 @@
-PELoader pe = new PELoader(decoded); Preferred Load Address BaseRelocationTable LoadModuleFromDisk GetLibraryAddress CreateThread WaitForSingleObject
