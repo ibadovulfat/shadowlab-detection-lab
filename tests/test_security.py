@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import hashlib
 import os
@@ -32,9 +33,11 @@ def make_settings(**overrides) -> SecuritySettings:
         allow_destructive_file_delete=False,
         allowed_origins=["http://127.0.0.1", "http://localhost"],
         protected_process_names=["lsass.exe", "wininit.exe"],
+        trusted_proxies=[],
         policy_profile="lab",
         noauth_default_role="viewer",
         oidc_enabled=False,
+        signed_request_window_seconds=60,
     )
     return SecuritySettings(**{**base.__dict__, **overrides})
 
@@ -75,6 +78,11 @@ class SecurityValidationTests(unittest.TestCase):
             },
             clear=True,
         ):
+            with self.assertRaises(ValueError):
+                security.load_security_settings()
+
+    def test_load_security_settings_requires_explicit_noauth_opt_out(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ValueError):
                 security.load_security_settings()
 
@@ -803,6 +811,34 @@ class AuthApiTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     api.main._validate_startup_security_posture()
 
+    def test_forwarded_proto_is_ignored_without_trusted_proxy(self) -> None:
+        settings = make_settings(trusted_proxies=[])
+        request = SimpleNamespace(
+            url=SimpleNamespace(scheme="http"),
+            client=SimpleNamespace(host="203.0.113.10"),
+            headers={"x-forwarded-proto": "https"},
+        )
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                self.assertFalse(api.main._request_is_secure(request))
+
+    def test_client_ip_uses_forwarded_for_from_trusted_proxy(self) -> None:
+        settings = make_settings(trusted_proxies=["10.0.0.10"])
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="10.0.0.10"),
+            headers={"x-forwarded-for": "198.51.100.24, 10.0.0.10"},
+        )
+        with mock.patch.object(security, "security_settings", settings):
+            self.assertEqual(security._client_ip(request), "198.51.100.24")
+
+    def test_startup_security_validation_rejects_credentialed_cors_without_csrf(self) -> None:
+        settings = make_settings(auth_required=True, policy_profile="corp", require_tls=True, api_key_sha256="a" * 64)
+        with mock.patch.dict(os.environ, {"SHADOWLAB_CORS_ALLOW_CREDENTIALS": "true"}, clear=False):
+            with mock.patch.object(api.main, "security_settings", settings):
+                with mock.patch.object(security, "security_settings", settings):
+                    with self.assertRaises(RuntimeError):
+                        api.main._validate_startup_security_posture()
+
     def test_startup_security_validation_rejects_noauth_admin_override_outside_lab(self) -> None:
         settings = make_settings(
             auth_required=False,
@@ -872,6 +908,32 @@ class AuthApiTests(unittest.TestCase):
                 api.main._consume_pending_approval(request, 200)
                 with self.assertRaises(HTTPException):
                     api.main._require_enterprise_approval(request, "process:kill")
+
+    def test_general_request_body_limit_blocks_oversized_payloads(self) -> None:
+        class FakeRequest:
+            def __init__(self, body: bytes) -> None:
+                self.method = "POST"
+                self.url = SimpleNamespace(path="/enterprise/connectors/dispatch", scheme="http")
+                self.headers = {"content-length": str(len(body))}
+                self.client = SimpleNamespace(host="127.0.0.1")
+                self._body = body
+
+            async def body(self) -> bytes:
+                return self._body
+
+        async def _call() -> None:
+            request = FakeRequest(b"A" * (api.main.DEFAULT_MAX_REQUEST_BODY_BYTES + 1))
+            with mock.patch.object(api.main, "security_settings", make_settings(auth_required=False, policy_profile="lab")):
+                with mock.patch.object(security, "security_settings", make_settings(auth_required=False, policy_profile="lab")):
+                    with self.assertRaises(HTTPException) as exc:
+                        await api.main.add_security_headers(request, mock.AsyncMock())
+            self.assertEqual(exc.exception.status_code, 413)
+
+        asyncio.run(_call())
+
+    def test_import_request_body_limit_allows_larger_import_payload_window(self) -> None:
+        request = SimpleNamespace(url=SimpleNamespace(path="/integrations/mitre/import/file"))
+        self.assertEqual(api.main._request_body_limit_bytes(request), api.main.IMPORT_MAX_REQUEST_BODY_BYTES)
 
     def test_failed_mutation_releases_reserved_approval(self) -> None:
         db = __import__("database")

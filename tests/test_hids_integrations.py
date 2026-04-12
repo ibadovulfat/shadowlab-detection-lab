@@ -441,8 +441,10 @@ class HidsIntegrationServiceTests(unittest.TestCase):
     def test_ossec_native_active_response_uses_official_script(self) -> None:
         orchestrator = ResponseOrchestrator()
         completed = mock.Mock(returncode=0, stdout="Adding", stderr="")
-        with mock.patch("services.response_service.subprocess.run", return_value=completed) as run_mock:
-            result = orchestrator.execute_ossec_active_response("firewall-drop", "1.2.3.4")
+        script_path = orchestrator.ossec_home / "active-response" / "win" / "firewall-drop.cmd"
+        with mock.patch.object(orchestrator, "_ossec_script_for_action", return_value=script_path):
+            with mock.patch("services.response_service.subprocess.run", return_value=completed) as run_mock:
+                result = orchestrator.execute_ossec_active_response("firewall-drop", "1.2.3.4")
 
         self.assertTrue(result["ok"])
         self.assertIn("firewall-drop.cmd", " ".join(str(item) for item in result["command"]))

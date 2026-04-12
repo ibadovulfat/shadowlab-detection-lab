@@ -42,6 +42,7 @@ Recommended practice:
 3. keep `prod` and `corp` profiles fully authenticated
 4. use no-auth elevated defaults only for local lab work on loopback
 5. treat approval IDs as part of change control
+6. in corp/prod, start from `deploy/shadowlab.prod.env.example`
 
 ## Signed Requests
 
@@ -116,6 +117,14 @@ Run before handing the node to another operator:
 ```powershell
 python scripts/validate_deployment_runtime.py
 ```
+
+Production env template:
+
+- `deploy/shadowlab.prod.env.example`
+
+History cleanup and rotation guide:
+
+- `docs/SECURITY_REMEDIATION_RUNBOOK.md`
 
 ## Live Integration Validation
 

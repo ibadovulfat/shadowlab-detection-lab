@@ -199,6 +199,7 @@ Related files:
 - [docs/PLATFORM_GUIDE.md](docs/PLATFORM_GUIDE.md)
 - [docs/USAGE_GUIDE.md](docs/USAGE_GUIDE.md)
 - [docs/PRODUCTION_RUNBOOK.md](docs/PRODUCTION_RUNBOOK.md)
+- [docs/SECURITY_REMEDIATION_RUNBOOK.md](docs/SECURITY_REMEDIATION_RUNBOOK.md)
 - [docs/ENTERPRISE_ROADMAP.md](docs/ENTERPRISE_ROADMAP.md)
 - [docs/POLICY_MATRIX.md](docs/POLICY_MATRIX.md)
 - [docs/ShadowLab.pdf](docs/ShadowLab.pdf)

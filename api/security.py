@@ -32,15 +32,18 @@ class SecuritySettings:
     allow_destructive_file_delete: bool
     allowed_origins: list[str]
     protected_process_names: list[str]
+    trusted_proxies: list[str]
     policy_profile: str
     noauth_default_role: str
     oidc_enabled: bool
+    signed_request_window_seconds: int
 
 
 @dataclass(frozen=True)
 class SecurityContext:
     token: str
     role: str
+    signing_secret: str = ""
     actor: str = ""
     workspace_id: str = "default"
     allowed_workspaces: tuple[str, ...] = ("default",)
@@ -61,9 +64,10 @@ DANGEROUS_ACTION_LIMIT = 6
 DANGEROUS_ACTION_WINDOW_SECONDS = 60
 _RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
 _SIGNATURE_NONCES: dict[str, float] = {}
-SIGNED_REQUEST_WINDOW_SECONDS = 300
+DEFAULT_SIGNED_REQUEST_WINDOW_SECONDS = 60
 logger = logging.getLogger(__name__)
 POLICY_PROFILES = POLICY_MATRIX
+_SECURITY_SETTINGS_ERROR = ""
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -82,6 +86,12 @@ def _normalize_process_names(raw: str | None) -> list[str]:
     if not raw:
         return ["lsass.exe", "wininit.exe", "services.exe", "csrss.exe"]
     return [item.strip().lower() for item in raw.split(",") if item.strip()]
+
+
+def _normalize_trusted_proxies(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _parse_role_keys(raw: str | None, *, field_name: str, hashed: bool = False) -> dict[str, str]:
@@ -141,6 +151,8 @@ def _validate_settings(settings: SecuritySettings) -> SecuritySettings:
         raise ValueError("SHADOWLAB_NOAUTH_DEFAULT_ROLE must remain viewer when authentication is disabled")
     if settings.oidc_enabled and not os.environ.get("SHADOWLAB_OIDC_ISSUER_URL", "").strip() and not os.environ.get("SHADOWLAB_OIDC_DISCOVERY_URL", "").strip():
         raise ValueError("OIDC requires SHADOWLAB_OIDC_ISSUER_URL or SHADOWLAB_OIDC_DISCOVERY_URL")
+    if settings.signed_request_window_seconds < 30 or settings.signed_request_window_seconds > 300:
+        raise ValueError("SHADOWLAB_SIGNED_REQUEST_WINDOW_SECONDS must be between 30 and 300 seconds")
     return settings
 
 
@@ -155,20 +167,28 @@ def load_security_settings() -> SecuritySettings:
             field_name="SHADOWLAB_API_KEYS_SHA256",
             hashed=True,
         ),
-        auth_required=False,
+        auth_required=True,
         require_tls=_as_bool(os.environ.get("SHADOWLAB_REQUIRE_TLS"), False),
         enable_dangerous_actions=_as_bool(os.environ.get("SHADOWLAB_ENABLE_DANGEROUS_ACTIONS"), False),
         enable_network_warfare=_as_bool(os.environ.get("SHADOWLAB_ENABLE_NETWORK_WARFARE"), False),
         allow_destructive_file_delete=_as_bool(os.environ.get("SHADOWLAB_ALLOW_FILE_DELETE"), False),
         allowed_origins=_normalize_origins(os.environ.get("SHADOWLAB_ALLOWED_ORIGINS")),
         protected_process_names=_normalize_process_names(os.environ.get("SHADOWLAB_PROTECTED_PROCESS_NAMES")),
+        trusted_proxies=_normalize_trusted_proxies(os.environ.get("SHADOWLAB_TRUSTED_PROXIES")),
         policy_profile=os.environ.get("SHADOWLAB_POLICY_PROFILE", "lab").strip().lower() or "lab",
         noauth_default_role=os.environ.get("SHADOWLAB_NOAUTH_DEFAULT_ROLE", DEFAULT_ROLE).strip().lower() or DEFAULT_ROLE,
         oidc_enabled=identity_provider.enabled(),
+        signed_request_window_seconds=max(
+            30,
+            min(
+                300,
+                int((os.environ.get("SHADOWLAB_SIGNED_REQUEST_WINDOW_SECONDS", str(DEFAULT_SIGNED_REQUEST_WINDOW_SECONDS)) or str(DEFAULT_SIGNED_REQUEST_WINDOW_SECONDS)).strip()),
+            ),
+        ),
     )
     auth_required = _as_bool(
         os.environ.get("SHADOWLAB_REQUIRE_AUTH"),
-        bool(settings.api_key or settings.api_key_sha256 or settings.api_keys or settings.api_keys_sha256 or settings.oidc_enabled),
+        True,
     )
     effective_noauth_role = settings.noauth_default_role if auth_required else DEFAULT_ROLE
     validated = _validate_settings(
@@ -185,17 +205,44 @@ def load_security_settings() -> SecuritySettings:
             allow_destructive_file_delete=settings.allow_destructive_file_delete,
             allowed_origins=settings.allowed_origins,
             protected_process_names=settings.protected_process_names,
+            trusted_proxies=settings.trusted_proxies,
             policy_profile=settings.policy_profile,
             noauth_default_role=effective_noauth_role,
             oidc_enabled=settings.oidc_enabled,
+            signed_request_window_seconds=settings.signed_request_window_seconds,
         )
     )
     if not validated.auth_required:
-        logger.warning("ShadowLab authentication is disabled; unauthenticated requests will be limited to the viewer role.")
+        logger.warning(
+            "ShadowLab authentication is disabled because SHADOWLAB_REQUIRE_AUTH=false was set; unauthenticated requests will be limited to the viewer role."
+        )
     return validated
 
 
-security_settings = load_security_settings()
+try:
+    security_settings = load_security_settings()
+except ValueError as exc:
+    _SECURITY_SETTINGS_ERROR = str(exc)
+    logger.error("ShadowLab security configuration is invalid: %s", exc)
+    security_settings = SecuritySettings(
+        api_key="",
+        api_key_sha256="",
+        api_key_role=DEFAULT_ROLE,
+        api_keys={},
+        api_keys_sha256={},
+        auth_required=True,
+        require_tls=False,
+        enable_dangerous_actions=False,
+        enable_network_warfare=False,
+        allow_destructive_file_delete=False,
+        allowed_origins=_normalize_origins(None),
+        protected_process_names=_normalize_process_names(None),
+        trusted_proxies=[],
+        policy_profile="lab",
+        noauth_default_role=DEFAULT_ROLE,
+        oidc_enabled=False,
+        signed_request_window_seconds=DEFAULT_SIGNED_REQUEST_WINDOW_SECONDS,
+    )
 
 
 def build_capabilities(role: str, settings: SecuritySettings | None = None) -> dict[str, bool]:
@@ -276,7 +323,7 @@ def require_api_key(
     x_shadowlab_actor: str | None = Header(default=None),
 ) -> SecurityContext:
     if request.url.path in {"/health"}:
-        return SecurityContext(token="", role="public")
+        return SecurityContext(token="", signing_secret="", role="public")
     bearer_token = _extract_bearer_token(authorization)
     provided = x_api_key or bearer_token
     if not security_settings.auth_required:
@@ -290,12 +337,22 @@ def require_api_key(
                 request.state.workspace_id = resolved.workspace_id
                 _log_auth_event("auth_success", "allowed", resolved.role, _client_ip(request), request.url.path, "authenticated (auth disabled)", workspace_id=resolved.workspace_id)
                 return resolved
-            context = _attach_workspace_context(SecurityContext(token="", role="viewer", actor=_normalize_actor(x_shadowlab_actor)), x_shadowlab_workspace, x_shadowlab_actor, request)
+            context = _attach_workspace_context(
+                SecurityContext(token="", signing_secret="", role="viewer", actor=_normalize_actor(x_shadowlab_actor)),
+                x_shadowlab_workspace,
+                x_shadowlab_actor,
+                request,
+            )
             request.state.security_context = context
             request.state.workspace_id = context.workspace_id
             _log_auth_event("auth_failure", "denied", context.role, _client_ip(request), request.url.path, "invalid_api_key_auth_disabled", workspace_id=context.workspace_id)
             return context
-        context = _attach_workspace_context(SecurityContext(token="", role=security_settings.noauth_default_role, actor=_normalize_actor(x_shadowlab_actor)), x_shadowlab_workspace, x_shadowlab_actor, request)
+        context = _attach_workspace_context(
+            SecurityContext(token="", signing_secret="", role=security_settings.noauth_default_role, actor=_normalize_actor(x_shadowlab_actor)),
+            x_shadowlab_workspace,
+            x_shadowlab_actor,
+            request,
+        )
         request.state.security_context = context
         request.state.workspace_id = context.workspace_id
         return context
@@ -501,24 +558,25 @@ def enforce_process_action_policy(request: Request, process_name: str) -> None:
 
 def _resolve_context(provided: str) -> SecurityContext | None:
     provided_sha256 = _sha256_hex(provided)
+    token_id = _token_identifier(provided)
 
     if security_settings.api_keys_sha256:
         for role, token_sha256 in security_settings.api_keys_sha256.items():
             if hmac.compare_digest(provided_sha256, token_sha256):
-                return SecurityContext(token=provided, role=role)
+                return SecurityContext(token=token_id, signing_secret=provided, role=role, token_id=token_id)
         return None
 
     if security_settings.api_keys:
         for role, token in security_settings.api_keys.items():
             if hmac.compare_digest(provided, token):
-                return SecurityContext(token=provided, role=role)
+                return SecurityContext(token=token_id, signing_secret=provided, role=role, token_id=token_id)
         return None
 
     if security_settings.api_key_sha256 and hmac.compare_digest(provided_sha256, security_settings.api_key_sha256):
-        return SecurityContext(token=provided, role=security_settings.api_key_role)
+        return SecurityContext(token=token_id, signing_secret=provided, role=security_settings.api_key_role, token_id=token_id)
 
     if security_settings.api_key and hmac.compare_digest(provided, security_settings.api_key):
-        return SecurityContext(token=provided, role=security_settings.api_key_role)
+        return SecurityContext(token=token_id, signing_secret=provided, role=security_settings.api_key_role, token_id=token_id)
 
     return None
 
@@ -530,7 +588,8 @@ def _resolve_oidc_context(provided: str) -> SecurityContext | None:
     except Exception:
         return None
     return SecurityContext(
-        token=provided,
+        token=_token_identifier(provided),
+        signing_secret=provided,
         role=principal.role,
         actor=principal.actor,
         allowed_workspaces=principal.allowed_workspaces or ("default",),
@@ -546,6 +605,11 @@ def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _token_identifier(value: str) -> str:
+    digest = _sha256_hex(value)
+    return f"sha256:{digest[:12]}"
+
+
 def _extract_bearer_token(authorization: str | None) -> str | None:
     if not authorization:
         return None
@@ -558,7 +622,26 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 def _client_ip(request: Request | None) -> str:
     if request is None or request.client is None:
         return "unknown"
-    return request.client.host or "unknown"
+    direct_ip = request.client.host or "unknown"
+    trusted = {_normalize_proxy_value(item) for item in security_settings.trusted_proxies}
+    if not trusted or _normalize_proxy_value(direct_ip) not in trusted:
+        return direct_ip
+    forwarded_for = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip") or ""
+    first_hop = forwarded_for.split(",", 1)[0].strip()
+    return first_hop or direct_ip
+
+
+def request_from_trusted_proxy(request: Request | None) -> bool:
+    if request is None or request.client is None:
+        return False
+    trusted = {_normalize_proxy_value(item) for item in security_settings.trusted_proxies}
+    if not trusted:
+        return False
+    return _normalize_proxy_value(request.client.host or "") in trusted
+
+
+def _normalize_proxy_value(value: str) -> str:
+    return str(value or "").strip().lower()
 
 
 def _context_role(request: Request | None) -> str:
@@ -614,6 +697,8 @@ def _prune_rate_limit(bucket: str, subject: str, window_seconds: int) -> list[fl
             return [now] * count
         finally:
             conn.close()
+    if security_settings.policy_profile in {"corp", "prod"}:
+        return [now] * window_seconds
     key = _bucket_key(bucket, subject)
     values = [ts for ts in _RATE_LIMIT_BUCKETS.get(key, []) if now - ts < window_seconds]
     _RATE_LIMIT_BUCKETS[key] = values
@@ -629,6 +714,8 @@ def _record_rate_limit_hit(bucket: str, subject: str) -> None:
             return
         finally:
             conn.close()
+    if security_settings.policy_profile in {"corp", "prod"}:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Rate limit state store unavailable")
     key = _bucket_key(bucket, subject)
     hits = _RATE_LIMIT_BUCKETS.setdefault(key, [])
     hits.append(now)
@@ -704,6 +791,7 @@ def _attach_workspace_context(context: SecurityContext, requested_workspace: str
     request.state.workspace_access = access
     return SecurityContext(
         token=context.token,
+        signing_secret=context.signing_secret,
         role=context.role,
         actor=actor,
         workspace_id=access.workspace_id,
@@ -742,7 +830,7 @@ def _ensure_identity_not_revoked(principal: IdentityPrincipal) -> None:
 
 
 async def _require_signed_request(request: Request, context: SecurityContext) -> None:
-    if not security_settings.auth_required or not context.token:
+    if not security_settings.auth_required or not context.signing_secret:
         return
     timestamp = (request.headers.get("X-ShadowLab-Timestamp") or "").strip()
     nonce = (request.headers.get("X-ShadowLab-Nonce") or "").strip()
@@ -770,7 +858,7 @@ async def _require_signed_request(request: Request, context: SecurityContext) ->
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signed request timestamp")
     now = int(time.time())
-    if abs(now - timestamp_value) > SIGNED_REQUEST_WINDOW_SECONDS:
+    if abs(now - timestamp_value) > security_settings.signed_request_window_seconds:
         _log_auth_event(
             "signature_failure",
             "denied",
@@ -792,7 +880,7 @@ async def _require_signed_request(request: Request, context: SecurityContext) ->
             nonce,
         ]
     )
-    expected = hmac.new(context.token.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    expected = hmac.new(context.signing_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         _log_auth_event(
             "signature_failure",
@@ -810,6 +898,8 @@ async def _require_signed_request(request: Request, context: SecurityContext) ->
         finally:
             conn.close()
     else:
+        if security_settings.policy_profile in {"corp", "prod"}:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Signed request state store unavailable")
         reserved = nonce_key not in _SIGNATURE_NONCES
         if reserved:
             _SIGNATURE_NONCES[nonce_key] = float(now)
@@ -851,14 +941,16 @@ def _prune_signature_nonces(now: int | None = None) -> None:
     conn = db.create_connection()
     if conn is not None:
         try:
-            db.prune_request_nonces(conn, current - SIGNED_REQUEST_WINDOW_SECONDS)
+            db.prune_request_nonces(conn, current - security_settings.signed_request_window_seconds)
             return
         finally:
             conn.close()
+    if security_settings.policy_profile in {"corp", "prod"}:
+        return
     stale = [
         key
         for key, timestamp in _SIGNATURE_NONCES.items()
-        if current - float(timestamp) > SIGNED_REQUEST_WINDOW_SECONDS
+        if current - float(timestamp) > security_settings.signed_request_window_seconds
     ]
     for key in stale:
         _SIGNATURE_NONCES.pop(key, None)

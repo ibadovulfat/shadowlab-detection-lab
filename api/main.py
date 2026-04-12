@@ -5,6 +5,7 @@ import html
 import importlib.util
 import ipaddress
 import json
+import logging
 import os
 import platform
 import re
@@ -39,6 +40,7 @@ from api.security import (
     ensure_network_warfare_enabled,
     get_active_policy_name,
     policy_requires_approval,
+    request_from_trusted_proxy,
     require_admin,
     require_analyst_or_admin,
     require_api_key,
@@ -77,16 +79,14 @@ WHIDS_IMPORT_ROOT = OUT_DIR / "whids"
 WHIDS_IMPORT_ROOT.mkdir(exist_ok=True, parents=True)
 MITRE_IMPORT_ROOT = OUT_DIR / "mitre"
 MITRE_IMPORT_ROOT.mkdir(exist_ok=True, parents=True)
+logger = logging.getLogger(__name__)
+DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576
+IMPORT_MAX_REQUEST_BODY_BYTES = 10_485_760
 
 
 def _configured_ossec_roots() -> list[Path]:
     configured_home = (os.environ.get("SHADOWLAB_OSSEC_HOME", "") or "").strip()
-    candidates = [
-        Path(configured_home).expanduser() if configured_home else None,
-        Path.home() / "Documents" / "ossec-hids-main",
-        Path("C:/Users/ulfat/Documents/ossec-hids-main"),
-        BASE_DIR.parent / "ossec-hids-main",
-    ]
+    candidates = [Path(configured_home).expanduser() if configured_home else None, BASE_DIR.parent / "ossec-hids-main"]
     roots: list[Path] = []
     for candidate in candidates:
         if candidate is None:
@@ -134,7 +134,10 @@ def _validate_integration_import_path(value: str, *, kind: str) -> str:
 
 def load_config() -> dict[str, Any]:
     with (BASE_DIR / "config.yaml").open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+        loaded = yaml.safe_load(handle) or {}
+    if isinstance(loaded, dict):
+        loaded.pop("virustotal_api_key", None)
+    return loaded
 
 
 config = load_config()
@@ -167,14 +170,36 @@ app.add_middleware(
 def _request_is_secure(request: Request) -> bool:
     if request.url.scheme == "https":
         return True
+    if not request_from_trusted_proxy(request):
+        return False
     forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
     return forwarded_proto == "https"
+
+
+def _request_body_limit_bytes(request: Request) -> int:
+    path = request.url.path
+    if "/import" in path:
+        return IMPORT_MAX_REQUEST_BODY_BYTES
+    return DEFAULT_MAX_REQUEST_BODY_BYTES
 
 
 @app.middleware("http")
 async def add_security_headers(request, call_next):
     if security_settings.require_tls and not _request_is_secure(request) and request.url.path not in {"/health"}:
         raise HTTPException(status_code=400, detail="HTTPS is required for this endpoint")
+    if request.method.upper() in {"POST", "PUT", "PATCH"}:
+        limit = _request_body_limit_bytes(request)
+        content_length = (request.headers.get("content-length") or "").strip()
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid Content-Length header") from exc
+            if declared_length > limit:
+                raise HTTPException(status_code=413, detail=f"Request body exceeds limit of {limit} bytes")
+        body = await request.body()
+        if len(body) > limit:
+            raise HTTPException(status_code=413, detail=f"Request body exceeds limit of {limit} bytes")
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -3400,12 +3425,35 @@ def _validate_startup_security_posture() -> None:
         issues.append("network warfare must be disabled")
     if profile == "prod" and security_settings.allow_destructive_file_delete:
         issues.append("destructive file deletion must be disabled")
+    if os.environ.get("SHADOWLAB_CORS_ALLOW_CREDENTIALS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        issues.append("cookie-based credentialed CORS is not supported without CSRF protection")
     if profile in {"corp", "prod"} and security_settings.api_keys:
         issues.append("raw SHADOWLAB_API_KEYS are not allowed; use SHA-256 hashed keys")
     if profile in {"corp", "prod"} and security_settings.api_key:
         issues.append("raw SHADOWLAB_API_KEY is not allowed; use SHADOWLAB_API_KEY_SHA256")
+    if (
+        getattr(security_module, "_SECURITY_SETTINGS_ERROR", "")
+        and security_settings.auth_required
+        and not any(
+            [
+                security_settings.api_key,
+                security_settings.api_key_sha256,
+                security_settings.api_keys,
+                security_settings.api_keys_sha256,
+                security_settings.oidc_enabled,
+            ]
+        )
+    ):
+        issues.append(security_module._SECURITY_SETTINGS_ERROR)
+    if profile in {"corp", "prod"}:
+        conn = db.create_connection()
+        if conn is None:
+            issues.append("database connectivity is required")
+        else:
+            conn.close()
     if issues:
         raise RuntimeError(f"Insecure startup posture for profile `{profile}`: " + "; ".join(issues))
+    logger.info("startup_security_posture_validated profile=%s", profile)
     observability_service.log_event("startup_security_posture_validated", profile=profile)
 
 

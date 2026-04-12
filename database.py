@@ -12,6 +12,58 @@ import pandas as pd
 
 DEFAULT_DB_FILE = "shadowlab.db"
 logger = logging.getLogger(__name__)
+_SAFE_SCHEMA_NAMES = {
+    "approval_log",
+    "approval_requests",
+    "action_audit_log",
+    "alert_log",
+    "auth_log",
+    "case_activity_log",
+    "case_records",
+    "connector_delivery_queue",
+    "connector_delivery_log",
+    "connector_registry",
+    "external_request_log",
+    "host_inventory",
+    "identity_revocation_log",
+    "incidents",
+    "integration_export_log",
+    "investigation_log",
+    "quarantine_log",
+    "rate_limit_log",
+    "remediation_log",
+    "request_nonce_log",
+    "response_log",
+    "telemetry",
+}
+_SAFE_COLUMN_NAMES = {
+    "actor",
+    "attack_chain",
+    "allowed_scopes",
+    "approval_status",
+    "approved_at",
+    "auth_source",
+    "category",
+    "connector_type",
+    "correlation_story",
+    "details",
+    "expires_at",
+    "metadata",
+    "mitre_mapping",
+    "notes",
+    "owner",
+    "policy_profile",
+    "reason",
+    "remote_ips",
+    "resolution",
+    "role",
+    "source",
+    "status",
+    "subject",
+    "token_id",
+    "used_at",
+    "workspace_id",
+}
 
 
 def _epoch_now_sql(backend: str) -> str:
@@ -721,6 +773,8 @@ def create_table(conn):
 
 
 def _ensure_column(conn, table: str, column: str, definition: str):
+    if table not in _SAFE_SCHEMA_NAMES or column not in _SAFE_COLUMN_NAMES:
+        raise ValueError("Unsafe schema migration identifier")
     if getattr(conn, "backend", "sqlite") == "postgresql":
         columns = {
             str(row[0])

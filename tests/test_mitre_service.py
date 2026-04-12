@@ -93,9 +93,11 @@ def make_settings() -> security.SecuritySettings:
         allow_destructive_file_delete=False,
         allowed_origins=["http://127.0.0.1", "http://localhost"],
         protected_process_names=["lsass.exe", "wininit.exe"],
+        trusted_proxies=[],
         policy_profile="lab",
         noauth_default_role="admin",
         oidc_enabled=False,
+        signed_request_window_seconds=60,
     )
 
 

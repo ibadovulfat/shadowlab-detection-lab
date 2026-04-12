@@ -79,10 +79,12 @@ def main() -> int:
         allow_destructive_file_delete=False,
         allowed_origins=["http://127.0.0.1", "http://localhost"],
         protected_process_names=["lsass.exe", "wininit.exe"],
+        trusted_proxies=[],
         policy_profile="lab",
         api_key_role="viewer",
         noauth_default_role="viewer",
         oidc_enabled=False,
+        signed_request_window_seconds=60,
     )
 
     security._RATE_LIMIT_BUCKETS.clear()

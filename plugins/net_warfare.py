@@ -1,3 +1,5 @@
+import ipaddress
+import socket
 from scapy.all import ARP, Ether, srp, send, conf
 import threading
 import time
@@ -56,18 +58,26 @@ class NetworkWarfare:
         """
         Starts ARP Spoofing to block internet access for target.
         """
-        if target_ip == gateway_ip:
+        target = ipaddress.ip_address(target_ip)
+        gateway = ipaddress.ip_address(gateway_ip)
+        if target == gateway:
             raise ValueError("Target IP and gateway IP must differ")
-        if target_ip in ("127.0.0.1", "0.0.0.0", "::1"):
+        if target.is_loopback or gateway.is_loopback:
             raise ValueError("Cannot target localhost")
+        if target.version != gateway.version:
+            raise ValueError("Target IP and gateway IP must use the same IP family")
+        if not target.is_private or not gateway.is_private:
+            raise ValueError("Network warfare is restricted to RFC1918 lab addresses")
+        if self._is_local_address(target) or self._is_local_address(gateway):
+            raise ValueError("Cannot target the ShadowLab host or its configured gateway")
         try:
             duration = int(max_duration_seconds)
         except (TypeError, ValueError) as exc:
             raise ValueError("max_duration_seconds must be an integer") from exc
         if duration < 5 or duration > 3600:
             raise ValueError("max_duration_seconds must be between 5 and 3600")
-        self.target_ip = target_ip
-        self.gateway_ip = gateway_ip
+        self.target_ip = str(target)
+        self.gateway_ip = str(gateway)
         self.stop_attack = False
         self.max_duration_seconds = duration
         self.attack_started_at = time.time()
@@ -123,3 +133,14 @@ class NetworkWarfare:
         # Send correct ARP packets to restore table
         send(ARP(op=2, pdst=target_ip, psrc=gateway_ip, hwdst=target_mac, hwsrc=gateway_mac), count=5, verbose=False)
         send(ARP(op=2, pdst=gateway_ip, psrc=target_ip, hwdst=gateway_mac, hwsrc=target_mac), count=5, verbose=False)
+
+    def _is_local_address(self, candidate):
+        try:
+            host_ips = {
+                str(ipaddress.ip_address(addr_info[4][0]))
+                for addr_info in socket.getaddrinfo(socket.gethostname(), None)
+                if addr_info and addr_info[4]
+            }
+        except Exception:
+            host_ips = set()
+        return str(candidate) in host_ips

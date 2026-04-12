@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import os
 import re
 import shutil
@@ -13,19 +14,19 @@ import psutil
 import database as db
 
 OSSEC_USER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ALLOWED_OSSEC_ACTIONS = {
+    "firewall-drop": ("active-response", "win", "firewall-drop.cmd"),
+    "route-null": ("active-response", "win", "route-null.cmd"),
+    "host-deny": ("active-response", "host-deny.sh"),
+}
 
 
 class ResponseOrchestrator:
     def __init__(self):
         self.protected_names = {"system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe"}
         configured_home = os.environ.get("SHADOWLAB_OSSEC_HOME", "").strip()
-        candidates = [
-            Path(configured_home) if configured_home else None,
-            Path.home() / "Documents" / "ossec-hids-main",
-            Path("C:/Users/ulfat/Documents/ossec-hids-main"),
-            Path(__file__).resolve().parent.parent.parent / "ossec-hids-main",
-        ]
-        self.ossec_home = next((candidate for candidate in candidates if candidate and candidate.exists()), Path.home() / "Documents" / "ossec-hids-main")
+        candidates = [Path(configured_home) if configured_home else None, Path(__file__).resolve().parent.parent.parent / "ossec-hids-main"]
+        self.ossec_home = next((candidate for candidate in candidates if candidate and candidate.exists()), Path(__file__).resolve().parent.parent.parent / "ossec-hids-main")
 
     def suspend(self, pid: int, process_name: str, workspace_id: str = "default") -> dict[str, Any]:
         return self._execute("SUSPEND", pid, process_name, lambda proc: proc.suspend(), workspace_id=workspace_id)
@@ -78,8 +79,7 @@ class ResponseOrchestrator:
         if script is None:
             return {"ok": False, "message": f"OSSEC active-response script unavailable for {normalized_action}"}
         command = self._ossec_command(script, mode=normalized_mode, user=normalized_user, subject=normalized_subject)
-        env = os.environ.copy()
-        env.setdefault("OSSECPATH", str(self.ossec_home) + os.sep)
+        env = self._ossec_environment()
         try:
             completed = subprocess.run(
                 command,
@@ -255,14 +255,32 @@ class ResponseOrchestrator:
 
     def _ossec_script_for_action(self, action: str) -> Path | None:
         normalized = action.strip().lower()
-        if normalized == "firewall-drop":
-            return self.ossec_home / "active-response" / "win" / "firewall-drop.cmd"
-        if normalized == "route-null":
-            return self.ossec_home / "active-response" / "win" / "route-null.cmd"
-        if normalized == "host-deny":
-            unix_script = self.ossec_home / "active-response" / "host-deny.sh"
-            return unix_script if unix_script.exists() else None
-        return None
+        relative = ALLOWED_OSSEC_ACTIONS.get(normalized)
+        if relative is None:
+            return None
+        script = (self.ossec_home / Path(*relative)).resolve(strict=False)
+        try:
+            script.relative_to(self.ossec_home.resolve(strict=False))
+        except ValueError:
+            return None
+        if not script.exists():
+            return None
+        return script
+
+    def _ossec_environment(self) -> dict[str, str]:
+        allowed = {"COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR"}
+        env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+        env["OSSECPATH"] = str(self.ossec_home) + os.sep
+        return env
+
+    def ossec_script_inventory(self) -> dict[str, str]:
+        inventory: dict[str, str] = {}
+        for action in ALLOWED_OSSEC_ACTIONS:
+            script = self._ossec_script_for_action(action)
+            if script is None:
+                continue
+            inventory[action] = hashlib.sha256(script.read_bytes()).hexdigest()
+        return inventory
 
     def _ossec_command(self, script: Path, *, mode: str, user: str, subject: str) -> list[str] | str:
         if script.suffix.lower() == ".cmd":

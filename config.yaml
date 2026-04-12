@@ -2,10 +2,6 @@
 duration: 90
 interval: 1.0
 
-# VirusTotal Settings
-virustotal_api_key: ""
-
-
 # Event IDs to monitor
 defender_ids:
     1006: "Malware detected (scan)"
