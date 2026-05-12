@@ -716,7 +716,7 @@ def _resolve_oidc_context(provided: str) -> SecurityContext | None:
         # 3. The auth-failure path already increments
         #    `shadowlab_auth_failures_total`, so this metric is
         #    deliberately additive (denominator vs reason).
-        logger.warning("OIDC token rejected: %s: %s", type(exc).__name__, str(exc)[:200])
+        logger.warning("OIDC authentication rejected (reason=%s)", type(exc).__name__[:48])
         try:
             from api.observability import default_registry as _registry
             _registry.counter(

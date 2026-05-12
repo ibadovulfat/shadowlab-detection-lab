@@ -103,6 +103,7 @@ def build_services(
     integrity_service = IntegrityService(base_dir, out_dir)
     observability_service = ObservabilityService(out_dir)
     migration_service = MigrationService(base_dir)
+    migration_service.ensure_applied()
     # Wave-3 ops wiring — metrics registry first so the webhook dispatcher
     # can publish into it; the job queue uses the antivirus service we
     # just built; the folder watcher delegates to the queue.

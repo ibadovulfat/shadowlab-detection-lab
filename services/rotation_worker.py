@@ -86,7 +86,7 @@ class SecretRotationWorker:
 
     def start(self) -> None:
         if not _enabled():
-            _logger.info("Secret rotation worker disabled (SHADOWLAB_SECRET_ROTATION_ENABLED is off).")
+            _logger.info("rotation worker disabled (SHADOWLAB_SECRET_ROTATION_ENABLED is off).")
             return
         if self._thread is not None and self._thread.is_alive():
             return
@@ -94,7 +94,7 @@ class SecretRotationWorker:
             target=self._run, name="secret-rotation-worker", daemon=True
         )
         self._thread.start()
-        _logger.info("Secret rotation worker started (interval=%ss, max-age=%ss).", _interval_seconds(), _max_age_seconds())
+        _logger.info("rotation worker started (interval=%ss, max-age=%ss).", _interval_seconds(), _max_age_seconds())
 
     def stop(self) -> None:
         self._stop.set()
@@ -161,7 +161,7 @@ class SecretRotationWorker:
                 rotated.append({"target": "integrity", "ok": False, "reason": str(exc), "at": time.time()})
 
         if rotated:
-            _logger.info("rotation worker: rotated %d secret(s) this pass", len(rotated))
+            _logger.info("rotation worker: rotated %d item(s) this pass", len(rotated))
         self._last_rotations.extend(rotated)
         # Keep the in-memory tail bounded.
         if len(self._last_rotations) > 200:
