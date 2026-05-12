@@ -68,7 +68,7 @@ jobs:
   schemathesis-fuzz:
     runs-on: ubuntu-latest
     env:
-      SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key-with-32-bytes-of-entropy
+      SHADOWLAB_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       SHADOWLAB_API_KEYS: admin:fuzz-admin-key,analyst:fuzz-analyst-key,viewer:fuzz-viewer-key
       SHADOWLAB_POLICY_PROFILE: lab
       SHADOWLAB_HOST: 127.0.0.1
@@ -121,6 +121,7 @@ jobs:
             --checks all \
             --hypothesis-max-examples 25 \
             --hypothesis-deadline 5000 \
+            --hypothesis-suppress-health-check=filter_too_much \
             --request-timeout 5000 \
             --workers 1 \
             --include-method GET || (cat schemathesis-boot.log; exit 1)

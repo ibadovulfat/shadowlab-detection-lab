@@ -120,7 +120,11 @@ class AuthApiTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
-        self._secret_env = mock.patch.dict(os.environ, {"SHADOWLAB_SECRET_KEY": "unit-test-secret-key"}, clear=False)
+        self._secret_env = mock.patch.dict(
+            os.environ,
+            {"SHADOWLAB_SECRET_KEY": "0123456789abcdef0123456789abcdef"},
+            clear=False,
+        )
         self._secret_env.start()
         self.client = TestClient(api.main.app)
 

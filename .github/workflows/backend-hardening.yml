@@ -8,7 +8,7 @@ on:
   pull_request:
 
 env:
-  SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key-with-32-bytes-of-entropy
+  SHADOWLAB_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   SHADOWLAB_REQUIRE_AUTH: "false"
   SHADOWLAB_POLICY_PROFILE: lab
   SHADOWLAB_NOAUTH_DEFAULT_ROLE: admin
