@@ -142,7 +142,7 @@ class CredentialStore:
                 try:
                     raw = self._db.get_app_setting(conn, key)
                 except Exception:
-                    _logger.warning("antivirus credential store: get_app_setting failed for %s", key)
+                    _logger.debug("antivirus credential store: failed to retrieve persisted setting")
                     raw = ""
                 if not raw:
                     continue
