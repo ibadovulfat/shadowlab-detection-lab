@@ -8,7 +8,11 @@ on:
   pull_request:
 
 env:
-  SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key
+  SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key-with-32-bytes-of-entropy
+  SHADOWLAB_REQUIRE_AUTH: "false"
+  SHADOWLAB_POLICY_PROFILE: lab
+  SHADOWLAB_NOAUTH_DEFAULT_ROLE: admin
+  SHADOWLAB_DATABASE_URL: sqlite:///./ci_shadowlab.db
   PYTHONPATH: ${{ github.workspace }}
 
 jobs:

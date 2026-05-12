@@ -6,6 +6,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import database as db
+from services.migration_service import MigrationService
 
 
 def run(command: list[str]) -> None:
@@ -24,6 +29,8 @@ def run(command: list[str]) -> None:
 
 
 def main() -> None:
+    db.init_db()
+    MigrationService(ROOT).ensure_applied()
     run(
         [
             sys.executable,
