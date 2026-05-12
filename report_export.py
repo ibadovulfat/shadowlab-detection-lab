@@ -74,6 +74,101 @@ def _artifact_inventory(out_dir: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _artifact_category(name: str) -> str:
+    lower_name = str(name or "").lower()
+    if "securityops_report" in lower_name:
+        return "security-ops"
+    if "shadowlab_report" in lower_name:
+        return "incident-report"
+    if "navigator" in lower_name or "workbench" in lower_name or "mitre" in lower_name:
+        return "attack-coverage"
+    if "incident_bundle" in lower_name or "bundle" in lower_name:
+        return "incident-bundle"
+    if "whids" in lower_name or "ossec" in lower_name:
+        return "integration-export"
+    return "artifact"
+
+
+def _build_executive_summary(score: dict[str, Any], incident: dict[str, Any], bundle: dict[str, Any], findings: list[dict[str, Any]]) -> list[str]:
+    top_finding = _top_findings(findings)[:1]
+    summary = str(bundle.get("summary") or incident.get("summary") or "Automated incident generated from correlated telemetry and detection logic.")
+    story = str(bundle.get("correlation_story") or score.get("correlation_story") or "No correlation narrative was produced.")
+    top_line = "Top finding: not recorded."
+    if top_finding:
+        finding = top_finding[0]
+        top_line = (
+            f"Top finding: {finding.get('title', 'finding')} "
+            f"(severity={finding.get('severity', 'unknown')}, score={_fmt_float(finding.get('score', 0), 2)})."
+        )
+    return [summary, story, top_line]
+
+
+def _attack_surface_summary(score: dict[str, Any], incident: dict[str, Any], bundle: dict[str, Any], security_events: list[dict[str, Any]]) -> list[str]:
+    attack_chain = bundle.get("attack_chain", []) or score.get("attack_chain", []) or ["Not mapped"]
+    techniques = bundle.get("mitre_techniques", []) or score.get("mitre_mapping", []) or ["None"]
+    remote_targets = []
+    for item in security_events[:8]:
+        details = item.get("details", {}) if isinstance(item, dict) else {}
+        if isinstance(details, dict):
+            for key in ["remote_ip", "remote_ips", "dst_ip", "destination"]:
+                value = details.get(key)
+                if isinstance(value, list):
+                    remote_targets.extend(str(entry) for entry in value[:4])
+                elif value:
+                    remote_targets.append(str(value))
+    deduped_targets = []
+    for target in remote_targets:
+        if target not in deduped_targets:
+            deduped_targets.append(target)
+    return [
+        f"Attack chain: {' -> '.join(str(item) for item in attack_chain)}",
+        f"ATT&CK techniques: {', '.join(str(item) for item in techniques[:8])}",
+        f"Potential remote infrastructure: {', '.join(deduped_targets[:6]) or 'No external infrastructure preserved in security events.'}",
+    ]
+
+
+def _report_risk_posture(score: dict[str, Any], findings: list[dict[str, Any]], security_events: list[dict[str, Any]]) -> list[str]:
+    critical_findings = sum(1 for item in findings if str(item.get("severity", "")).lower() == "critical")
+    high_findings = sum(1 for item in findings if str(item.get("severity", "")).lower() == "high")
+    high_risk_events = sum(1 for item in security_events if int(item.get("risk_score", 0) or 0) >= 75)
+    return [
+        f"Overall likelihood: {_fmt_float(score.get('likelihood', 0))}",
+        f"Critical findings: {critical_findings}",
+        f"High findings: {high_findings}",
+        f"High-risk security events: {high_risk_events}",
+    ]
+
+
+def _artifact_summary_rows(artifacts: list[dict[str, str]]) -> list[str]:
+    counts: dict[str, int] = {}
+    for item in artifacts:
+        counts[_artifact_category(item.get("name", ""))] = counts.get(_artifact_category(item.get("name", "")), 0) + 1
+    return [
+        f"{category}: {count}"
+        for category, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
+
+
+def _technical_observations(score: dict[str, Any], telemetry_preview: list[dict[str, Any]], security_events: list[dict[str, Any]]) -> list[str]:
+    parts = score.get("parts", {}) if isinstance(score.get("parts"), dict) else {}
+    observations = [f"Score component {key}: {_fmt_float(value)}" for key, value in parts.items()]
+    if telemetry_preview:
+        first = telemetry_preview[0] if isinstance(telemetry_preview[0], dict) else {}
+        last = telemetry_preview[-1] if isinstance(telemetry_preview[-1], dict) else {}
+        observations.extend(
+            [
+                f"Telemetry window start: {_fmt_timestamp(first.get('ts'))}",
+                f"Telemetry window end: {_fmt_timestamp(last.get('ts'))}",
+            ]
+        )
+    if security_events:
+        top = security_events[0]
+        observations.append(
+            f"Highest-priority event: {top.get('source', 'unknown')} | {top.get('title', 'event')} | risk={top.get('risk_score', 0)}"
+        )
+    return observations
+
+
 def _report_model(out_dir: Path) -> dict[str, Any]:
     score = _read_json(out_dir / "score.json")
     defender = _read_json(out_dir / "events_defender.json")
@@ -83,6 +178,7 @@ def _report_model(out_dir: Path) -> dict[str, Any]:
     findings = bundle.get("findings") or score.get("rule_findings") or []
     telemetry_preview = bundle.get("telemetry_preview", []) if isinstance(bundle.get("telemetry_preview"), list) else []
     security_events = score.get("security_events", []) if isinstance(score.get("security_events"), list) else []
+    artifacts = _artifact_inventory(out_dir)
     return {
         "score": score,
         "defender": defender.get("summary", {}) if isinstance(defender.get("summary"), dict) else {},
@@ -92,7 +188,12 @@ def _report_model(out_dir: Path) -> dict[str, Any]:
         "findings": findings if isinstance(findings, list) else [],
         "telemetry_preview": telemetry_preview,
         "security_events": security_events,
-        "artifacts": _artifact_inventory(out_dir),
+        "artifacts": artifacts,
+        "executive_summary": _build_executive_summary(score, incident, bundle, findings if isinstance(findings, list) else []),
+        "attack_surface_summary": _attack_surface_summary(score, incident, bundle, security_events),
+        "risk_posture": _report_risk_posture(score, findings if isinstance(findings, list) else [], security_events),
+        "artifact_categories": _artifact_summary_rows(artifacts),
+        "technical_observations": _technical_observations(score, telemetry_preview, security_events),
     }
 
 
@@ -240,14 +341,13 @@ def generate_pdf(out_dir: Path, author: str = "Ulfat Ibadov", sections: list[str
     y -= 2 * mm
     page_title = "ShadowLab Incident Report"
     y = _draw_heading(doc, y, "Executive Summary", page_title)
-    executive_lines = [
-        bundle.get("summary") or incident.get("summary") or "Automated incident generated from available telemetry and correlation logic.",
-        bundle.get("correlation_story") or score.get("correlation_story") or "No correlation narrative was generated.",
-        f"Telemetry samples retained: {bundle.get('telemetry_count', len(model['telemetry_preview']))}",
-        f"Primary ATT&CK coverage: {', '.join(bundle.get('mitre_techniques', []) or score.get('mitre_mapping', []) or ['None'])}",
-        f"Attack chain: {' -> '.join(bundle.get('attack_chain', []) or score.get('attack_chain', []) or ['Not mapped'])}",
-    ]
-    y = _draw_bullets(doc, y, executive_lines, page_title)
+    y = _draw_bullets(doc, y, model.get("executive_summary", []), page_title)
+
+    y = _draw_heading(doc, y - 2 * mm, "Risk Posture", page_title)
+    y = _draw_bullets(doc, y, model.get("risk_posture", []), page_title)
+
+    y = _draw_heading(doc, y - 2 * mm, "Attack Surface & Adversary View", page_title)
+    y = _draw_bullets(doc, y, model.get("attack_surface_summary", []), page_title)
 
     y = _draw_heading(doc, y - 2 * mm, "Analyst Findings", page_title)
     if findings:
@@ -280,6 +380,9 @@ def generate_pdf(out_dir: Path, author: str = "Ulfat Ibadov", sections: list[str
     y = _new_page(doc, page_title)
     y = _draw_heading(doc, y, "Telemetry Snapshot", page_title)
     y = _draw_bullets(doc, y, _telemetry_snapshot(model["telemetry_preview"]), page_title)
+
+    y = _draw_heading(doc, y - 2 * mm, "Technical Observations", page_title)
+    y = _draw_bullets(doc, y, model.get("technical_observations", []), page_title)
 
     if sections and "Detection Score" in sections:
         y = _draw_heading(doc, y - 2 * mm, "Detection Scoring Breakdown", page_title)
@@ -321,6 +424,9 @@ def generate_pdf(out_dir: Path, author: str = "Ulfat Ibadov", sections: list[str
     artifact_lines = [f"{item['name']} | type={item['type']} | size={item['size']}" for item in model["artifacts"][:18]]
     y = _draw_bullets(doc, y, artifact_lines or ["No artifacts were available in shadowlab_out."], page_title)
 
+    y = _draw_heading(doc, y - 2 * mm, "Artifact Classes", page_title)
+    y = _draw_bullets(doc, y, model.get("artifact_categories", []), page_title)
+
     y = _draw_heading(doc, y - 2 * mm, "Telemetry Preview", page_title)
     preview_rows = model["telemetry_preview"][-8:] if isinstance(model["telemetry_preview"], list) else []
     preview_lines = []
@@ -350,6 +456,11 @@ def generate_html(out_dir: Path, author: str = "Ulfat Ibadov") -> Optional[Path]
     telemetry_cards = "".join(
         f"<li>{html.escape(item)}</li>" for item in _telemetry_snapshot(model["telemetry_preview"])
     )
+    executive_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in model.get("executive_summary", []))
+    risk_posture_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in model.get("risk_posture", []))
+    attack_surface_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in model.get("attack_surface_summary", []))
+    technical_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in model.get("technical_observations", []))
+    artifact_class_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in model.get("artifact_categories", []))
     findings_html = "".join(
         (
             "<div class='finding'>"
@@ -425,9 +536,17 @@ def generate_html(out_dir: Path, author: str = "Ulfat Ibadov") -> Optional[Path]
 
     <section class="card">
       <h2>Executive Summary</h2>
-      <p>{html.escape(str(bundle.get('summary') or incident.get('summary') or 'Automated incident generated from telemetry, event logs, and rule correlation.'))}</p>
-      <p><strong>Attack Chain:</strong> <code>{html.escape(' -> '.join(bundle.get('attack_chain', []) or score.get('attack_chain', []) or ['Not mapped']))}</code></p>
-      <p><strong>MITRE Techniques:</strong> {html.escape(', '.join(bundle.get('mitre_techniques', []) or score.get('mitre_mapping', []) or ['None']))}</p>
+      <ul>{executive_html or '<li>No executive summary generated.</li>'}</ul>
+    </section>
+
+    <section class="card">
+      <h2>Risk Posture</h2>
+      <ul>{risk_posture_html or '<li>No risk posture metrics recorded.</li>'}</ul>
+    </section>
+
+    <section class="card">
+      <h2>Attack Surface & Adversary View</h2>
+      <ul>{attack_surface_html or '<li>No attack-surface context recorded.</li>'}</ul>
     </section>
 
     <section class="card">
@@ -453,6 +572,11 @@ def generate_html(out_dir: Path, author: str = "Ulfat Ibadov") -> Optional[Path]
     </section>
 
     <section class="card">
+      <h2>Technical Observations</h2>
+      <ul>{technical_html or '<li>No technical observations recorded.</li>'}</ul>
+    </section>
+
+    <section class="card">
       <h2>Security Event Highlights</h2>
       <table>
         <tr><th>Source</th><th>Title</th><th>Severity</th><th>Risk</th><th>Details</th></tr>
@@ -462,6 +586,7 @@ def generate_html(out_dir: Path, author: str = "Ulfat Ibadov") -> Optional[Path]
 
     <section class="card">
       <h2>Artifact Inventory</h2>
+      <ul>{artifact_class_html or '<li>No artifact classes detected.</li>'}</ul>
       <table>
         <tr><th>Name</th><th>Type</th><th>Size</th></tr>
         {artifact_html or "<tr><td colspan='3'>No artifacts found.</td></tr>"}

@@ -80,9 +80,22 @@ LOW_SIGNAL_TAGS = {
     "macro",
 }
 DEFAULT_ALLOWLIST_PATH_PREFIXES = (
-    "C:\\Windows\\",
+    "C:\\Windows\\System32\\",
+    "C:\\Windows\\SysWOW64\\",
+    "C:\\Windows\\WinSxS\\",
     "C:\\Program Files\\",
     "C:\\Program Files (x86)\\",
+)
+# Narrowed from the original "C:\\Windows\\" prefix: the parent directory
+# includes user-writable subfolders (C:\Windows\Temp, \Tasks, \Tracing,
+# \debug) where malware frequently drops stage-2 payloads. Trusting a
+# signed binary placed there silently downgraded YARA matches to `info`.
+# System32 / SysWOW64 / WinSxS are protected by Windows Resource Protection.
+DEFAULT_ALLOWLIST_DENIED_SUBPATHS = (
+    "\\temp\\",
+    "\\tasks\\",
+    "\\tracing\\",
+    "\\debug\\",
 )
 POLICY_LIST_KEYS = {
     "allowlist_hashes",
@@ -392,7 +405,14 @@ def _suppression_reasons(match: dict[str, Any], context: dict[str, Any]) -> list
         policy_reasons.append(f"{scope} rule pattern suppressed by local policy")
     if sha256 and sha256 in _trusted_hashes():
         explicit_reasons.append("known-good hash allowlisted")
-    if signature_status == "valid" and any(path_value.startswith(prefix.lower()) for prefix in _trusted_path_prefixes()):
+    if (
+        signature_status == "valid"
+        and any(path_value.startswith(prefix.lower()) for prefix in _trusted_path_prefixes())
+        # Reject allowlist suppression for writable Windows subfolders — a
+        # signed DLL dropped into C:\Windows\Temp or \Tasks is a classic
+        # attacker technique and must not silently downgrade a YARA hit.
+        and not any(denied in path_value for denied in (s.lower() for s in DEFAULT_ALLOWLIST_DENIED_SUBPATHS))
+    ):
         explicit_reasons.append("trusted path with valid signature")
     if _is_high_signal_match(source, severity, tags, meta) and not bool(suppressions.get("force")) and not explicit_reasons:
         return reasons
@@ -828,13 +848,29 @@ def build_update_workflow_report() -> dict[str, Any]:
 
 def save_update_snapshot() -> dict[str, Any]:
     report = build_update_workflow_report()
+    # Persist only the snapshotable fields, NOT the full report — otherwise
+    # the `last_snapshot` key (which build_update_workflow_report() loads
+    # from this same setting) gets re-embedded on every save, doubling the
+    # nesting depth each call. After a handful of snapshots the stored JSON
+    # grows past pydantic_core's recursion limit and FastAPI serialization
+    # raises `Circular reference detected (depth exceeded)` on the next GET.
+    snapshot_payload = {
+        "status": report.get("status"),
+        "inventory": report.get("inventory"),
+        "policy_signature": report.get("policy_signature"),
+        "recommended_steps": report.get("recommended_steps"),
+    }
     try:
         import database as db
 
         conn = db.create_connection()
         if conn:
             try:
-                db.set_app_setting(conn, "local_yara_update_snapshot_json", json.dumps(report, ensure_ascii=False))
+                db.set_app_setting(
+                    conn,
+                    "local_yara_update_snapshot_json",
+                    json.dumps(snapshot_payload, ensure_ascii=False),
+                )
             finally:
                 conn.close()
     except Exception:

@@ -6,15 +6,18 @@ This folder contains the PySide6 desktop client for ShadowLab.
 
 The desktop is the main operator console. It covers:
 
-- dashboards and overview views
+- `Dashboards` and `Overview`
 - `WHIDS` and `HIDS` integration workspaces
-- process investigation and advanced hunt
-- persistence, threat-intel, and static-analysis workflows
-- deception, network, hosts, graph, and timeline views
-- quarantine, history, artifacts, and evidence handling
-- enterprise case operations and investigation intelligence
+- `Processes` investigation and triage
+- `Persistence` review and remediation
+- `File Analysis` with Detect It Easy and PE fallback
+- `Network`, `Graph`, and `Timeline`
+- `Antivirus` provider health, scans, verdicts, quarantine, response, rules, lists, webhooks, and containment
+- `History`, `Artifacts`, and evidence/report handling
+- `Enterprise` case operations and investigation intelligence
 - ATT&CK coverage, Navigator export, and Workbench export
-- security-operations posture, YARA health, and reporting
+- `Security Ops` posture, YARA health, integrity, observability, secrets, and reporting
+- `About / FAQ`
 
 ## Enterprise Layout
 
@@ -35,11 +38,18 @@ Supported roles:
 
 The client:
 
-- shows or hides controls based on capabilities
+- enables or disables controls based on backend capabilities
 - signs authenticated write requests automatically
 - attaches approval IDs when needed
 - does not assume admin access just because backend auth is disabled
-- activates role-aware API access from a valid key without requiring separate manual header setup
+- activates role-aware API access from a valid key without requiring manual header setup
+
+Important capability examples:
+
+- packet capture: `can_run_sniffer`
+- ARP discovery and investigation workflows: analyst/admin capabilities
+- network blocker: `can_manage_network_warfare`
+- dangerous response actions: admin plus explicit feature flags
 
 ## Local Run
 
@@ -52,6 +62,13 @@ Auth-enabled local run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
+python desktop\main.py
+```
+
+Lab-only network and destructive controls:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1 -EnableDangerousActions -EnableNetworkWarfare
 python desktop\main.py
 ```
 
@@ -70,13 +87,13 @@ Packaging files:
 
 ## Detect It Easy Notes
 
-The preferred backend for `Static Analysis` is `die-python`. If you still want the external CLI path, provide `diec.exe` or `die.exe` through `SHADOWLAB_DIEC_PATH` or `PATH`.
+The preferred backend for `File Analysis` is `die-python`. If you still want the external CLI path, provide `diec.exe` or `die.exe` through `SHADOWLAB_DIEC_PATH` or `PATH`.
 
 The runtime badge in the desktop reflects native and subprocess backends separately. A healthy native binding appears as `Runtime: ready (native)` even if no external `diec.exe` path exists.
 
 ## Reporting Notes
 
-The desktop `Artifacts` and export flows now surface fuller monitor reports. Generated PDF and HTML reports include analyst findings, telemetry context, event highlights, and an artifact manifest suitable for handoff.
+The desktop `Artifacts`, `Antivirus`, `Enterprise`, and export flows surface richer monitor and case reports. Generated PDF and HTML reports include analyst findings, telemetry context, event highlights, ATT&CK context, and an artifact manifest suitable for handoff.
 
 ## Related Documentation
 
@@ -84,6 +101,3 @@ The desktop `Artifacts` and export flows now surface fuller monitor reports. Gen
 - [docs/PLATFORM_GUIDE.md](../docs/PLATFORM_GUIDE.md)
 - [docs/USAGE_GUIDE.md](../docs/USAGE_GUIDE.md)
 - [docs/PRODUCTION_RUNBOOK.md](../docs/PRODUCTION_RUNBOOK.md)
-
-updated
-

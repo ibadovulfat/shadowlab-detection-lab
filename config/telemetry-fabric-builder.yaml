@@ -2,7 +2,10 @@ dist:
   name: shadowlab-telemetry-fabric
   description: ShadowLab telemetry fabric distribution built from the upstream collector source tree.
   module: github.com/shadowlab/telemetry-fabric
-  output_path: C:\Users\ulfat\Downloads\shadowlab-detection-lab\build\telemetry-fabric
+  # Output path is relative to the repo root so this YAML stays portable.
+  # The ShadowLab bootstrap rewrites it to an absolute path at build time
+  # when an explicit override is needed.
+  output_path: ./build/telemetry-fabric
 
 extensions:
   - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.147.0

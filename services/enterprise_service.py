@@ -547,16 +547,6 @@ class EnterpriseService:
             "coverage_map": {"mitre_techniques": mitre, "finding_titles": [item.get("title", "") for item in findings if isinstance(item, dict)]},
         }
 
-    def assess_canary_bypass(self) -> dict[str, Any]:
-        return {
-            "status": "ready",
-            "tests": [
-                {"name": "rename-then-touch", "goal": "Detect bypass attempts against filename-based canaries"},
-                {"name": "read-only-open", "goal": "Validate alerting on stealthy reconnaissance against honeypot files"},
-                {"name": "rapid-delete-recreate", "goal": "Measure watcher resilience to race-condition style bypasses"},
-            ],
-        }
-
     def telemetry_gap_analysis(self) -> dict[str, Any]:
         processes = self.process_service.snapshot_processes(include_deep_fields=False)
         suspicious = [proc for proc in processes if any(token in str(proc.get("name", "")).lower() for token in ["powershell", "cmd", "rundll32", "mshta", "wmic"])]
@@ -637,7 +627,7 @@ class EnterpriseService:
             "dangerous_mutations": sum(
                 1 for row in action_rows
                 if str(row.get("method", "")).upper() in {"POST", "PATCH", "DELETE"}
-                and any(token in str(row.get("path", "")) for token in ["/actions/", "/network/warfare/", "/quarantine/", "/deception/"])
+                and any(token in str(row.get("path", "")) for token in ["/actions/", "/network/warfare/", "/quarantine/"])
             ),
             "external_failures": sum(1 for row in external_rows if str(row.get("status", "")).lower() not in {"ok", "sent", "delivered", "success"}),
             "dead_letters": sum(1 for row in queue_rows if str(row.get("status", "")).lower() == "dead_letter"),

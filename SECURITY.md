@@ -2,11 +2,13 @@
 
 ## Supported Use
 
-ShadowLab is intended for owned, isolated lab environments. Do not run it against systems, networks, or data you do not own or explicitly control.
+ShadowLab is intended for owned, isolated lab environments and controlled security operations work. Do not run it against systems, networks, or data you do not own or explicitly control.
+
+ShadowLab contains capabilities that can affect host or network state, including containment, quarantine, packet capture, ARP discovery, network blocker controls, and response actions. Treat those features as security tooling and test them only in approved environments.
 
 ## Reporting A Vulnerability
 
-Please do not open public issues for vulnerabilities that could expose users, secrets, or systems.
+Please do not open public issues for vulnerabilities that could expose users, secrets, systems, or operational data.
 
 Instead:
 
@@ -39,10 +41,9 @@ Do not include:
 
 - raw secrets or tokens
 - private keys
+- API keys shown in screenshots
 - real production data
 - sensitive personal information
+- exploit payloads that are not needed to reproduce the issue
 
 If a secret is already exposed, rotate it before reporting the issue.
-
-updated
-

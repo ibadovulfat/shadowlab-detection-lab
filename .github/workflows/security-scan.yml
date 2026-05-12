@@ -1,0 +1,111 @@
+name: Security Scan
+
+# Static-analysis CI gate that runs alongside the functional test suite.
+# Bandit catches Python-specific anti-patterns (hard-coded passwords,
+# subprocess + shell, weak crypto). Semgrep covers a broader rule set
+# including OWASP top-10 and Salesforce / generic security patterns.
+# pip-audit flags known-vulnerable transitive dependencies.
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  bandit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Bandit
+        run: |
+          python -m pip install --upgrade pip
+          pip install "bandit[toml]==1.7.9"
+      - name: Run Bandit
+        # `-r` recursive, severity ≥ medium, confidence ≥ medium so the
+        # gate fails only on findings worth blocking a merge. The
+        # configuration file pins the same thresholds for local dev runs.
+        run: bandit -c .bandit -r api services plugins desktop -ll -ii
+
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep — OWASP + Python security
+        run: |
+          semgrep --error \
+            --config=p/python \
+            --config=p/owasp-top-ten \
+            --config=p/security-audit \
+            --exclude=venv --exclude=.git --exclude=tests \
+            api services plugins desktop
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+      - name: Audit dependencies
+        # `--ignore-vuln` slots are reserved for findings the team has
+        # triaged and accepted. CI fails on any unlisted vulnerability.
+        run: pip-audit -r requirements.txt --strict
+
+  schemathesis-fuzz:
+    runs-on: ubuntu-latest
+    env:
+      SHADOWLAB_SECRET_KEY: ci-shadowlab-secret-key-with-32-bytes-of-entropy
+      SHADOWLAB_API_KEYS: admin:fuzz-admin-key,analyst:fuzz-analyst-key,viewer:fuzz-viewer-key
+      SHADOWLAB_POLICY_PROFILE: lab
+      SHADOWLAB_HOST: 127.0.0.1
+      SHADOWLAB_PORT: "8765"
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "schemathesis>=3.30,<4.0"
+      - name: Boot API
+        # Background process. Subsequent step waits for /health.
+        run: |
+          nohup python app.py > schemathesis-boot.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8765/health
+      - name: Fuzz read-only endpoints
+        # `--checks=all` runs every built-in oracle (5xx, schema
+        # conformance, response time). Stateful generation is left off
+        # for now because the OpenAPI surface doesn't carry the link
+        # metadata; reintroduce with `--stateful=links` once routes
+        # are annotated.
+        run: |
+          schemathesis run \
+            http://127.0.0.1:8765/openapi.json \
+            --header "X-API-Key: fuzz-viewer-key" \
+            --checks all \
+            --hypothesis-max-examples 25 \
+            --hypothesis-deadline 5000 \
+            --request-timeout 5 \
+            --workers 4 \
+            --include-method GET || (cat schemathesis-boot.log; exit 1)

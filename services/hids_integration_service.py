@@ -17,6 +17,12 @@ from services.outbound_security import normalize_outbound_url
 from services.secret_store import is_encrypted_secret, secret_store
 
 
+class _NoRedirectSession(requests.Session):
+    def request(self, method: str | bytes, url: str | bytes, **kwargs: Any) -> requests.Response:
+        kwargs["allow_redirects"] = False
+        return super().request(method, url, **kwargs)
+
+
 class HidsIntegrationService:
     def __init__(self, db_module, enterprise_service=None, investigation_service=None, response_service=None, mitre_service=None):
         self.db = db_module
@@ -807,7 +813,7 @@ class HidsIntegrationService:
     def _build_whids_session(self, manager_url: str, api_key: str, *, verify_tls: bool) -> tuple[requests.Session, str]:
         base_url = self._normalize_whids_manager_url(manager_url, verify_tls=verify_tls)
         headers = {"X-Api-Key": api_key.strip()}
-        session = requests.Session()
+        session = _NoRedirectSession()
         session.headers.update(headers)
         session.verify = verify_tls
         return session, base_url

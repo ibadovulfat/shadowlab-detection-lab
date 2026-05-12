@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -131,7 +132,12 @@ def load_oidc_settings() -> OIDCSettings:
 
 class IdentityProvider:
     def __init__(self) -> None:
+        # JWKS / discovery cache; concurrent workers + JWKS rotation can
+        # race on a plain dict. The lock keeps reads/writes serialised
+        # without holding it across the HTTP fetch (we copy out and then
+        # rebuild the entry once requests returns).
         self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._cache_lock = threading.Lock()
 
     def settings(self) -> OIDCSettings:
         return load_oidc_settings()
@@ -153,6 +159,11 @@ class IdentityProvider:
             raise ValueError("OIDC discovery response must be a JSON object")
         return payload
 
+    def clear_cache(self) -> None:
+        """Drop the JWKS/discovery cache. Use after IdP key rotation."""
+        with self._cache_lock:
+            self._cache.clear()
+
     def authenticate_token(self, token: str) -> IdentityPrincipal:
         settings = self.settings()
         if not settings.enabled:
@@ -165,7 +176,11 @@ class IdentityProvider:
             raise ValueError(f"Unsupported OIDC token algorithm: {algorithm or 'unknown'}")
         jwk = self._resolve_jwk(header, settings)
         self._verify_signature(f"{header_b64}.{payload_b64}".encode("ascii"), _b64url_decode(signature_b64), jwk, algorithm)
-        self._validate_claims(claims, settings)
+        # Pass the resolved discovery issuer in alongside the static
+        # `issuer_url` so `_validate_claims` can enforce `iss` even when
+        # only a discovery URL was configured (i.e. `issuer_url` is empty).
+        discovered_issuer = self._discovered_issuer(settings)
+        self._validate_claims(claims, settings, discovered_issuer=discovered_issuer)
         subject = str(claims.get("sub", "") or "").strip()
         if not subject:
             raise ValueError("OIDC token is missing `sub`")
@@ -198,7 +213,8 @@ class IdentityProvider:
 
     def _cached_json(self, url: str, settings: OIDCSettings) -> dict[str, Any]:
         now = time.time()
-        cached = self._cache.get(url)
+        with self._cache_lock:
+            cached = self._cache.get(url)
         if cached and now < cached[0]:
             return dict(cached[1])
         response = requests.get(url, timeout=settings.request_timeout_seconds)
@@ -206,7 +222,8 @@ class IdentityProvider:
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("OIDC metadata response must be a JSON object")
-        self._cache[url] = (now + settings.metadata_ttl_seconds, payload)
+        with self._cache_lock:
+            self._cache[url] = (now + settings.metadata_ttl_seconds, payload)
         return dict(payload)
 
     def _resolve_jwk(self, header: dict[str, Any], settings: OIDCSettings) -> dict[str, Any]:
@@ -219,13 +236,33 @@ class IdentityProvider:
         if not isinstance(keys, list):
             raise ValueError("OIDC JWKS payload must include a `keys` array")
         kid = str(header.get("kid", "") or "").strip()
-        for key in keys:
-            if not isinstance(key, dict):
-                continue
-            if kid and str(key.get("kid", "") or "").strip() != kid:
-                continue
-            return key
-        raise ValueError(f"OIDC JWKS key not found for kid `{kid or 'missing'}`")
+        header_alg = str(header.get("alg", "") or "").strip()
+        # Fail closed when the token omits `kid`: picking "the first key" opens
+        # a key-confusion attack when the IdP rotates or serves multiple JWKs.
+        if not kid:
+            if len(keys) == 1 and isinstance(keys[0], dict):
+                candidate = keys[0]
+            else:
+                raise ValueError("OIDC token missing required `kid` header")
+        else:
+            candidate = None
+            for key in keys:
+                if not isinstance(key, dict):
+                    continue
+                if str(key.get("kid", "") or "").strip() == kid:
+                    candidate = key
+                    break
+            if candidate is None:
+                raise ValueError(f"OIDC JWKS key not found for kid `{kid}`")
+        # Enforce per-key constraints: only use signing keys and require the
+        # token alg to match the JWK alg if the IdP publishes one.
+        key_use = str(candidate.get("use", "") or "").strip().lower()
+        if key_use and key_use != "sig":
+            raise ValueError("OIDC JWK is not a signing key")
+        key_alg = str(candidate.get("alg", "") or "").strip()
+        if key_alg and header_alg and key_alg != header_alg:
+            raise ValueError("OIDC token alg does not match JWK alg")
+        return candidate
 
     def _verify_signature(self, signed_data: bytes, signature: bytes, jwk: dict[str, Any], algorithm: str) -> None:
         if algorithm.startswith("RS"):
@@ -245,11 +282,28 @@ class IdentityProvider:
             return
         raise ValueError(f"Unsupported OIDC token algorithm: {algorithm}")
 
+    # Per NIST SP 800-131A Rev. 2 and current industry guidance, RSA-1024
+    # is disallowed and 2048 is the floor for general-purpose signing
+    # through 2030. Fail closed against a compromised or misconfigured
+    # IdP that ships a short modulus in JWKS.
+    _RSA_MIN_BITS = 2048
+
     def _rsa_public_key(self, jwk: dict[str, Any]) -> rsa.RSAPublicKey:
         if str(jwk.get("kty", "") or "").upper() != "RSA":
             raise ValueError("OIDC JWK key type must be RSA for RS* tokens")
         n = int.from_bytes(_b64url_decode(str(jwk.get("n", "") or "")), "big")
         e = int.from_bytes(_b64url_decode(str(jwk.get("e", "") or "")), "big")
+        if n.bit_length() < self._RSA_MIN_BITS:
+            raise ValueError(
+                f"OIDC JWK RSA modulus is too small ({n.bit_length()} bits); "
+                f"minimum {self._RSA_MIN_BITS} required"
+            )
+        # Reject exotic / weak public exponents. e=1 means the signature
+        # check degenerates; e=2 is non-RSA-OAEP; e=3 has been linked to
+        # padding-oracle issues with implementations that don't strictly
+        # follow PKCS#1 v1.5. The de-facto safe exponent is 65537.
+        if e < 3 or e % 2 == 0:
+            raise ValueError("OIDC JWK RSA exponent is invalid")
         return rsa.RSAPublicNumbers(e, n).public_key()
 
     def _ec_public_key(self, jwk: dict[str, Any]) -> ec.EllipticCurvePublicKey:
@@ -274,11 +328,42 @@ class IdentityProvider:
         }
         return mapping[algorithm]
 
-    def _validate_claims(self, claims: dict[str, Any], settings: OIDCSettings) -> None:
+    def _discovered_issuer(self, settings: OIDCSettings) -> str:
+        """Best-effort resolution of the `issuer` field from discovery metadata.
+
+        Returns an empty string when discovery is unreachable or the
+        metadata doesn't carry the field — the caller treats that as
+        "no discovery-side anchor, use configured issuer".
+        """
+        try:
+            metadata = self.discovery_metadata(settings)
+        except Exception:
+            return ""
+        return str(metadata.get("issuer", "") or "").strip().rstrip("/")
+
+    def _validate_claims(
+        self,
+        claims: dict[str, Any],
+        settings: OIDCSettings,
+        *,
+        discovered_issuer: str = "",
+    ) -> None:
         now = int(time.time())
         skew = settings.clock_skew_seconds
         issuer = str(claims.get("iss", "") or "").strip().rstrip("/")
-        if settings.issuer_url and issuer != settings.issuer_url:
+        # Anchor the `iss` claim against EITHER the explicitly configured
+        # issuer OR (when only a discovery URL is set) the issuer field
+        # the IdP advertised through that discovery document. Without
+        # this, a deployment using only `SHADOWLAB_OIDC_DISCOVERY_URL`
+        # silently accepted any token signed by the right JWKS regardless
+        # of which tenant minted it.
+        expected_issuer = settings.issuer_url or discovered_issuer
+        if not expected_issuer:
+            raise ValueError(
+                "OIDC issuer is not pinned; set SHADOWLAB_OIDC_ISSUER_URL "
+                "or configure a discovery URL that advertises `issuer`"
+            )
+        if issuer != expected_issuer:
             raise ValueError("OIDC token issuer does not match configured issuer")
         audiences = claims.get("aud", [])
         if isinstance(audiences, str):
@@ -288,7 +373,14 @@ class IdentityProvider:
         else:
             audience_values = set()
         required_audiences = {item for item in {settings.audience, settings.client_id} if item}
-        if required_audiences and not (audience_values & required_audiences):
+        # Fail closed when neither audience nor client_id is configured;
+        # otherwise any IdP-signed JWT (correct issuer, valid signature)
+        # is accepted regardless of which application it was minted for.
+        if not required_audiences:
+            raise ValueError(
+                "OIDC audience is not configured; set SHADOWLAB_OIDC_AUDIENCE or SHADOWLAB_OIDC_CLIENT_ID"
+            )
+        if not (audience_values & required_audiences):
             raise ValueError("OIDC token audience does not match configured client or audience")
         exp = int(float(claims.get("exp") or 0))
         if exp and now > exp + skew:

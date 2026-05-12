@@ -74,8 +74,17 @@ class IntegrityService:
         )
         status = "ok" if not missing and not untracked and not modified else "drift_detected"
         signature_state = self._signature_state(stored)
+        # Fail-closed when an integrity manifest is unsigned/unverifiable in
+        # any non-lab profile. This prevents an attacker with write access to
+        # shadowlab_out/integrity_manifest.json from silently stripping the
+        # signature field and having verify_manifest still return "ok".
+        effective_status = status
+        if signature_state == "invalid":
+            effective_status = "signature_invalid"
+        elif signature_state == "missing" and self._strict_signature_required():
+            effective_status = "signature_missing"
         return {
-            "status": "signature_invalid" if signature_state == "invalid" else status,
+            "status": effective_status,
             "manifest_path": str(manifest_path),
             "roots": current.get("roots", {}),
             "counts": {
@@ -202,12 +211,25 @@ class IntegrityService:
         payload.pop("signature_status", None)
         return payload
 
+    def _strict_signature_required(self) -> bool:
+        """Return True when an unsigned manifest must be treated as tampered.
+
+        In `lab` (the development default) we tolerate missing signing keys
+        so first-run bootstrap stays friendly. In `corp`/`prod` profiles we
+        require a real HMAC to cross the chain-of-custody bar.
+        """
+        profile = os.environ.get("SHADOWLAB_POLICY_PROFILE", "lab").strip().lower() or "lab"
+        return profile in {"corp", "prod"}
+
     def _load_signing_key(self) -> str:
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
         env_key = str(os.environ.get("SHADOWLAB_INTEGRITY_SIGNING_KEY", "")).strip()
         if env_key:
             return env_key
         conn = db.create_connection()
         if conn is None:
+            _logger.warning("integrity signing key not loaded: database unavailable")
             return ""
         try:
             encrypted = db.get_app_setting(conn, self.signing_key_setting)
@@ -218,6 +240,7 @@ class IntegrityService:
         try:
             return secret_store.decrypt_text(encrypted)
         except Exception:
+            _logger.exception("failed to decrypt integrity signing key — manifest will be unsigned")
             return ""
 
     def _sha256(self, path: Path) -> str:

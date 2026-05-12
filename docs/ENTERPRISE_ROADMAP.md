@@ -1,6 +1,21 @@
 # ShadowLab Enterprise Roadmap
 
-This roadmap turns ShadowLab from a strong lab-grade platform into an enterprise-ready security operations platform. It is grouped into three delivery blocks so we can implement the foundation first, then production operations, then governance and scale.
+This roadmap turns ShadowLab from a strong lab-grade platform into an enterprise-ready security operations platform. It is grouped into three delivery blocks: identity and secrets first, production operations second, governance and scale third.
+
+## Current Baseline
+
+Already present:
+
+- API key auth with `viewer`, `analyst`, and `admin`
+- signed authenticated mutations
+- policy profiles for `lab`, `corp`, and `prod`
+- encrypted local secret storage path
+- workspace-aware enterprise records and connector storage
+- PostgreSQL migration/export helpers
+- audit export helpers
+- security-ops readiness views
+- OIDC scaffold and identity revocation groundwork
+- desktop capability gating based on `/auth/context`
 
 ## Phase 1: Core Platform Security Foundation
 
@@ -18,38 +33,38 @@ This phase covers:
 
 ### Deliverables
 
-#### 1. SSO / OIDC / user-based auth
+#### 1. SSO / OIDC / User-Based Auth
 
-- add OIDC configuration support for issuer, audience, client ID, and JWKS
+- finish OIDC configuration support for issuer, audience, client ID, and JWKS
 - support interactive operator auth and service-to-service auth separately
 - map identity claims to ShadowLab roles and capabilities
 - add per-user audit logging instead of only token/role attribution
 - support token expiry, revocation posture, and session timeout handling
-- keep API key mode only as a lab fallback, not the enterprise default
+- keep API key mode as a lab fallback rather than the enterprise default
 
-#### 2. Central secret management
+#### 2. Central Secret Management
 
 - define a secret provider abstraction in services
 - support environment, local encrypted storage, and enterprise secret backends
-- move connector secrets, webhook secrets, and signing keys behind the provider
+- move connector secrets, webhook secrets, cloud-intel keys, signing material, and mTLS keys behind the provider
 - prevent plaintext secret material from being persisted outside approved storage
 - add secret rotation workflows with audit records
 
-#### 3. Shared runtime controls
+#### 3. Shared Runtime Controls
 
-- move rate-limit buckets, nonce tracking, and approval reservation state to Redis
+- move rate-limit buckets, nonce tracking, and approval reservation state to Redis or another shared backend
 - add shared request replay protection for multi-worker deployments
 - support distributed lock semantics for queue workers and scheduler tasks
-- add failure-mode rules for Redis unavailability on security-critical paths
+- add failure-mode rules for shared-backend unavailability on security-critical paths
 
-### Suggested implementation order
+### Suggested Implementation Order
 
 1. introduce auth and secret provider interfaces
 2. add Redis-backed nonce and rate-limit storage
-3. add OIDC validation and claim-to-role mapping
-4. migrate existing admin-only workflows to user identity context
+3. complete OIDC validation and claim-to-role mapping
+4. migrate admin-only workflows to user identity context
 
-### Exit criteria
+### Exit Criteria
 
 - enterprise profile can run without raw API keys
 - mutating request signing and replay checks work across workers
@@ -72,7 +87,7 @@ This phase covers:
 
 ### Deliverables
 
-#### 4. Database maturity
+#### 4. Database Maturity
 
 - make PostgreSQL the primary enterprise backend
 - define migration discipline and startup safety checks for schema drift
@@ -80,15 +95,15 @@ This phase covers:
 - document HA and connection-pool expectations
 - add retention jobs and operational readiness checks for large datasets
 
-#### 5. Immutable audit / compliance posture
+#### 5. Immutable Audit / Compliance Posture
 
 - stream audit events to SIEM or message pipeline
 - define append-only export or signed audit package workflow
-- add retention controls for auth, action, evidence, and connector logs
+- add retention controls for auth, action, evidence, connector, antivirus, and network-action logs
 - document compliance mappings for SOC 2, ISO 27001, and NIST-oriented environments
 - add audit integrity verification for exported records
 
-#### 6. Deployment hardening
+#### 6. Deployment Hardening
 
 - standardize reverse proxy deployment with trusted forwarded-header handling
 - enforce TLS, secure headers, and approved origins in enterprise profiles
@@ -96,13 +111,7 @@ This phase covers:
 - add signed release artifacts and build provenance
 - define container and host hardening baselines
 
-### Suggested implementation order
-
-1. make PostgreSQL the validated production backend
-2. add audit export and retention controls
-3. harden CI, packaging, reverse proxy, and release workflows
-
-### Exit criteria
+### Exit Criteria
 
 - enterprise runtime is validated on PostgreSQL
 - audit events can be exported and verified externally
@@ -122,27 +131,21 @@ This phase covers:
 
 ### Deliverables
 
-#### 7. Policy formalization
+#### 7. Policy Formalization
 
-- define a policy matrix for feature availability by profile and environment
-- move approval requirements, connector restrictions, and dangerous-action rules into declarative policy
+- keep the policy matrix declarative and test-backed
+- move approval requirements, connector restrictions, dangerous-action rules, and network-warfare rules into reviewable policy
 - add policy validation tests and startup posture validation against the matrix
 - make policy exceptions explicit and auditable
 
-#### 8. Multi-user / tenant isolation
+#### 8. Multi-User / Tenant Isolation
 
-- define workspace or tenant boundaries for cases, incidents, evidence, connectors, and logs
+- define workspace or tenant boundaries for cases, incidents, evidence, artifacts, connectors, antivirus state, and logs
 - add tenant-aware authorization and query filtering
 - separate secrets, exports, and audit streams by tenant or workspace
 - document isolation expectations for shared deployments
 
-### Suggested implementation order
-
-1. formalize the policy matrix and enforcement model
-2. add workspace or tenant identifiers to enterprise records
-3. enforce tenant-aware filtering across API and reporting surfaces
-
-### Exit criteria
+### Exit Criteria
 
 - policy behavior is deterministic, testable, and reviewable
 - data and connector actions can be scoped per workspace or tenant
@@ -150,17 +153,17 @@ This phase covers:
 
 ## Practical Next Step
 
-The next implementation block should be `Phase 1`.
+The next implementation block should remain Phase 1.
 
 Why:
 
 - it reduces the biggest enterprise risk fastest
 - it creates the identity and secret foundations needed for later work
-- it prevents us from scaling insecure patterns into PostgreSQL, HA, or multi-tenant design
+- it prevents insecure patterns from scaling into PostgreSQL, HA, or multi-tenant design
 
 ## Initial Task Breakdown
 
-### Phase 1 backlog
+### Phase 1 Backlog
 
 - add `auth/providers` module for API key and OIDC backends
 - add `secrets/providers` module for environment and enterprise secret stores
@@ -168,18 +171,15 @@ Why:
 - define claim-to-role mapping rules
 - add tests for mixed API key and OIDC deployments
 
-### Phase 2 backlog
+### Phase 2 Backlog
 
 - add PostgreSQL-only readiness validator for enterprise mode
 - add audit export command and retention job
 - add SBOM and dependency scan CI jobs
 - document reverse proxy reference deployment
 
-### Phase 3 backlog
+### Phase 3 Backlog
 
-- create policy matrix document and validation tests
-- add workspace ID to enterprise records
-- prototype tenant-aware case and artifact filtering
-
-updated
-
+- keep policy matrix document and validation tests current
+- extend workspace ID coverage to remaining shared records
+- prototype tenant-aware case, artifact, and antivirus filtering

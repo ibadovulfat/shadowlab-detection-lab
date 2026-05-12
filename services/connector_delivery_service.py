@@ -110,8 +110,17 @@ class ConnectorDeliveryService:
 
     def _post_json(self, url: str, headers: dict[str, str], payload: Any, *, verify: bool) -> dict[str, Any]:
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=self.timeout, verify=verify)
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+                verify=verify,
+                allow_redirects=False,
+            )
             snippet = (response.text or "").strip()[:400]
+            if 300 <= response.status_code < 400:
+                return {"ok": False, "status": str(response.status_code), "detail": "Redirects are not followed"}
             if response.ok:
                 return {"ok": True, "status": str(response.status_code), "detail": snippet or "ok"}
             return {"ok": False, "status": str(response.status_code), "detail": snippet or "request failed"}

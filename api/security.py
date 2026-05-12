@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -62,8 +65,22 @@ AUTH_FAILURE_LIMIT = 8
 AUTH_FAILURE_WINDOW_SECONDS = 60
 DANGEROUS_ACTION_LIMIT = 6
 DANGEROUS_ACTION_WINDOW_SECONDS = 60
-_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
-_SIGNATURE_NONCES: dict[str, float] = {}
+# `_RATE_LIMIT_BUCKETS` is kept as a module-level alias to the live
+# in-memory bucket store inside `services.rate_limit_backend`. Tests
+# clear it between cases to reset window state; production code routes
+# through the backend interface in `_enforce_request_rate_limit`.
+from services.rate_limit_backend import _MEMORY_BUCKETS as _RATE_LIMIT_BUCKETS  # noqa: E402,F401
+# Use an OrderedDict so the lab-profile fallback gets O(1) FIFO eviction
+# via `popitem(last=False)` and the lock keeps compound check-then-pop
+# operations atomic under uvicorn's worker-thread pool. Production /
+# corp profiles route nonces through the DB-backed store and never
+# touch this dict.
+_SIGNATURE_NONCES: "OrderedDict[str, float]" = OrderedDict()
+_SIGNATURE_NONCES_LOCK = threading.Lock()
+# Hard cap so a flood of partially-failed signed requests cannot OOM
+# the lab-profile in-memory nonce store. Older entries are evicted on
+# insert; corp/prod profiles use the DB-backed store and never hit this.
+_SIGNATURE_NONCES_MAX = 10_000
 DEFAULT_SIGNED_REQUEST_WINDOW_SECONDS = 60
 logger = logging.getLogger(__name__)
 POLICY_PROFILES = POLICY_MATRIX
@@ -137,6 +154,24 @@ def _validate_settings(settings: SecuritySettings) -> SecuritySettings:
         raise ValueError("SHADOWLAB_API_KEY_SHA256 must be a valid 64-character SHA-256 digest")
     if settings.api_key_role not in ALLOWED_ROLES:
         raise ValueError("SHADOWLAB_API_KEY_ROLE must be one of: viewer, analyst, admin")
+    # Prevent role-confusion through a shared token: if the same secret is
+    # bound to two roles, `_resolve_context` returns whichever role iterates
+    # first in `dict.items()` (insertion order). Fail closed at config-load
+    # so an operator never accidentally maps the same key to `viewer` AND
+    # `admin` and gets silent privilege escalation later.
+    for label, mapping in (
+        ("SHADOWLAB_API_KEYS", settings.api_keys),
+        ("SHADOWLAB_API_KEYS_SHA256", settings.api_keys_sha256),
+    ):
+        seen: dict[str, str] = {}
+        for role, token in (mapping or {}).items():
+            existing = seen.get(token)
+            if existing is not None and existing != role:
+                raise ValueError(
+                    f"{label} reuses the same token across roles ({existing}, {role}); "
+                    "each role must have its own unique secret"
+                )
+            seen[token] = role
     if settings.auth_required and not any(
         [settings.api_key, settings.api_key_sha256, settings.api_keys, settings.api_keys_sha256, settings.oidc_enabled]
     ):
@@ -256,14 +291,12 @@ def build_capabilities(role: str, settings: SecuritySettings | None = None) -> d
         "can_manage_incidents": is_analyst,
         "can_view_persistence": is_analyst,
         "can_view_quarantine": is_analyst,
-        "can_view_deception": is_analyst,
         "can_view_evidence": is_analyst,
         "can_manage_persistence": is_admin and active.enable_dangerous_actions and bool(profile.get("dangerous_actions", False)),
         "can_manage_process_actions": is_admin and active.enable_dangerous_actions and bool(profile.get("dangerous_actions", False)),
         "can_run_triage": is_analyst,
         "can_manage_quarantine": is_admin and active.enable_dangerous_actions and bool(profile.get("dangerous_actions", False)),
         "can_manage_alerts": is_admin and active.enable_dangerous_actions,
-        "can_manage_deception": is_admin and bool(profile.get("deception", False)),
         "can_capture_evidence": is_analyst,
         "can_delete_evidence": is_admin and active.enable_dangerous_actions and active.allow_destructive_file_delete and bool(profile.get("dangerous_actions", False)),
         "can_run_sniffer": is_analyst,
@@ -311,8 +344,17 @@ def policy_requires_approval() -> bool:
     return bool(get_active_policy().get("approval_required", False))
 
 
-def policy_allows_deception() -> bool:
-    return bool(get_active_policy().get("deception", False))
+def _is_health_path(path: str) -> bool:
+    """Return True only for the canonical `/health` probe.
+
+    The legacy check used `path in {"/health"}` — exact match by design,
+    but easy to drift: a future refactor adding `/health/` or `/HEALTH`
+    would silently open an auth-bypass. Centralise the predicate so the
+    match stays anchored and obvious. We deliberately reject trailing
+    slashes (FastAPI strict-slashes is on, so `/health/` would 404
+    anyway, but it shouldn't pre-empt the auth gate).
+    """
+    return path == "/health"
 
 
 def require_api_key(
@@ -322,7 +364,7 @@ def require_api_key(
     x_shadowlab_workspace: str | None = Header(default=None),
     x_shadowlab_actor: str | None = Header(default=None),
 ) -> SecurityContext:
-    if request.url.path in {"/health"}:
+    if _is_health_path(request.url.path):
         return SecurityContext(token="", signing_secret="", role="public")
     bearer_token = _extract_bearer_token(authorization)
     provided = x_api_key or bearer_token
@@ -376,6 +418,15 @@ def require_api_key(
     return context
 
 
+# Methods that mutate server state. MUST stay in sync with
+# `_MUTATING_METHODS` in api/middleware/security_headers.py — the two
+# sets together gate signed-request validation, MFA enforcement,
+# Origin allow-list, audit logging, and approval consumption. Forgetting
+# `PUT` here historically allowed admin-only endpoints (antivirus
+# credentials, YARA policy, AV lists) to skip every one of those checks.
+_MUTATING_METHODS_AUTH = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
 async def require_analyst_or_admin(
     request: Request,
     context: SecurityContext = Depends(require_api_key),
@@ -391,8 +442,9 @@ async def require_analyst_or_admin(
             workspace_id=_context_workspace(request),
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analyst or admin role required")
-    if request.method.upper() in {"POST", "PATCH", "DELETE"}:
+    if request.method.upper() in _MUTATING_METHODS_AUTH:
         await _require_signed_request(request, context)
+        _require_mfa_when_enforced(request, context)
     return context
 
 
@@ -411,9 +463,52 @@ async def require_admin(
             workspace_id=_context_workspace(request),
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
-    if request.method.upper() in {"POST", "PATCH", "DELETE"}:
+    if request.method.upper() in _MUTATING_METHODS_AUTH:
         await _require_signed_request(request, context)
+        _require_mfa_when_enforced(request, context)
     return context
+
+
+# Paths the MFA enforcement gate exempts so the operator can actually
+# COMPLETE a verification without already holding a verified session.
+_MFA_EXEMPT_PATHS = frozenset({"/auth/mfa/verify", "/auth/mfa/enroll", "/auth/mfa/status"})
+
+
+def _require_mfa_when_enforced(request: Request, context: SecurityContext) -> None:
+    """Block mutating requests when MFA is required but no recent verify exists."""
+    if request.url.path in _MFA_EXEMPT_PATHS:
+        return
+    try:
+        from services import mfa_service
+    except Exception:
+        return
+    if not mfa_service.enforce_for_role(context.role):
+        return
+    subject = (
+        (context.subject or "").strip().lower()
+        or (context.actor or "").strip().lower()
+        or (context.token_id or "").strip().lower()
+    )
+    token_id = (context.token_id or "").strip()
+    if not subject or not token_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="MFA verification required but session has no subject/token id",
+        )
+    if not mfa_service.session_is_valid(subject, token_id):
+        _log_auth_event(
+            "mfa_required",
+            "denied",
+            context.role,
+            _client_ip(request),
+            request.url.path,
+            "MFA verification required for this role",
+            workspace_id=_context_workspace(request),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="MFA verification required — POST /auth/mfa/verify first",
+        )
 
 
 def ensure_dangerous_actions_enabled(request: Request) -> None:
@@ -507,34 +602,57 @@ def ensure_delete_enabled(request: Request) -> None:
         )
 
 
-def ensure_deception_enabled(request: Request) -> None:
-    if not policy_allows_deception():
-        _log_auth_event(
-            "policy_denied",
-            "denied",
-            _context_role(request),
-            _client_ip(request),
-            request.url.path,
-            f"Deception controls disabled by active profile: {get_active_policy_name()}",
-            workspace_id=_context_workspace(request),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Deception controls are disabled by active policy profile: {get_active_policy_name()}",
-        )
-
-
 def safe_child_path(base_dir: Path, filename: str, allowed_suffixes: Iterable[str] | None = None) -> Path:
+    # `Path(filename).name != filename` rejects any separator or drive
+    # component; NUL/control chars (which would later trip Path resolve
+    # on POSIX but not Windows) are filtered explicitly.
     if not filename or Path(filename).name != filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
-    target = (base_dir / filename).resolve()
-    resolved_base = base_dir.resolve()
-    if resolved_base not in target.parents and target != resolved_base:
+    if any(ord(ch) < 0x20 for ch in filename) or "\x00" in filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
+    # Use os.path.realpath on both ends so an attacker who plants a
+    # symlink inside `base_dir` (e.g. via an earlier artifact upload)
+    # cannot use Path.resolve()'s case-folding to escape the root on
+    # Windows. `is_relative_to` keeps the comparison anchored at the
+    # canonical parent rather than the parents chain (which fails for
+    # nested case-different mount points).
+    target = Path(os.path.realpath(str(base_dir / filename)))
+    resolved_base = Path(os.path.realpath(str(base_dir)))
+    if target != resolved_base and not target.is_relative_to(resolved_base):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Path traversal rejected")
     if allowed_suffixes:
         suffix = target.suffix.lower()
         if suffix not in {item.lower() for item in allowed_suffixes}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File type not allowed")
+    # Final TOCTOU guard: between the realpath() above and the time the
+    # caller actually opens the file, an attacker with write access
+    # inside `base_dir` could swap the target for a symlink pointing
+    # elsewhere. `lstat` checks the *direct* entry without following
+    # links, so a symlink at the exact target path is rejected outright.
+    # The file may still legitimately not exist yet (e.g. caller is
+    # about to create it) — in that case the lstat raises FileNotFoundError
+    # and we let the call proceed.
+    try:
+        stat_result = os.lstat(str(target))
+    except FileNotFoundError:
+        return target
+    except OSError:
+        # Permission denied / other lstat failures are not a bypass
+        # vector; let the caller deal with the I/O error on open().
+        return target
+    # On POSIX `S_ISLNK` covers symlinks; on Windows, `lstat` returns
+    # reparse-point info — `stat.S_ISLNK` correctly identifies symlinks
+    # but NOT junctions. Checking `st_file_attributes` for
+    # FILE_ATTRIBUTE_REPARSE_POINT (0x400) catches junctions too.
+    import stat as _stat
+    is_reparse = False
+    if hasattr(stat_result, "st_file_attributes"):
+        is_reparse = bool(stat_result.st_file_attributes & 0x400)
+    if _stat.S_ISLNK(stat_result.st_mode) or is_reparse:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Symbolic links and reparse points are not allowed under this root",
+        )
     return target
 
 
@@ -585,7 +703,31 @@ def _resolve_oidc_context(provided: str) -> SecurityContext | None:
     try:
         principal = identity_provider.authenticate_token(provided)
         _ensure_identity_not_revoked(principal)
-    except Exception:
+    except Exception as exc:
+        # Three-tier visibility on OIDC rejection:
+        #
+        # 1. WARNING-level log line with the exception class — production
+        #    operators NEED this to debug "valid IdP, rejected JWT"
+        #    incidents without enabling DEBUG globally. Token content is
+        #    NOT logged (PII / replay risk).
+        # 2. Prometheus counter bucketed by exception class so a SOC can
+        #    alarm on `rate(shadowlab_oidc_rejections_total[5m])` and
+        #    spot IdP key rotations or token-forgery probes.
+        # 3. The auth-failure path already increments
+        #    `shadowlab_auth_failures_total`, so this metric is
+        #    deliberately additive (denominator vs reason).
+        logger.warning("OIDC token rejected: %s: %s", type(exc).__name__, str(exc)[:200])
+        try:
+            from api.observability import default_registry as _registry
+            _registry.counter(
+                "shadowlab_oidc_rejections_total",
+                {"reason": type(exc).__name__[:48]},
+                help="OIDC token rejections bucketed by exception class.",
+            ).inc()
+        except Exception:
+            # Metrics are best-effort; never let an observability bug
+            # turn an OIDC denial into a 500.
+            pass
         return None
     return SecurityContext(
         token=_token_identifier(provided),
@@ -611,12 +753,39 @@ def _token_identifier(value: str) -> str:
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
+    """Parse an `Authorization: Bearer <token>` header per RFC 6750 §2.1.
+
+    Strict version of the original loose parser:
+
+    * The scheme prefix must be exactly `Bearer` (case-insensitive,
+      RFC 7235 §2.1) followed by exactly one ASCII space. Tab, CR/LF,
+      and multiple spaces are rejected — they have no legitimate use
+      and have historically been HTTP-smuggling vectors.
+    * The token body itself MUST match the `b64token` grammar
+      (`[A-Za-z0-9._~+/=-]+`). Anything outside that set is a malformed
+      header, not a recoverable case.
+
+    Returns `None` for missing / malformed headers so the caller falls
+    through to the usual auth-failure path (with rate limiting).
+    """
     if not authorization:
         return None
-    prefix = "bearer "
-    if authorization.lower().startswith(prefix):
-        return authorization[len(prefix):].strip()
-    return None
+    raw = str(authorization)
+    # Reject CR/LF / NUL up front (HTTP smuggling).
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in raw):
+        return None
+    parts = raw.split(" ")
+    if len(parts) != 2:
+        return None
+    scheme, token = parts
+    if scheme.lower() != "bearer" or not token:
+        return None
+    # RFC 6750 b64token grammar — keep this conservative; real JWTs and
+    # API keys all sit inside this class.
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~+/=-")
+    if not all(ch in allowed for ch in token):
+        return None
+    return token
 
 
 def _client_ip(request: Request | None) -> str:
@@ -687,38 +856,51 @@ def _bucket_key(bucket: str, subject: str) -> str:
 
 
 def _prune_rate_limit(bucket: str, subject: str, window_seconds: int) -> list[float]:
-    now = time.time()
-    cutoff = now - window_seconds
-    conn = db.create_connection()
-    if conn is not None:
-        try:
-            db.prune_rate_limit_hits(conn, bucket, subject, cutoff)
-            count = db.count_rate_limit_hits(conn, bucket, subject, cutoff)
-            return [now] * count
-        finally:
-            conn.close()
-    if security_settings.policy_profile in {"corp", "prod"}:
-        return [now] * window_seconds
-    key = _bucket_key(bucket, subject)
-    values = [ts for ts in _RATE_LIMIT_BUCKETS.get(key, []) if now - ts < window_seconds]
-    _RATE_LIMIT_BUCKETS[key] = values
-    return values
+    # Returns a synthetic list whose length is the live hit count so the
+    # caller's `len(hits) >= limit` check works against any backend. We
+    # don't need the actual timestamps anywhere else.
+    try:
+        from services.rate_limit_backend import active_backend
+        count = active_backend().prune_and_count(bucket, subject, window_seconds)
+    except Exception:
+        logger.exception("rate-limit prune_and_count failed; failing closed for corp/prod")
+        if security_settings.policy_profile in {"corp", "prod"}:
+            return [time.time()] * (window_seconds + 1)
+        return []
+    return [time.time()] * int(count)
 
 
 def _record_rate_limit_hit(bucket: str, subject: str) -> None:
-    now = time.time()
-    conn = db.create_connection()
-    if conn is not None:
+    try:
+        from services.rate_limit_backend import active_backend
+        active_backend().record_hit(bucket, subject)
+    except Exception:
+        logger.exception("rate-limit record_hit failed; failing closed for corp/prod")
+        if security_settings.policy_profile in {"corp", "prod"}:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Rate limit state store unavailable",
+            )
+
+
+def _rate_limit_subject(request: Request) -> str:
+    """Subject key for rate-limit buckets.
+
+    IPv4 → exact address. IPv6 → /64 prefix (a single IPv6 host gets a
+    /64 block from its ISP, so per-address limits are trivially bypassed
+    by rolling addresses inside the same /64).
+    """
+    raw = _client_ip(request)
+    try:
+        ip_obj = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+    if isinstance(ip_obj, ipaddress.IPv6Address):
         try:
-            db.record_rate_limit_hit(conn, bucket, subject, now)
-            return
-        finally:
-            conn.close()
-    if security_settings.policy_profile in {"corp", "prod"}:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Rate limit state store unavailable")
-    key = _bucket_key(bucket, subject)
-    hits = _RATE_LIMIT_BUCKETS.setdefault(key, [])
-    hits.append(now)
+            return str(ipaddress.ip_network(f"{ip_obj}/64", strict=False).network_address) + "/64"
+        except ValueError:
+            return raw
+    return str(ip_obj)
 
 
 def _enforce_request_rate_limit(
@@ -729,7 +911,7 @@ def _enforce_request_rate_limit(
     window_seconds: int,
     detail: str,
 ) -> None:
-    subject = _client_ip(request)
+    subject = _rate_limit_subject(request)
     marker = f"{bucket}:{subject}"
     consumed = getattr(request.state, "_rate_limit_consumed", set())
     if marker in consumed:
@@ -744,7 +926,7 @@ def _enforce_request_rate_limit(
 
 
 def _enforce_auth_failure_limit(request: Request) -> None:
-    subject = _client_ip(request)
+    subject = _rate_limit_subject(request)
     hits = _prune_rate_limit("auth_fail", subject, AUTH_FAILURE_WINDOW_SECONDS)
     if len(hits) >= AUTH_FAILURE_LIMIT:
         detail = "Too many failed authentication attempts. Retry after a short cooldown."
@@ -753,12 +935,46 @@ def _enforce_auth_failure_limit(request: Request) -> None:
 
 
 def _record_auth_failure(request: Request, *, detail: str) -> None:
-    subject = _client_ip(request)
+    subject = _rate_limit_subject(request)
     _record_rate_limit_hit("auth_fail", subject)
     _log_auth_event("auth_failure", "denied", "", subject, request.url.path, detail, workspace_id=_context_workspace(request))
+    # Surface the failure into the Prometheus surface so a SOC can alarm
+    # on `rate(shadowlab_auth_failures_total[5m]) > threshold` instead of
+    # having to tail audit logs in real time. Bucketed by failure reason
+    # (missing/invalid/etc.) so it doesn't collapse into a single bar.
+    try:
+        from api.observability import default_registry as _registry
+        _registry.counter(
+            "shadowlab_auth_failures_total",
+            {"reason": str(detail or "unknown")[:64]},
+            help="Authentication rejections, labelled by failure reason.",
+        ).inc()
+    except Exception:
+        # Metrics are best-effort; never block the auth path on an
+        # exposition bug.
+        pass
 
 
 def _log_auth_event(event_type: str, outcome: str, role: str, client_ip: str, path: str, detail: str, workspace_id: str = "default") -> None:
+    """Persist an auth_log row + bump the Prometheus counter.
+
+    Connection-per-event is intentionally kept simple — adding a real
+    pool here means touching every code path that owns its own
+    `db.create_connection()`. For high-throughput deployments operators
+    should switch SQLite → PostgreSQL (the adapter is already there)
+    and the connection cost drops to a pgbouncer round-trip.
+    """
+    # Always surface to metrics first — even if the DB write fails, the
+    # SOC can graph the failure trend from `/metrics`.
+    try:
+        from api.observability import default_registry as _registry
+        _registry.counter(
+            "shadowlab_auth_events_total",
+            {"event_type": str(event_type or "unknown")[:48], "outcome": str(outcome or "unknown")[:24]},
+            help="Authentication / authorization events bucketed by type and outcome.",
+        ).inc()
+    except Exception:
+        pass
     try:
         import database as db
 
@@ -829,6 +1045,35 @@ def _ensure_identity_not_revoked(principal: IdentityPrincipal) -> None:
         conn.close()
 
 
+SHADOWLAB_SIGNING_HKDF_INFO = b"shadowlab-signing-v1"
+
+
+def derive_signing_secret(api_key: str) -> bytes:
+    """Derive a request-signing key from the raw API key via HKDF-SHA256.
+
+    Layered key separation: the bearer token authenticates the principal
+    while a *different* key (HKDF derivation of the same root secret)
+    signs request bodies. A leak of one no longer trivially compromises
+    the other downstream (e.g. an audit-log dump containing signing
+    material can't be replayed as a bearer token).
+
+    Both the API and the desktop client run the same derivation, so the
+    raw API key remains the only secret the operator has to handle.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    if not api_key:
+        return b""
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=SHADOWLAB_SIGNING_HKDF_INFO,
+    )
+    return hkdf.derive(api_key.encode("utf-8"))
+
+
 async def _require_signed_request(request: Request, context: SecurityContext) -> None:
     if not security_settings.auth_required or not context.signing_secret:
         return
@@ -868,20 +1113,33 @@ async def _require_signed_request(request: Request, context: SecurityContext) ->
             "Expired request signature timestamp",
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Signed request timestamp expired")
-    nonce_key = f"{context.role}:{nonce}"
+    # Per-token (not per-role) keying so two admins with different API
+    # keys cannot accidentally invalidate each other's nonces, and a
+    # leaked viewer nonce can never be replayed against an admin token.
+    nonce_scope = context.token_id or context.role
+    nonce_key = f"{nonce_scope}:{nonce}"
     _prune_signature_nonces(now)
-    payload = "\n".join(
-        [
-            request.method.upper(),
-            request.url.path,
-            _canonical_query_string(request),
-            _request_body_sha256(await request.body()),
-            timestamp,
-            nonce,
-        ]
-    )
-    expected = hmac.new(context.signing_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    body_bytes = await request.body()
+    method_path_query = [
+        request.method.upper(),
+        request.url.path,
+        _canonical_query_string(request),
+    ]
+    payload_canonical = "\n".join(method_path_query + [_request_body_sha256(body_bytes), timestamp, nonce])
+    payload_raw = "\n".join(method_path_query + [_request_body_sha256_raw(body_bytes), timestamp, nonce])
+    # Four expected signatures: {HKDF, legacy raw API key} × {canonical
+    # body hash, raw body hash}. Constant-time compare against each in
+    # turn so neither rollout dimension (signing-key derivation OR body-
+    # hash form) blocks the other.
+    derived = derive_signing_secret(context.signing_secret)
+    raw_key = context.signing_secret.encode("utf-8")
+    candidates: list[str] = []
+    for body_payload in (payload_canonical, payload_raw):
+        if derived:
+            candidates.append(hmac.new(derived, body_payload.encode("utf-8"), hashlib.sha256).hexdigest())
+        candidates.append(hmac.new(raw_key, body_payload.encode("utf-8"), hashlib.sha256).hexdigest())
+    matched = any(hmac.compare_digest(signature, candidate) for candidate in candidates)
+    if not matched:
         _log_auth_event(
             "signature_failure",
             "denied",
@@ -900,9 +1158,19 @@ async def _require_signed_request(request: Request, context: SecurityContext) ->
     else:
         if security_settings.policy_profile in {"corp", "prod"}:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Signed request state store unavailable")
-        reserved = nonce_key not in _SIGNATURE_NONCES
-        if reserved:
-            _SIGNATURE_NONCES[nonce_key] = float(now)
+        # Atomic check-and-insert: without the lock a race between two
+        # worker threads with the same nonce key would let both pass
+        # the membership test, defeating replay protection. FIFO
+        # eviction via OrderedDict makes the cap bound truly O(1).
+        with _SIGNATURE_NONCES_LOCK:
+            reserved = nonce_key not in _SIGNATURE_NONCES
+            if reserved:
+                if len(_SIGNATURE_NONCES) >= _SIGNATURE_NONCES_MAX:
+                    try:
+                        _SIGNATURE_NONCES.popitem(last=False)
+                    except KeyError:
+                        pass
+                _SIGNATURE_NONCES[nonce_key] = float(now)
     if not reserved:
         _log_auth_event(
             "signature_replay",
@@ -916,15 +1184,55 @@ async def _require_signed_request(request: Request, context: SecurityContext) ->
 
 
 def _canonical_query_string(request: Request) -> str:
+    """Produce a deterministic, RFC3986-encoded query-string for HMAC signing.
+
+    Two behaviours matter here:
+
+    * Decode-then-re-encode every (key, value) pair so the client and
+      server agree on the exact byte string even when the wire form
+      uses different but equivalent percent-encodings (`%2C` vs `,`,
+      `+` vs `%20`).
+    * Treat a non-UTF-8 query string as a client error (400) instead of
+      letting `errors="strict"` bubble up as a generic 500, which both
+      leaks a stack trace and skews uptime metrics.
+    """
+    from urllib.parse import quote as _quote
+
     raw_query = request.scope.get("query_string", b"")
     if not raw_query:
         return ""
-    pairs = parse_qsl(raw_query.decode("utf-8", errors="strict"), keep_blank_values=True)
+    try:
+        decoded = raw_query.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query string is not valid UTF-8") from exc
+    pairs = parse_qsl(decoded, keep_blank_values=True)
     pairs.sort()
-    return "&".join(f"{key}={value}" for key, value in pairs)
+    return "&".join(f"{_quote(key, safe='')}={_quote(value, safe='')}" for key, value in pairs)
 
 
 def _request_body_sha256(body: bytes) -> str:
+    """Canonical body hash used in the signed-request payload.
+
+    Two forms exist in the wild:
+
+    1. **Canonical-JSON form** (legacy desktop client): the client
+       computes `json.dumps(payload, sort_keys=True, separators=(",", ":"),
+       ensure_ascii=False).encode("utf-8")` itself, hashes that, then
+       hands the *unsorted* JSON to the HTTP library — which means the
+       bytes on the wire differ from the bytes the client hashed.
+       Server-side we parse and re-canonicalize to recover the same
+       form the client computed.
+
+    2. **Raw-bytes form** (new): client signs the literal byte string
+       it puts on the wire. No parse/re-serialize round-trip, which
+       avoids drift on edge cases (NaN/Inf, non-BMP escapes, integer
+       overflow on some JS clients).
+
+    The signed-request validator accepts BOTH hashes so a fleet of
+    mixed clients can roll over without coordinated cutovers. This
+    function returns the canonical-JSON form; `_request_body_sha256_raw`
+    returns the raw-bytes form.
+    """
     if not body:
         return hashlib.sha256(b"").hexdigest()
     try:
@@ -934,6 +1242,13 @@ def _request_body_sha256(body: bytes) -> str:
     else:
         canonical = json.dumps(loaded, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _request_body_sha256_raw(body: bytes) -> str:
+    """SHA-256 of the literal request body — see `_request_body_sha256`."""
+    if not body:
+        return hashlib.sha256(b"").hexdigest()
+    return hashlib.sha256(body).hexdigest()
 
 
 def _prune_signature_nonces(now: int | None = None) -> None:
@@ -947,10 +1262,13 @@ def _prune_signature_nonces(now: int | None = None) -> None:
             conn.close()
     if security_settings.policy_profile in {"corp", "prod"}:
         return
-    stale = [
-        key
-        for key, timestamp in _SIGNATURE_NONCES.items()
-        if current - float(timestamp) > security_settings.signed_request_window_seconds
-    ]
-    for key in stale:
-        _SIGNATURE_NONCES.pop(key, None)
+    # Snapshot under the lock so the iterator isn't invalidated by a
+    # concurrent insert in `_require_signed_request`.
+    with _SIGNATURE_NONCES_LOCK:
+        stale = [
+            key
+            for key, timestamp in _SIGNATURE_NONCES.items()
+            if current - float(timestamp) > security_settings.signed_request_window_seconds
+        ]
+        for key in stale:
+            _SIGNATURE_NONCES.pop(key, None)

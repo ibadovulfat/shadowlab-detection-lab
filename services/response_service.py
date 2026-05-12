@@ -23,10 +23,11 @@ ALLOWED_OSSEC_ACTIONS = {
 
 class ResponseOrchestrator:
     def __init__(self):
+        self.base_dir = Path(__file__).resolve().parent.parent
         self.protected_names = {"system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe"}
         configured_home = os.environ.get("SHADOWLAB_OSSEC_HOME", "").strip()
-        candidates = [Path(configured_home) if configured_home else None, Path(__file__).resolve().parent.parent.parent / "ossec-hids-main"]
-        self.ossec_home = next((candidate for candidate in candidates if candidate and candidate.exists()), Path(__file__).resolve().parent.parent.parent / "ossec-hids-main")
+        candidates = [Path(configured_home) if configured_home else None, self.base_dir.parent / "ossec-hids-main"]
+        self.ossec_home = next((candidate for candidate in candidates if candidate and candidate.exists()), self.base_dir.parent / "ossec-hids-main")
 
     def suspend(self, pid: int, process_name: str, workspace_id: str = "default") -> dict[str, Any]:
         return self._execute("SUSPEND", pid, process_name, lambda proc: proc.suspend(), workspace_id=workspace_id)
@@ -59,8 +60,8 @@ class ResponseOrchestrator:
         if not path or not Path(path).exists():
             return {"ok": False, "message": "Executable path unavailable for quarantine"}
         try:
-            quarantine_dir = Path("shadowlab_quarantine")
-            quarantine_dir.mkdir(exist_ok=True)
+            quarantine_dir = self.base_dir / "shadowlab_quarantine"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
             src = Path(path)
             dest = quarantine_dir / self._unique_quarantine_name(src.name)
             shutil.copy2(src, dest)
@@ -310,7 +311,7 @@ class ResponseOrchestrator:
         candidate = Path(filename).name or "artifact.bin"
         stem = Path(candidate).stem or "artifact"
         suffix = Path(candidate).suffix
-        quarantine_dir = Path("shadowlab_quarantine")
+        quarantine_dir = self.base_dir / "shadowlab_quarantine"
         target = quarantine_dir / candidate
         if not target.exists():
             return candidate

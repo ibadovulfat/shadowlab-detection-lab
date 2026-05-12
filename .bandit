@@ -1,0 +1,13 @@
+# Bandit configuration — keeps local `bandit -r .` runs in sync with CI.
+# Excludes the vendored virtualenv and tests (which intentionally exercise
+# subprocess / unsafe-by-design code paths).
+
+[bandit]
+exclude_dirs = ["venv", ".git", "tests", "scripts", "ci_artifacts"]
+
+# Findings the team has reviewed and accepted with documented justification:
+#   B404 import subprocess  — required for OSSEC active-response, EDR live response.
+#   B603 subprocess without shell=True — already the safer pattern; finding is too noisy.
+#   B607 partial path  — Windows tooling lives at unstable absolute paths (powershell.exe, netsh).
+#   B311 random — used only for jitter / sample IDs, not security tokens.
+skips = ["B404", "B603", "B607", "B311"]

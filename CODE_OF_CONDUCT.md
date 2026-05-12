@@ -11,6 +11,7 @@ We want the project to be a safe place for:
 - feature proposals
 - documentation improvements
 - responsible security coordination
+- careful cybersecurity engineering review
 
 ## Expected Behavior
 
@@ -20,6 +21,7 @@ Examples of behavior that help this project:
 - focus feedback on the work, not the person
 - assume good intent while staying clear and direct
 - share reproducible technical detail when reporting problems
+- handle dual-use security topics responsibly
 - accept correction and collaboration in good faith
 
 ## Unacceptable Behavior
@@ -30,7 +32,9 @@ Examples of unacceptable behavior:
 - personal attacks or insulting language
 - discrimination or hateful conduct
 - doxxing or publishing private information without consent
-- spam, trolling, or intentionally disruptive behavior
+- spam or intentionally disruptive behavior
+- encouraging use of ShadowLab against systems without authorization
+- posting real secrets, private keys, or sensitive operational data in public project spaces
 
 ## Scope
 
@@ -39,6 +43,7 @@ This Code of Conduct applies to:
 - GitHub issues
 - pull requests
 - discussions tied to this repository
+- security coordination related to this repository
 - other project-related communication spaces maintained by the project owner
 
 ## Enforcement
@@ -48,6 +53,3 @@ Project maintainers may remove, edit, or reject comments, issues, pull requests,
 ## Reporting
 
 For conduct concerns, contact the repository owner through GitHub or use the security contact path documented in [SECURITY.md](SECURITY.md) when appropriate.
-
-updated
-

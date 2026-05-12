@@ -1,18 +1,18 @@
 ## Summary
 
-- what changed
-- why it changed
+- What changed
+- Why it changed
 
 ## Validation
 
-- [ ] tested locally
-- [ ] updated docs if needed
-- [ ] added or updated tests if needed
+- [ ] Tested locally (`python -m pytest <relevant tests>`)
+- [ ] `python -m py_compile` clean on touched modules
+- [ ] Docs updated when routes, policy, or workflows change
+- [ ] No secrets, tokens, or real customer data in the diff
+- [ ] For security-sensitive paths: signed request, auth, RBAC, or audit impact reviewed
 
 ## Notes
 
-- config, rollout, or migration notes
-- screenshots for UI changes if relevant
-
-updated
-
+- Config, rollout, or migration notes
+- Screenshots for UI changes if relevant
+- Linked issues: `Fixes #` / `Refs #`

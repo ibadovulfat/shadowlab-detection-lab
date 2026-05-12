@@ -4,18 +4,24 @@ import asyncio
 import hmac
 import hashlib
 import os
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import api.main
 import api.security as security
+from api.utils import runtime_state
+from api.utils.path_guards import validate_quarantine_restore_paths
 from api.security import SecuritySettings
+from services.antivirus import AntivirusService
+from services.antivirus.aegis_provider import AegisProvider
+from services.antivirus.sentinel_provider import SentinelProvider
 from services.identity_provider import IdentityPrincipal
 
 
@@ -97,7 +103,6 @@ class SecurityValidationTests(unittest.TestCase):
         self.assertFalse(caps["can_manage_process_actions"])
         self.assertFalse(caps["can_manage_quarantine"])
         self.assertFalse(caps["can_manage_network_warfare"])
-        self.assertFalse(caps["can_manage_deception"])
 
 
 class AuthApiTests(unittest.TestCase):
@@ -613,15 +618,6 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("approved OSSEC import roots", response.text)
 
-    def test_honeypot_deploy_rejects_path_traversal_filename(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
-        with mock.patch.object(security, "security_settings", settings):
-            response = self.client.post("/deception/honeypot/deploy", json={"filename": "..\\..\\evil.txt"})
-        self.assertEqual(response.status_code, 422)
-        self.assertTrue(
-            "path separators" in response.text or "letters, digits, dot, underscore, and dash" in response.text
-        )
-
     def test_whids_file_import_accepts_paths_within_shadowlab_ingest_root(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
         approved_path = Path(api.main.WHIDS_IMPORT_ROOT) / "unit-whids.json"
@@ -925,15 +921,60 @@ class AuthApiTests(unittest.TestCase):
             request = FakeRequest(b"A" * (api.main.DEFAULT_MAX_REQUEST_BODY_BYTES + 1))
             with mock.patch.object(api.main, "security_settings", make_settings(auth_required=False, policy_profile="lab")):
                 with mock.patch.object(security, "security_settings", make_settings(auth_required=False, policy_profile="lab")):
-                    with self.assertRaises(HTTPException) as exc:
-                        await api.main.add_security_headers(request, mock.AsyncMock())
-            self.assertEqual(exc.exception.status_code, 413)
+                    response = await api.main.add_security_headers(request, mock.AsyncMock())
+            self.assertEqual(response.status_code, 413)
 
         asyncio.run(_call())
 
     def test_import_request_body_limit_allows_larger_import_payload_window(self) -> None:
         request = SimpleNamespace(url=SimpleNamespace(path="/integrations/mitre/import/file"))
         self.assertEqual(api.main._request_body_limit_bytes(request), api.main.IMPORT_MAX_REQUEST_BODY_BYTES)
+
+    def test_body_limit_streams_and_aborts_on_chunked_oversize(self) -> None:
+        """DoS regression: a client that lies about Content-Length (or omits it
+        and uses chunked transfer) must be aborted as soon as the streamed
+        body crosses the limit — NOT after buffering the entire payload.
+
+        Before this fix the middleware did `body = await request.body()`,
+        which drained the full ASGI stream into RAM before checking size.
+        A client could advertise `Content-Length: 10` (passing the header
+        check) and then stream gigabytes. The new middleware drains chunk by
+        chunk and raises 413 on the first chunk that pushes the cumulative
+        total past the limit — so RAM growth is capped regardless of what
+        the client claims up front.
+        """
+        chunks_yielded = {"count": 0}
+
+        class StreamingRequest:
+            def __init__(self) -> None:
+                self.method = "POST"
+                # No /import in the path → falls under DEFAULT_MAX limit (1 MB).
+                self.url = SimpleNamespace(path="/enterprise/connectors/dispatch", scheme="http")
+                # No content-length header — the header-level check is
+                # skipped and the streaming check is the only line of defense.
+                self.headers: dict[str, str] = {}
+                self.client = SimpleNamespace(host="127.0.0.1")
+
+            async def stream(self):
+                # Try to push 20 × 1 MB chunks through a 1 MB limit. A
+                # non-streaming middleware would buffer all 20 MB before
+                # failing; the streaming middleware must abort by the 2nd.
+                for _ in range(20):
+                    chunks_yielded["count"] += 1
+                    yield b"A" * 1_048_576
+
+        async def _call() -> None:
+            request = StreamingRequest()
+            with mock.patch.object(api.main, "security_settings", make_settings(auth_required=False, policy_profile="lab")):
+                with mock.patch.object(security, "security_settings", make_settings(auth_required=False, policy_profile="lab")):
+                    response = await api.main.add_security_headers(request, mock.AsyncMock())
+            self.assertEqual(response.status_code, 413)
+
+        asyncio.run(_call())
+        # Must abort before consuming all 20 chunks. Two chunks of 1 MB each
+        # already exceed the 1 MB limit, so we should see at most 2 chunks
+        # yielded (3 leaves wiggle room; 20 would mean no early-abort).
+        self.assertLessEqual(chunks_yielded["count"], 3)
 
     def test_failed_mutation_releases_reserved_approval(self) -> None:
         db = __import__("database")
@@ -1050,6 +1091,189 @@ class AuthApiTests(unittest.TestCase):
         self.assertEqual(payload["fusion"]["verdict"], "malicious")
         self.assertEqual(payload["response_plan"]["auto"][0]["action"], "suspend")
         self.assertEqual(payload["applied"]["executed"][0]["action"], "suspend")
+
+
+class SecurityHardeningRegressionTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        runtime_state.set_alert_webhook_url("")
+
+    def test_quarantine_restore_rejects_targets_outside_allowed_roots(self) -> None:
+        base_dir = Path(api.main.BASE_DIR)
+        quarantine_path = str((base_dir / "shadowlab_quarantine" / "unit.bin").resolve(strict=False))
+        if os.name == "nt":
+            outside_target = str((Path(os.environ.get("WINDIR", "C:\\Windows")) / "System32" / "drivers" / "etc" / "hosts").resolve(strict=False))
+        else:
+            outside_target = str(Path("/etc/hosts").resolve(strict=False))
+        with self.assertRaises(HTTPException):
+            validate_quarantine_restore_paths(quarantine_path, outside_target, base_dir)
+
+    def test_bootstrap_alert_webhook_drops_unsafe_env_url(self) -> None:
+        with mock.patch.dict(os.environ, {"SHADOWLAB_ALERT_WEBHOOK": "http://169.254.169.254/latest/meta-data"}, clear=False):
+            runtime_state.bootstrap_alert_webhook_url()
+        self.assertEqual(runtime_state.get_alert_webhook_url(), "")
+
+    def test_security_middleware_rejects_tls_without_500(self) -> None:
+        from api.middleware.security_headers import register
+
+        settings = make_settings(auth_required=False, require_tls=True, noauth_default_role="admin")
+        app = FastAPI()
+
+        @app.get("/protected")
+        def protected() -> dict[str, bool]:
+            return {"ok": True}
+
+        register(
+            app,
+            security_settings=settings,
+            default_body_limit=api.main.DEFAULT_MAX_REQUEST_BODY_BYTES,
+            import_body_limit=api.main.IMPORT_MAX_REQUEST_BODY_BYTES,
+            consume_pending_approval=lambda _request, _status: None,
+            audit_mutating_request=lambda _request, _status: None,
+        )
+        response = TestClient(app, raise_server_exceptions=False).get("/protected")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("HTTPS is required", response.text)
+
+    def test_antivirus_scan_file_rejects_targets_outside_approved_roots(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        if os.name == "nt":
+            target_path = str((Path(os.environ.get("WINDIR", "C:\\Windows")) / "System32" / "drivers" / "etc" / "hosts").resolve(strict=False))
+        else:
+            target_path = str(Path("/etc/hosts").resolve(strict=False))
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = TestClient(api.main.app).post("/antivirus/scan/file", json={"file_path": target_path})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("approved antivirus scan roots", response.text)
+
+    def test_custom_yara_dry_run_rejects_targets_outside_approved_roots(self) -> None:
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")
+        with tempfile.TemporaryDirectory() as allowed_dir, tempfile.TemporaryDirectory() as outside_dir:
+            outside_sample = Path(outside_dir) / "sample.bin"
+            outside_sample.write_bytes(b"unit-test")
+            with mock.patch.dict(os.environ, {"SHADOWLAB_ANTIVIRUS_SCAN_ROOTS": allowed_dir}, clear=False):
+                with mock.patch.object(api.main, "security_settings", settings):
+                    with mock.patch.object(security, "security_settings", settings):
+                        response = TestClient(api.main.app).post(
+                            "/antivirus/yara/custom/unit_rule/dry-run",
+                            json={"sample_path": str(outside_sample)},
+                        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("approved antivirus scan roots", response.text)
+
+    def test_network_warfare_scan_requires_feature_gate(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            enable_network_warfare=False,
+            noauth_default_role="admin",
+        )
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = TestClient(api.main.app).post(
+                    "/network/warfare/scan",
+                    json={"ip_range": "192.168.1.0/24"},
+                )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Network warfare controls are disabled", response.text)
+
+    def test_network_warfare_scan_rejects_oversized_ranges(self) -> None:
+        settings = make_settings(
+            auth_required=False,
+            enable_network_warfare=True,
+            noauth_default_role="admin",
+        )
+        with mock.patch.object(api.main, "security_settings", settings):
+            with mock.patch.object(security, "security_settings", settings):
+                response = TestClient(api.main.app).post(
+                    "/network/warfare/scan",
+                    json={"ip_range": "10.0.0.0/8"},
+                )
+        self.assertEqual(response.status_code, 422)
+
+    def test_sentinel_provider_rejects_untrusted_env_binary_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            fake_bin = base_dir / "fake-clamscan.exe"
+            fake_bin.write_text("echo fake", encoding="utf-8")
+            trusted_dir = base_dir / "trusted-bin"
+            trusted_dir.mkdir(parents=True, exist_ok=True)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SHADOWLAB_AV_STRICT_BINARY_TRUST": "true",
+                    "SHADOWLAB_AV_TRUSTED_BIN_DIRS": str(trusted_dir),
+                    "SHADOWLAB_SENTINEL_PATH": str(fake_bin),
+                },
+                clear=False,
+            ):
+                provider = SentinelProvider(base_dir)
+            self.assertIsNone(provider.binary_path)
+
+    def test_aegis_provider_rejects_untrusted_source_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            untrusted_source = base_dir / "untrusted-kicomav"
+            (untrusted_source / "kicomav" / "plugins").mkdir(parents=True, exist_ok=True)
+            trusted_source = base_dir / "trusted-kicomav"
+            trusted_source.mkdir(parents=True, exist_ok=True)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SHADOWLAB_AV_STRICT_SOURCE_TRUST": "true",
+                    "SHADOWLAB_AV_TRUSTED_SOURCE_DIRS": str(trusted_source),
+                    "SHADOWLAB_AEGIS_ROOT": str(untrusted_source),
+                },
+                clear=False,
+            ):
+                provider = AegisProvider(base_dir)
+            self.assertIsNone(provider.source_root)
+            self.assertIsNone(provider.plugins_path)
+
+
+class AntivirusFusionSafetyTests(unittest.TestCase):
+    def test_scan_file_returns_degraded_when_any_provider_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            sample = base_dir / "sample.bin"
+            sample.write_bytes(b"unit-test")
+            service = AntivirusService(base_dir)
+
+            class _ErrorProvider:
+                def scan_file(self, path: Path, *, policy: dict[str, object]) -> dict[str, object]:
+                    return {"status": "error", "engine": "Aegis Core", "error": "provider offline"}
+
+            class _CleanProvider:
+                def scan_file(self, path: Path, *, policy: dict[str, object]) -> dict[str, object]:
+                    return {"status": "clean", "engine": "Sentinel CLI", "scan_time_ms": 12}
+
+            service.providers["aegis_core"] = _ErrorProvider()
+            service.providers["sentinel_cli"] = _CleanProvider()
+            result = service.scan_file(sample)
+            self.assertEqual(result["status"], "degraded")
+            self.assertEqual(result["summary"]["fused_verdict"], "degraded")
+            self.assertIn("aegis_core", result["summary"]["provider_errors"])
+
+    def test_scan_file_keeps_infected_status_when_one_provider_hits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            sample = base_dir / "sample.bin"
+            sample.write_bytes(b"unit-test")
+            service = AntivirusService(base_dir)
+
+            class _ErrorProvider:
+                def scan_file(self, path: Path, *, policy: dict[str, object]) -> dict[str, object]:
+                    return {"status": "error", "engine": "Aegis Core", "error": "provider offline"}
+
+            class _InfectedProvider:
+                def scan_file(self, path: Path, *, policy: dict[str, object]) -> dict[str, object]:
+                    return {"status": "infected", "engine": "Sentinel CLI", "malware_name": "Unit.Test.Signature", "scan_time_ms": 15}
+
+            service.providers["aegis_core"] = _ErrorProvider()
+            service.providers["sentinel_cli"] = _InfectedProvider()
+            result = service.scan_file(sample)
+            self.assertEqual(result["status"], "infected")
+            self.assertTrue(result["summary"]["infected"])
+            self.assertIn("sentinel_cli", result["summary"]["provider_hits"])
 
 
 if __name__ == "__main__":

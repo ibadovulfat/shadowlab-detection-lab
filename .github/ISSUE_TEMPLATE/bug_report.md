@@ -12,10 +12,12 @@ Describe the problem clearly.
 
 ## Environment
 
-- OS:
-- Python version:
-- Start mode:
-- Auth enabled:
+- ShadowLab version (e.g. `v0.0.8`):
+- OS (e.g. `Windows 11 23H2`):
+- Python version (e.g. `3.11.7`):
+- Start mode (`python app.py` / `start_shadowlab_auth.ps1` / packaged exe):
+- Auth enabled (`true` / `false`):
+- Policy profile (`lab` / `corp` / `prod`):
 
 ## Steps To Reproduce
 
@@ -34,6 +36,4 @@ What happened instead?
 ## Logs Or Screenshots
 
 Add traceback output, request details, or screenshots if they help.
-
-updated
-
+Redact any API keys, hostnames, or operational data before posting.

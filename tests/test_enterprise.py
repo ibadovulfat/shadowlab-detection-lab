@@ -9,6 +9,7 @@ from unittest import mock
 import database as db
 from services.connector_delivery_service import ConnectorDeliveryService
 from services.enterprise_service import EnterpriseService
+from services.hids_integration_service import HidsIntegrationService
 from services.graph_service import GraphService
 from services.investigation_service import InvestigationService
 from services.timeline_service import TimelineService
@@ -54,11 +55,6 @@ class EnterpriseServiceTests(unittest.TestCase):
         self.assertFalse(any(int(item["id"]) == int(beta["id"]) for item in tenant_a))
         self.assertTrue(any(int(item["id"]) == int(beta["id"]) for item in tenant_b))
 
-    def test_canary_bypass_assessment_lists_tests(self) -> None:
-        result = self.service.assess_canary_bypass()
-        self.assertEqual(result["status"], "ready")
-        self.assertGreaterEqual(len(result["tests"]), 3)
-
     def test_connector_dispatch_queues_failures(self) -> None:
         self.service.configure_connector(
             name="splunk",
@@ -84,6 +80,29 @@ class EnterpriseServiceTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "invalid_config")
+
+    def test_connector_delivery_does_not_follow_redirects(self) -> None:
+        class _Response:
+            status_code = 302
+            ok = False
+            text = ""
+
+        delivery = ConnectorDeliveryService(timeout=1)
+        with mock.patch("services.connector_delivery_service.requests.post", return_value=_Response()) as post:
+            result = delivery.deliver(
+                {"name": "shuffle", "config_json": {"webhook_url": "https://example.com/hook"}},
+                {"title": "Unit test"},
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "302")
+        self.assertFalse(post.call_args.kwargs["allow_redirects"])
+
+    def test_whids_manager_session_does_not_follow_redirects(self) -> None:
+        service = HidsIntegrationService(db)
+        session, _base_url = service._build_whids_session("https://example.com/", "token", verify_tls=True)
+        with mock.patch("requests.sessions.Session.request") as request:
+            session.get("https://example.com/endpoints")
+        self.assertFalse(request.call_args.kwargs["allow_redirects"])
 
     def test_connector_config_is_encrypted_at_rest_and_redacted_on_read(self) -> None:
         self.service.configure_connector(

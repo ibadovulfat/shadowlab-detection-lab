@@ -1,6 +1,6 @@
 # ShadowLab Production Runbook
 
-This runbook covers the hardened runtime path for ShadowLab, with emphasis on auth, integrity, observability, secret handling, integrations, and recovery.
+This runbook covers the hardened runtime path for ShadowLab, with emphasis on auth, integrity, observability, secret handling, integrations, containment controls, and recovery.
 
 ## Startup Modes
 
@@ -14,6 +14,12 @@ Auth-enabled local startup:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
+```
+
+Lab-only startup with destructive and network-warfare controls:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1 -EnableDangerousActions -EnableNetworkWarfare
 ```
 
 Windows service-oriented startup:
@@ -34,6 +40,10 @@ Relevant environment variables:
 - `SHADOWLAB_NOAUTH_DEFAULT_ROLE`
 - `SHADOWLAB_RESTORE_INTEGRATION_RUNTIME`
 - `SHADOWLAB_OSSEC_HOME`
+- `SHADOWLAB_ENABLE_DANGEROUS_ACTIONS`
+- `SHADOWLAB_ENABLE_NETWORK_WARFARE`
+- `SHADOWLAB_ALLOW_FILE_DELETE`
+- `SHADOWLAB_SIGNED_REQUEST_WINDOW_SECONDS`
 
 Recommended practice:
 
@@ -42,7 +52,8 @@ Recommended practice:
 3. keep `prod` and `corp` profiles fully authenticated
 4. use no-auth elevated defaults only for local lab work on loopback
 5. treat approval IDs as part of change control
-6. in corp/prod, start from `deploy/shadowlab.prod.env.example`
+6. keep destructive actions and network warfare disabled unless explicitly testing in an isolated lab
+7. in corp/prod, start from `deploy/shadowlab.prod.env.example`
 
 ## Signed Requests
 
@@ -76,7 +87,7 @@ Routes:
 - `GET /enterprise/secrets/status`
 - `POST /enterprise/secrets/rotate`
 
-Refresh integrity after known-good baseline changes. Rotate secrets when credentials, webhook settings, or signing material changes.
+Refresh integrity after known-good baseline changes. Rotate secrets when credentials, webhook settings, connector secrets, or signing material changes.
 
 ## Observability And Reporting
 
@@ -86,6 +97,7 @@ Routes:
 - `GET /enterprise/report/security-ops`
 - `POST /enterprise/report/security-ops/export`
 - `GET /enterprise/abuse/summary`
+- `GET /metrics`
 
 Offline audit export helper:
 
@@ -93,12 +105,13 @@ Offline audit export helper:
 
 The audit bundle contains auth logs, action audit logs, external request logs, secret rotation history, connector queue state, and schema migrations with a local SHA-256 manifest.
 
-Generated incident reports now include:
+Generated incident reports include:
 
 - executive summary and correlation narrative
 - prioritized findings and ATT&CK coverage notes
 - response guidance and analyst note rollup
 - telemetry snapshot and security-event highlights
+- antivirus and containment context when present
 - artifact inventory from `shadowlab_out`
 
 If the desktop `Artifacts` view and the exported report disagree, regenerate the monitor artifacts first and then refresh integrity.
@@ -109,6 +122,18 @@ YARA operations:
 - `GET /yara/local/errors`
 - `GET /yara/local/analytics`
 - `GET /yara/local/update-workflow`
+
+## Network And Containment Controls
+
+Keep the privilege model clear:
+
+- packet capture: analyst/admin, signed request, audited reason from the desktop
+- ARP discovery: analyst/admin discovery workflow
+- network blocker: admin-only, dangerous actions enabled, network warfare enabled
+- antivirus response: policy-gated and audited
+- destructive file delete: disabled unless `SHADOWLAB_ALLOW_FILE_DELETE=true`
+
+Never enable network-warfare or destructive actions on a production or shared network unless the environment is explicitly designed for that test.
 
 ## Deployment Preflight
 
@@ -131,7 +156,7 @@ History cleanup and rotation guide:
 OSSEC active-response validation:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\validate_ossec_active_response.ps1 -OssecHome C:\Users\ulfat\Documents\ossec-hids-main
+powershell -ExecutionPolicy Bypass -File scripts\validate_ossec_active_response.ps1 -OssecHome <ossec_home>
 ```
 
 ShadowLab live API and `WHIDS` smoke test:
@@ -163,12 +188,11 @@ Useful checks:
 - `python scripts/smoke_test_postgres_runtime.py`
 - `python scripts/validate_enterprise_postgres_readiness.py`
 - `python scripts/export_audit_bundle.py`
+- `python scripts/validate_detection_corpus.py`
 
 ## Operator Notes
 
 - the desktop `Security Ops` tab is the safest place to review posture
 - approval requirements depend on both profile and feature flags
-- keep raw keys out of shell history and repository files
-
-updated
-
+- keep raw keys out of shell history, screenshots, tickets, and repository files
+- use `Artifacts` for handoff verification before sharing reports

@@ -14,6 +14,7 @@ import monitor_core
 import requests
 
 from core.normalization import normalize_telemetry_row
+from services.outbound_security import normalize_outbound_url
 
 
 class TelemetryMonitoringService:
@@ -212,7 +213,12 @@ class CollectorTelemetryBridge:
             "otlp_http_endpoint",
             "http://127.0.0.1:4318",
         )
-        return str(endpoint).rstrip("/")
+        normalized = normalize_outbound_url(endpoint)
+        if not normalized:
+            # Fail-safe fallback: keep telemetry export on loopback when config
+            # or env contains an unsafe target.
+            return "http://127.0.0.1:4318"
+        return str(normalized).rstrip("/")
 
     def _collector_binary_path(self) -> str:
         return str(os.environ.get("SHADOWLAB_OTELCOL_BIN") or self._collector_runtime().get("binary_path", "")).strip()
@@ -229,10 +235,14 @@ class CollectorTelemetryBridge:
         return Path(configured)
 
     def _collector_zpages_url(self) -> str:
-        return str(
+        configured = str(
             os.environ.get("SHADOWLAB_OTEL_ZPAGES_URL")
             or self._collector_runtime().get("zpages_url", "http://127.0.0.1:55679/debug/servicez")
         )
+        normalized = normalize_outbound_url(configured)
+        if not normalized:
+            return "http://127.0.0.1:55679/debug/servicez"
+        return str(normalized)
 
     def _request_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}

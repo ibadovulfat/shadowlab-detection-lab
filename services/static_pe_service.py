@@ -14,31 +14,66 @@ except Exception:
 
 
 PEFILE_AVAILABLE = pefile is not None
-SUSPICIOUS_IMPORTS = {
-    "VirtualAlloc": 6,
-    "VirtualAllocEx": 8,
-    "VirtualProtect": 6,
-    "VirtualProtectEx": 8,
-    "WriteProcessMemory": 10,
-    "ReadProcessMemory": 6,
-    "CreateRemoteThread": 12,
+
+# Tier-1: APIs whose presence is itself a high-confidence malware
+# capability signal. Direct NT syscalls and dynamic-code-trust probes
+# are almost never used by legitimate user-mode applications — they
+# typically appear in syscall-hopping shellcode loaders, manual mappers,
+# EDR-evasion frameworks (Inceptor / DInvoke), and ETW/AMSI bypass
+# loaders. Score these full-weight.
+SUSPICIOUS_IMPORTS_TIER1 = {
     "NtAllocateVirtualMemory": 12,
     "NtWriteVirtualMemory": 12,
     "NtProtectVirtualMemory": 12,
     "NtCreateThreadEx": 14,
-    "QueueUserAPC": 8,
-    "SetWindowsHookEx": 8,
-    "AmsiScanBuffer": 10,
-    "EtwEventWrite": 10,
+    "NtMapViewOfSection": 12,
+    "NtUnmapViewOfSection": 10,
     "WldpQueryDynamicCodeTrust": 10,
-    "WinExec": 6,
-    "ShellExecuteA": 6,
-    "ShellExecuteW": 6,
-    "URLDownloadToFileA": 8,
-    "URLDownloadToFileW": 8,
+    "EtwEventWriteEx": 8,
+    "AmsiScanBufferUTF16": 10,
+    "QueueUserAPC": 8,
+    "SetWindowsHookEx": 6,
 }
+
+# Tier-2: APIs that ARE used by malware but ALSO have legitimate uses
+# in modern Windows runtimes — V8/JavaScriptCore JIT (VirtualAlloc /
+# VirtualProtect), the .NET CLR (WriteProcessMemory for native interop),
+# AMSI-aware applications (AmsiScanBuffer is required by anything that
+# wants to be defender-friendly), shell launchers (ShellExecute), etc.
+# These score MUCH lower on their own; their weight only fires when
+# combined with another red flag (RWX section, high entropy, no
+# signature, suspicious filename) — see `_tier2_score` for the gating.
+SUSPICIOUS_IMPORTS_TIER2 = {
+    "VirtualAlloc": 3,
+    "VirtualAllocEx": 5,
+    "VirtualProtect": 3,
+    "VirtualProtectEx": 5,
+    "WriteProcessMemory": 6,
+    "ReadProcessMemory": 4,
+    "CreateRemoteThread": 8,
+    "AmsiScanBuffer": 3,
+    "EtwEventWrite": 3,
+    "WinExec": 4,
+    "ShellExecuteA": 2,
+    "ShellExecuteW": 2,
+    "URLDownloadToFileA": 6,
+    "URLDownloadToFileW": 6,
+}
+
+# Backwards-compatible flat dict for callers that still iterate over
+# SUSPICIOUS_IMPORTS (tests, the static-pe API surface, etc.). New code
+# should read the tiered dicts directly.
+SUSPICIOUS_IMPORTS = {**SUSPICIOUS_IMPORTS_TIER2, **SUSPICIOUS_IMPORTS_TIER1}
+
 SUSPICIOUS_SECTION_NAMES = {".x", ".packed", ".aspack", ".upx0", ".upx1", ".vmp0", ".vmp1", ".stub"}
 HIGH_RISK_DOTNET_IMPORTS = {"VirtualAlloc", "VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread", "AmsiScanBuffer"}
+
+# DoS guard: malicious PE files with a giant import directory or
+# pathological resource tree can pin pefile in CPU for minutes. Cap
+# how many imports we score (we already truncate to 8 in the scoring
+# math; this caps the parse-side cost too).
+_MAX_IMPORTS_INSPECTED = 4096
+_MAX_SECTIONS_INSPECTED = 96
 
 
 class StaticPEAnalysisService:
@@ -65,7 +100,12 @@ class StaticPEAnalysisService:
 
         sections = self._sections(pe)
         imports = self._imports(pe)
-        suspicious_imports = [name for name in imports["functions"] if name in SUSPICIOUS_IMPORTS]
+        # DoS guard — cap pathological PE files.
+        import_functions = list(imports.get("functions", []) or [])[: _MAX_IMPORTS_INSPECTED]
+        sections = sections[: _MAX_SECTIONS_INSPECTED]
+        suspicious_imports = [name for name in import_functions if name in SUSPICIOUS_IMPORTS]
+        tier1_imports = [name for name in import_functions if name in SUSPICIOUS_IMPORTS_TIER1]
+        tier2_imports = [name for name in import_functions if name in SUSPICIOUS_IMPORTS_TIER2]
         overlay_size = self._overlay_size(pe, target)
         entry_section = self._entry_point_section(pe)
         entry_in_last_section = bool(entry_section and sections and entry_section == sections[-1]["name"])
@@ -89,11 +129,36 @@ class StaticPEAnalysisService:
                 "High-entropy section(s): " + ", ".join(f"{item['name']}={item['entropy']}" for item in high_entropy_sections[:4])
             )
 
-        if suspicious_imports:
-            score += min(35, sum(SUSPICIOUS_IMPORTS[name] for name in suspicious_imports[:8]))
-            reasons.append(f"Suspicious imports: {', '.join(suspicious_imports[:8])}")
+        # Tier-1 imports: full weight, no gating. These are direct NT
+        # syscall primitives + dynamic-code-trust probes — legitimate
+        # software essentially never imports them by name.
+        if tier1_imports:
+            tier1_score = min(35, sum(SUSPICIOUS_IMPORTS_TIER1[name] for name in tier1_imports[:8]))
+            score += tier1_score
+            reasons.append(f"Tier-1 suspicious imports: {', '.join(tier1_imports[:8])}")
 
-        if self._has_injection_chain(suspicious_imports):
+        # Tier-2 imports: GATED. These APIs are commonly used by
+        # legitimate JIT engines (V8, .NET CLR), defender-aware apps
+        # (AMSI), shell launchers, and updaters. Imports alone aren't
+        # enough — they only contribute meaningfully when at least one
+        # corroborating red flag is present (RWX section, high-entropy
+        # section, suspicious section name). Without a corroborator, a
+        # mere "VirtualAlloc + VirtualProtect" pattern in `msedgewebview2`
+        # / `node.exe` / `chrome.exe` is ignored.
+        tier2_raw = sum(SUSPICIOUS_IMPORTS_TIER2[name] for name in tier2_imports[:8])
+        has_corroborator = bool(rwx_sections) or bool(high_entropy_sections) or bool(
+            [s for s in sections if s["name"].lower() in SUSPICIOUS_SECTION_NAMES]
+        )
+        if tier2_imports and has_corroborator:
+            tier2_score = min(20, tier2_raw)
+            score += tier2_score
+            reasons.append(f"Tier-2 imports (with RWX/entropy/odd-section corroborator): {', '.join(tier2_imports[:8])}")
+        elif tier2_imports:
+            # Surface but don't score — analysts still see what
+            # capabilities the binary exposes.
+            reasons.append(f"Tier-2 imports (no corroborator, ignored): {', '.join(tier2_imports[:8])}")
+
+        if self._has_injection_chain(suspicious_imports) and has_corroborator:
             score += 12
             reasons.append("Suspicious import chain supports remote memory/thread injection")
 
@@ -138,7 +203,10 @@ class StaticPEAnalysisService:
             score += signature_score
             reasons.append(signature_reason)
 
-        score = min(100, score)
+        # Clamp into [0, 100] — `_signature_risk` may legitimately return
+        # a negative delta (trusted-publisher reduction), and a clean
+        # signed binary should never finish at a negative score.
+        score = max(0, min(100, score))
         confidence = "high" if score >= 55 else "medium" if score >= 25 else "low"
         severity = "critical" if score >= 75 else "high" if score >= 50 else "medium" if score >= 25 else "low"
         verdict = "suspicious" if score >= 35 else "informational"
@@ -308,46 +376,68 @@ class StaticPEAnalysisService:
         }
 
     def _signature_status(self, target: Path) -> dict[str, str]:
+        """Authenticode status via the shared in-process helper.
+
+        Replaces the per-scan PowerShell spawn. The helper caches by
+        `(path, mtime, size)` so folder-watcher scans don't pay the
+        Authenticode cost more than once per file version. Result
+        shape matches the legacy dict so the rest of this file is
+        unchanged.
+        """
         if platform.system() != "Windows" or not os.path.exists(target):
             return {"status": "unknown"}
         try:
-            escaped_path = str(target).replace("'", "''")
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                (
-                    "$sig=Get-AuthenticodeSignature -FilePath "
-                    f"'{escaped_path}'; "
-                    "[pscustomobject]@{Status=$sig.Status;StatusMessage=$sig.StatusMessage;Signer=$sig.SignerCertificate.Subject} | ConvertTo-Json -Compress"
-                ),
-            ]
-            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="ignore", timeout=10)
-            stripped = output.strip()
-            if stripped.startswith("{"):
-                import json
-
-                payload = json.loads(stripped)
-                return {
-                    "status": str(payload.get("Status", "unknown") or "unknown"),
-                    "status_message": str(payload.get("StatusMessage", "") or ""),
-                    "signer_subject": str(payload.get("Signer", "") or ""),
-                }
-            return {"status": stripped or "unknown"}
+            from services.antivirus.authenticode import signature_status as _sig_lookup
+            info = _sig_lookup(target)
+            return {
+                "status": str(info.get("status", "unknown") or "unknown"),
+                "status_message": "",
+                "signer_subject": str(info.get("signer_subject", "") or ""),
+                "trusted_publisher": bool(info.get("trusted_publisher", False)),
+            }
         except Exception:
             return {"status": "unknown"}
 
-    def _signature_risk(self, signature: dict[str, str], target: Path, version_info: dict[str, Any]) -> tuple[int, str]:
+    def _signature_risk(self, signature: dict[str, Any], target: Path, version_info: dict[str, Any]) -> tuple[int, str]:
+        """Translate Authenticode state into a score delta.
+
+        Key change vs the legacy version:
+
+        * A **trusted-publisher** signature now produces a *negative*
+          delta — i.e. it actively REDUCES the heuristic score. Without
+          this, signed Microsoft-Corporation binaries that legitimately
+          use V8 JIT (`msedgewebview2.exe`) or .NET interop
+          (`PowerShell.exe`) easily crossed the "critical" threshold and
+          got eskalated to malicious. Now a trusted publisher offsets
+          ~30 points of heuristic noise — enough to drag a clean signed
+          binary back below the "high" severity gate while still
+          letting a real malicious-but-signed sample register.
+        * The "helper/payload/stub" filename heuristic is GATED on the
+          publisher NOT being trusted. `MicrosoftEdgeUpdateStub.exe` and
+          `WebView2RuntimeInstaller.exe` are legitimate, and the
+          filename pattern alone should never penalize them.
+        """
         status = str(signature.get("status", "unknown") or "unknown")
         signer = str(signature.get("signer_subject", "") or "")
+        trusted = bool(signature.get("trusted_publisher", False))
         company_name = str(version_info.get("CompanyName", "") or "")
         filename = target.name.lower()
 
         if status in {"Valid", "ValidCatalogSigned"}:
+            if trusted:
+                # Strong negative — equivalent to wiping out the noise
+                # from RWX + Tier-2 imports on a Microsoft-signed
+                # platform binary. Score is clamped at min(0, …) by the
+                # caller's `min(100, max(0, score + signature_score))`
+                # in the scoring loop so we can't drive it negative.
+                return -30, f"Signed by trusted publisher ({signer or 'verified'})"
             if any(token in filename for token in ("payload", "helper", "dropper", "stub")):
+                # Only penalize when publisher is NOT trusted — legit
+                # Microsoft updaters use *Stub.exe* / *Helper.exe* names.
                 return 6, "Signed binary uses a suspicious filename pattern"
             if company_name and signer and company_name.lower() not in signer.lower():
                 return 4, "Signer subject does not match embedded company metadata"
+            # Generic-signed-but-not-trusted: no score change.
             return 0, ""
         if status in {"NotSigned", "UnknownError", "HashMismatch", "NotTrusted"}:
             return 6, f"Authenticode status: {status}"

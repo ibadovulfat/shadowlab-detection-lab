@@ -1,6 +1,6 @@
 # Detect It Easy Integration
 
-ShadowLab uses Detect It Easy in the `Static Analysis` workspace for packer, cryptor, compiler, and structural file inspection.
+ShadowLab uses Detect It Easy in the `File Analysis` workspace for packer, cryptor, compiler, and structural PE inspection.
 
 ## Backend Order
 
@@ -27,7 +27,7 @@ Install it with:
 pip install die-python
 ```
 
-Implementation lives in [services/die_binding_service.py](/C:/Users/ulfat/Documents/shadowlab-detection-lab/services/die_binding_service.py).
+Implementation lives in [services/die_binding_service.py](../services/die_binding_service.py).
 
 ## Optional CLI Backend
 
@@ -47,7 +47,4 @@ In the desktop client, a native-ready state is shown as `Runtime: ready (native)
 
 ## Packaging Notes
 
-[desktop/shadowlab.spec](/C:/Users/ulfat/Documents/shadowlab-detection-lab/desktop/shadowlab.spec) bundles the `die-python` database when the package is installed.
-
-updated
-
+[desktop/shadowlab.spec](../desktop/shadowlab.spec) bundles the `die-python` database when the package is installed.

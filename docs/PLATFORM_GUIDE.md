@@ -1,251 +1,239 @@
 # ShadowLab Platform Guide
 
-ShadowLab is a locally operated, API-first cybersecurity operations platform whose day-to-day experience is centered around the desktop client. The project is no longer just a simple monitoring tool. In its current state, it provides a unified workspace for collecting host telemetry, investigating suspicious processes, reviewing persistence artifacts, enriching findings with threat intelligence and MITRE ATT&CK context, creating cases, running investigations, exporting reports, and maintaining security-operations oversight.
+ShadowLab is a locally operated, API-first cybersecurity operations platform centered on a PySide6 desktop console and a FastAPI backend. It is designed for Windows-focused investigation, detection engineering, incident response practice, malware triage, enterprise casework, and security-operations readiness.
 
-The goal of this document is to present the project in a more product-oriented way. It explains what ShadowLab is today, which major areas already exist, and how an operator can use the platform in practice.
+The goal of this guide is to describe the current product shape: what exists now, how the major workspaces fit together, and how an operator should move through the platform.
 
 ## What ShadowLab Is Today
 
-At the center of the platform is a FastAPI backend. All core operations are managed there. The PySide6 desktop client acts as the operator-facing surface for that backend. This gives the project a comfortable local lab workflow while still keeping the architecture open for future clients and automation.
+At the center of the platform is a FastAPI backend. It owns authentication, RBAC, policy checks, signed mutations, approval handling, route orchestration, background workers, persistence, and security posture validation. The desktop client is the operator-facing layer that turns those capabilities into a practical investigation workflow.
 
-The current product combines multiple layers. On one side, it includes telemetry, process investigation, response, persistence review, and threat-intelligence workflows. On the other side, it now includes an enterprise-style investigation layer with case boards, assignments, tasks, notes, stories, activity feeds, notification handling, scoped graph correlation, executive export, and security-operations controls.
+The current product combines multiple layers:
+
+- live and collected host telemetry
+- process investigation and risk scoring
+- persistence discovery and remediation
+- file and malware analysis
+- WHIDS and OSSEC/HIDS integration workflows
+- network telemetry, packet capture, ARP discovery, graph correlation, and timeline reconstruction
+- antivirus-style verdict, quarantine, and containment operations
+- enterprise case management and ATT&CK coverage
+- artifacts, reports, audit history, integrity, observability, and secret posture
 
 ## What Has Already Been Built
 
-This repository has moved beyond the prototype stage. The main layers are already in place.
+The repository has moved beyond a prototype. The main layers are already in place.
 
-The backend layer has been established with routes for process investigation, triage, threat enrichment, persistence review, incidents, graph views, timeline views, artifacts, deception workflows, telemetry-fabric integration, and enterprise operations.
+The backend layer has route modules for auth, processes, persistence, evidence, quarantine, network, network-warfare, hosts, graph, timeline, antivirus, artifacts, audit, integrations, enterprise, MITRE, observability, security operations, and related utility workflows.
 
-The desktop layer has also been expanded significantly. It is no longer only a simple process viewer. It now includes many tabs, role-aware controls, auth-enabled access, improved scrolling behavior, and a broader enterprise operator workflow.
+The desktop layer now exposes a role-aware operator console with tabs for `Dashboards`, `WHIDS`, `HIDS`, `Overview`, `Processes`, `Persistence`, `File Analysis`, `Network`, `Graph`, `Timeline`, `Antivirus`, `History`, `Artifacts`, `Enterprise`, `Security Ops`, and `About / FAQ`.
 
-The enterprise investigation layer was built specifically around the ShadowLab workflow. It includes case boards, assignments, checklist-style tasks, notes, stories, pins, saved views, case activity, scoped graph correlation, timeline support, a notification center, and investigation report export.
+The enterprise investigation layer is case-first. It includes case boards, assignments, checklist-style tasks, notes, stories, pins, saved views, activity, scoped graph correlation, ATT&CK rollups, timeline support, notifications, and report export.
 
-Important security improvements were also added. The role-based API key flow was corrected. The desktop no longer behaves like a fake admin when backend auth is disabled. Approval handling was hardened with a reserve-and-finalize model to protect one-time-use actions. Heavy enterprise refresh behavior was also softened to avoid UI freezes.
+Important security improvements are already present:
+
+- role-aware API key auth with `viewer`, `analyst`, and `admin`
+- signed authenticated `POST`, `PATCH`, and `DELETE` requests
+- structured approval handling for higher-risk actions
+- policy profiles for `lab`, `corp`, and `prod`
+- feature flags for dangerous actions and network warfare
+- replay protection and rate limiting
+- trusted-proxy and origin controls
+- encrypted secret storage and rotation posture checks
+- audit mirroring from desktop consoles
 
 ## How The Architecture Is Organized
 
-The `api/` directory contains the main routes. The `services/` directory holds the investigation, graph, response, telemetry, incident, and enterprise logic. `database.py` manages the persistence layer in a way that supports both local SQLite and PostgreSQL migration paths. `desktop/` contains the operator UI. `docs/` stores usage and operational documentation. `scripts/` contains auth startup, packaging, migration, and verification helpers.
+The `api/` directory contains route modules, middleware, schemas, observability helpers, bootstrap wiring, and background workers. The `services/` directory holds investigation, antivirus, graph, response, telemetry, enterprise, identity, MITRE, malware analysis, static PE, secret, webhook, and integrity logic. `database.py` manages SQLite and PostgreSQL-ready persistence. `desktop/` contains the operator UI. `docs/` stores operational documentation. `scripts/` contains startup, packaging, migration, backup, audit, and validation helpers.
 
-The strength of this design is that the UI and backend remain separate. That means the product is not just a single interface, but a platform that can be extended over time.
+The strength of this design is separation: the UI is an operator surface, while the backend remains the policy and orchestration authority.
 
 ## Desktop Sections
 
-`Dashboards` and `Overview` give the operator a broad picture of current platform state. These areas are intended for quick visibility into monitoring output, telemetry posture, and overall system condition.
+`Dashboards` and `Overview` give the operator a broad picture of current platform state, auth mode, incident posture, telemetry pressure, and investigation summaries.
 
-`WHIDS` and `HIDS` sit directly after `Dashboards` in the desktop. These sections expose provider-oriented workflows for import, live status, evidence pull, scheduler state, and enterprise jump-off. `WHIDS` focuses on manager and export-based EDR ingestion, while `HIDS` focuses on OSSEC-style alert ingestion and response planning.
+`WHIDS` and `HIDS` expose provider-oriented workflows for import, live status, artifact pull, scheduler state, IoC/rule lifecycle, and enterprise jump-off. `WHIDS` focuses on manager and export-based EDR ingestion. `HIDS` focuses on OSSEC-style alert ingestion and response planning.
 
-`Processes` is one of the main investigation entry points. It allows the operator to inspect process profiles, process trees, extracted strings, internals, YARAify enrichment, sandbox traces, AI analysis, and one-click triage.
+`Processes` is one of the main investigation entry points. It allows the operator to inspect process profiles, process trees, extracted strings, internals, YARAify enrichment, sandbox traces, AI analysis, and triage context.
 
-That process workflow now also includes local YARA fallback, memory YARA enrichment, and fused verdict scoring built from curated `rules-master`, `signature-base`, and ShadowLab tradecraft rules. Broad community noise such as `domain.yar` and `RAT_PoetRATPython.yar` has been intentionally removed from the enterprise pack to keep verdicts readable.
+That process workflow includes local YARA fallback, memory YARA enrichment, and fused verdict scoring built from curated community and ShadowLab tradecraft rules. Broad community noise is intentionally filtered out of the enterprise pack so verdicts remain readable.
 
-`Advanced Hunt` is designed for deeper, operator-driven investigation work.
+`Persistence` is used to review autoruns, scheduled tasks, services, and other persistence artifacts, and to trigger rollback-aware remediation when policy allows it.
 
-`Persistence` is used to review autoruns, scheduled tasks, services, and other persistence artifacts, and to trigger remediation when needed.
+`File Analysis` is the file-focused malware-analysis section. It presents Detect It Easy readiness, file/process submission, PE structure, extracted highlights, and raw output in a way that complements live process triage.
 
-`Threat Intel` manages hash and IP enrichment flows. It connects local findings to providers such as VirusTotal, MalwareBazaar, AbuseIPDB, and YARAify-backed intelligence workflows.
+`Network`, `Graph`, and `Timeline` help the operator understand events in a wider context. Network gives connection and discovery context, packet capture, ARP discovery, and blocker controls. Graph visualizes entity relationships. Timeline reconstructs the story chronologically.
 
-`Static Analysis` provides the Detect It Easy and structural PE-analysis surface. It gives the operator a dedicated place to inspect file-oriented malware-analysis results separate from live process triage. The workspace prefers the native `die-python` backend, shows native runtime readiness correctly in the desktop, and falls back to subprocess or PE-structure inspection only when necessary.
+`Antivirus` provides provider health, scan jobs, verdict history, quarantine, signatures, response, watcher, webhooks, rules, lists, and containment operations. It is the main surface for antivirus-style workflow in the current UI.
 
-`Deception` handles lab-oriented baiting and detection workflows such as honeypots and canaries.
+`History` and `Artifacts` store the outcome of investigation and response work. History centralizes incident/action/auth audit views. Artifacts stores generated reports, exported evidence, and investigation material.
 
-`Network`, `Hosts`, `Graph`, and `Timeline` help the operator understand events in a wider context. These sections expose relationships, host inventory, graph correlation, and chronological event views.
+`Enterprise` behaves as a compact investigation suite. `Enterprise Ops` manages case-centric workflow, while `Enterprise Intel` focuses on intelligence, correlation, and ATT&CK context.
 
-`Quarantine`, `History`, and `Artifacts` are key sections for storing the outcome of investigation and response work. They make it possible to track what happened, what was contained, and which materials were collected. Report output in `Artifacts` is now fuller and includes executive summary, analyst findings, telemetry context, event highlights, and artifact inventory.
+`Security Ops` holds operational security controls such as integrity, observability, readiness, secret rotation, YARA health, audit export, and security reporting.
 
-`Enterprise` behaves as a separate investigation suite. It is split into two internal workspaces. `Enterprise Ops` manages case-centric workflow, while `Enterprise Intel` focuses on the intelligence and correlation side of case work.
-
-`Security Ops` holds operational security controls such as integrity, observability, readiness, secret rotation, and reporting.
-
-`Scenarios` and `About / FAQ` complete the platform with testing and presentation-oriented surfaces. The About area is now split cleanly between product-level ShadowLab messaging on the left and creator-profile identity on the right.
+`About / FAQ` presents product identity, project links, and creator profile information.
 
 ## What The Enterprise Layer Adds
 
-Inside `Enterprise Ops`, the operator selects or creates a case and then sees the overall state of that case through the board. It becomes easy to understand who is working on it, which tasks remain open, which ones are overdue, what activity has taken place, and which notifications matter. Report export is also managed from here.
+Inside `Enterprise Ops`, the operator selects or creates a case and then sees board state, assignments, tasks, approvals, notes, activity, and export actions. It becomes easy to understand who is working on a case, what remains open, and what is ready for handoff.
 
-`Enterprise Intel` provides a more analytical view. It brings together critical asset visibility, detection lifecycle data, ATT&CK coverage, tactic heat, bundle lifecycle diff, case ATT&CK rollup, notes, stories, case timeline, entity links, and scoped graph correlation. This turns the case from a simple ticket into an actual investigation object.
+`Enterprise Intel` provides a more analytical view. It brings together critical asset visibility, detection lifecycle data, ATT&CK coverage, tactic heat, bundle lifecycle diff, case ATT&CK rollup, notes, stories, case timeline, entity links, and scoped graph correlation.
 
-This shift moves ShadowLab closer to a compact SOC-style investigation platform rather than just a defensive lab utility.
+This moves ShadowLab closer to a compact SOC-style investigation platform rather than only a defensive lab utility.
 
 ## How It Is Used In Practice
 
-The simplest path is to start the backend first. If the goal is only local testing, `python app.py` is enough. If role-based behavior should be tested properly, then `scripts/start_shadowlab_auth.ps1` is the better entry point.
+The simplest path is to start the backend first. For local testing, `python app.py` is enough. For role-based behavior, use:
 
-After that, the desktop is started with `python desktop/main.py`. If auth is enabled, the correct API key is entered into the client. From there, the operator can first review `Overview` and `Dashboards`. If suspicious activity appears, the operator can move into `Processes` and `Advanced Hunt` for deeper inspection.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1
+```
 
-If an event grows into an incident or case-level workflow, a case is created under `Enterprise`. Then tasks are assigned, notes and stories are written, evidence is pinned, graph correlation is reviewed, and the final report is exported.
+If you are testing lab-only containment and network-warfare controls in an isolated network, start with:
 
-If the focus is platform hardening or platform health, the operator moves into `Security Ops`, where integrity, observability, secrets, and readiness can be reviewed.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_shadowlab_auth.ps1 -EnableDangerousActions -EnableNetworkWarfare
+```
 
-If the focus is external detection tooling, the operator usually enters through `WHIDS` or `HIDS`, normalizes those detections into ShadowLab incidents, and then moves into `Enterprise` for case-driven work.
+Then start the desktop:
 
-If the focus is ATT&CK maturity, the operator loads a STIX bundle, reviews the discovered bundle list and diff, then works from case-level ATT&CK coverage. From there the operator can export a Navigator layer, export a Workbench coverage bundle, and review technique-aware response decisions.
+```powershell
+python desktop\main.py
+```
+
+If auth is enabled, enter the correct API key in the desktop and activate the role. From there, a typical operator reviews `Dashboards` and `Overview`, pivots into `Processes`, checks `Persistence`, runs `File Analysis` when a binary matters, expands context through `Network`, `Graph`, and `Timeline`, and uses `Enterprise` if the activity becomes a case.
+
+If the focus is platform hardening or health, the operator moves into `Security Ops`. If the focus is external detection tooling, the operator usually enters through `WHIDS` or `HIDS`, normalizes detections into ShadowLab incidents, and then moves into `Enterprise`.
 
 ## MITRE ATT&CK Layer
 
-ShadowLab now has a dedicated ATT&CK layer inside the enterprise workflow.
+ShadowLab has a dedicated ATT&CK layer inside the enterprise workflow.
 
-The backend keeps bundle lifecycle state such as bundle version, modified date, object counts, discovered candidate bundles, and diff results against the currently loaded dataset. This gives the operator a simple way to understand whether the ATT&CK dataset is current and what changed between versions.
+The backend keeps bundle lifecycle state such as bundle version, modified date, object counts, discovered candidate bundles, and diff results against the currently loaded dataset. This helps the operator understand whether the ATT&CK dataset is current and what changed between versions.
 
-Incident and case coverage are no longer limited to the stored `mitre_mapping` field. ShadowLab also performs lightweight ATT&CK inference from incident title, summary, notes, process-execution language, download behavior, credential-access hints, persistence hints, lateral-movement cues, and exfiltration patterns. This gives better ATT&CK visibility when upstream tools did not provide full mapping.
+Incident and case coverage are not limited to stored `mitre_mapping`. ShadowLab also performs lightweight ATT&CK inference from incident title, summary, notes, process-execution language, download behavior, credential-access hints, persistence hints, lateral-movement cues, and exfiltration patterns.
 
-Case-level ATT&CK views now include tactic heat, tactic progression, sub-technique counts, parent-technique rollups, top mitigations, and top software overlap. That makes the enterprise workspace more useful for both analysis and reporting.
-
-Navigator export is still supported, but ShadowLab now also exports a Workbench-oriented coverage JSON so ATT&CK relationship and annotation work can continue outside the product when needed.
+Case-level ATT&CK views include tactic heat, tactic progression, sub-technique counts, parent-technique rollups, top mitigations, and top software overlap. Navigator export and Workbench-oriented coverage JSON are supported.
 
 ## Recommended Operator Flow
 
-The most practical flow starts with `Overview` and `Dashboards` for general awareness. The second stage is process investigation. The third stage expands context using persistence review, threat intelligence, graph, and timeline. The fourth stage opens a case and starts enterprise workflow. The fifth stage exports reports and artifacts. The sixth stage uses security-operations controls to verify platform health and evidence integrity.
+The most practical flow starts with `Dashboards` and `Overview` for awareness. The second stage is process investigation. The third stage expands context using persistence review, file analysis, network, graph, and timeline. The fourth stage opens a case and starts enterprise workflow. The fifth stage exports reports and artifacts. The sixth stage uses `Security Ops` to verify platform health and evidence integrity.
 
-This flow shows one of ShadowLab's main strengths. It does not only display data, it also gives the operator a structured way to work through that data.
+This flow shows one of ShadowLab's main strengths: it does not only display data, it gives the operator a structured way to work through that data.
 
 ## Validation And Readiness
-
-ShadowLab now includes repeatable validation helpers for deployment and workflow maturity.
 
 Current validation coverage includes:
 
 - deployment preflight and runtime-restore checks
 - RBAC smoke tests for `viewer`, `analyst`, and `admin`
-- live ShadowLab and `WHIDS` integration smoke tests
+- live ShadowLab and WHIDS integration smoke tests
 - performance and dedupe probes for large ingest paths
-- native `OSSEC` active-response validation on elevated Windows hosts
-- local YARA compile-health and `Inceptor` payload validation
-
-That matters because the platform now contains response, orchestration, and integration features that should be re-tested, not only assumed.
+- OSSEC active-response validation on elevated Windows hosts
+- local YARA compile-health and detection-corpus validation
+- focused tests for API load, security, network operations, enterprise operations, observability, and desktop controllers
 
 ## Visual Tour
 
-The screenshots below now map directly to the updated desktop image set in `images/`. The sequence follows the top-level desktop navigation from left to right.
+The screenshots below map directly to the current desktop image set in `images/`. The sequence follows the current top-level desktop navigation from left to right.
 
 ### Dashboards Workspace
 
 ![Dashboards Workspace](../images/shadowlab-dashboard-wall.png)
 
-The dashboards surface is the quickest status board in the product. It condenses platform health, threat posture, auth state, and short investigation summaries into one operator-facing wall so the next pivot is obvious.
+The dashboards surface is the quickest status board in the product. It condenses platform health, threat posture, auth state, and short investigation summaries into one operator-facing wall.
 
 ### WHIDS Workspace
 
 ![WHIDS Workspace](../images/shadowlab-whids-integration.png)
 
-The WHIDS workspace is the EDR-oriented integration panel. It brings manager sync, reports, artifacts, scheduler state, IoC/rule lifecycle, and enterprise jump-off into a single admin-facing control area.
+The WHIDS workspace brings manager sync, reports, artifacts, scheduler state, IoC/rule lifecycle, and enterprise jump-off into one control area.
 
 ### HIDS Workspace
 
 ![HIDS Workspace](../images/shadowlab-hids-integration.png)
 
-The HIDS workspace is centered on OSSEC-style ingest and response planning. Operators use it to import alert streams, monitor live-ingest state, and pivot normalized incidents into the rest of the platform.
+The HIDS workspace is centered on OSSEC-style ingest and response planning.
 
 ### Overview Incident Brief
 
 ![Overview Incident Brief](../images/shadowlab-monitor-overview.png)
 
-Overview is the high-signal telemetry reading area. It highlights incident posture, monitor results, and the current detection story in a cleaner briefing format than the dashboard wall.
+Overview highlights incident posture, monitor results, telemetry summary, and operator-facing recommendations.
 
-### Process Intelligence Workspace
+### Processes Workspace
 
-![Process Intelligence Workspace](../images/shadowlab-advanced-hunt.png)
+![Processes Workspace](../images/shadowlab-processes-investigation.png)
 
-This is the main suspicious-process analysis surface. The process list, selected-process detail, triage output, and action strip work together here, making it the most common starting point for host-level investigation.
-
-### Advanced Hunt Workspace
-
-![Advanced Hunt Workspace](../images/shadowlab-advanced-hunt.png)
-
-Advanced Hunt acts like a compact analyst console. It keeps deeper process review and hunt output close together so internals, strings, sandbox, YARA, and AI-assisted reasoning can be reviewed in one iterative workspace.
+Processes is the main suspicious-process analysis surface. The process list, selected-process detail, triage output, and action strip work together here.
 
 ### Persistence Workspace
 
-![Persistence Workspace](../images/shadowlab-persistence-remediatio.png)
+![Persistence Workspace](../images/shadowlab-persistence-remediation.png)
 
-Persistence gives the operator a dedicated post-compromise review area for autoruns, tasks, services, and rollback-aware remediation. It is where long-lived footholds are verified or cleaned up.
+Persistence gives the operator a dedicated post-compromise review area for autoruns, tasks, services, and rollback-aware remediation.
 
-### Threat Intel Workspace
+### File Analysis Workspace
 
-![Threat Intel Workspace](../images/shadowlab-threat-intel-enrichmen.png)
+![File Analysis Workspace](../images/shadowlab-file-analysis-static-pe.png)
 
-Threat Intel connects hashes, IPs, and process context to outside enrichment. It is designed for fast reputation checks, provider comparison, and operator-readable correlation rather than raw feed browsing.
-
-### Static Analysis Workspace
-
-![Static Analysis Workspace](../images/shadowlab-static-pe-analysis.png)
-
-Static Analysis is the file-focused malware-analysis section. It presents Detect It Easy readiness, file/process submission, highlight extraction, and raw output in a way that complements live triage without overloading the process workspace.
-
-### Deception And Evidence Workspace
-
-![Deception And Evidence Workspace](../images/shadowlab-deception-evidence-ops.png)
-
-This workspace joins deception and evidence handling on purpose. Honeypots, canaries, evidence capture, evidence review, and related output sit together so testing and collection stay in the same operator flow.
+File Analysis presents Detect It Easy readiness, file/process submission, PE structure, highlights, and raw analysis output.
 
 ### Network Workspace
 
-![Network Workspace](../images/shadowlab-network-telemetry-bloc.png)
+![Network Workspace](../images/shadowlab-network-telemetry-blocker.png)
 
-Network gives connection and discovery context that process views alone cannot provide. It helps the operator evaluate suspicious hosts or processes through packet, socket, and device perspective.
-
-### Hosts Inventory Workspace
-
-![Hosts Inventory Workspace](../images/shadowlab-network-telemetry-bloc.png)
-
-Hosts is the fleet-oriented inventory layer. It is especially useful in multi-host lab setups where the operator needs a compact view of platform, IP, role, version, and current state.
+Network gives connection, capture, discovery, host inventory, and blocker context that process views alone cannot provide.
 
 ### Graph Interactive Browser
 
-![Graph Interactive Browser](../images/shadowlab-attack-surface-graph.png)
+![Graph Interactive Browser](../images/shadowlab-entity-graph.png)
 
-Graph visualizes relationships across entities, incidents, persistence items, and remote endpoints. It turns investigative context into a shape the operator can read and explain quickly.
+Graph visualizes relationships across entities, incidents, persistence items, processes, and remote endpoints.
 
 ### Timeline Event Story Workspace
 
 ![Timeline Event Story Workspace](../images/shadowlab-timeline-story.png)
 
-Timeline reconstructs the incident story chronologically. It helps the operator move from “what is suspicious” to “what happened first, what followed, and what matters next.”
+Timeline reconstructs the incident story chronologically.
 
-### Quarantine Alert Workspace
+### Antivirus And Containment Workspace
 
-![Quarantine Alert Workspace](../images/shadowlab-quarantine-alert-workf.png)
+![Antivirus And Containment Workspace](../images/shadowlab-antivirus-containment.png)
 
-Quarantine is the containment follow-through surface. Restore, delete, and related alerting actions are visible in one place so isolated items remain auditable and manageable.
+Antivirus combines provider health, scans, verdict history, quarantine, response controls, rules, lists, and containment operations.
 
 ### History And Incident Log
 
 ![History And Incident Log](../images/shadowlab-incident-history-audit.png)
 
-History centralizes incident, action, and telemetry traces. It is the place to revisit decisions, confirm who changed what, and support retrospective incident review.
+History centralizes incident, action, auth, telemetry, and audit traces.
 
 ### Artifacts And Evidence Store
 
-![Artifacts And Evidence Store](../images/shadowlab-artifact-evidence-stor.png)
+![Artifacts And Evidence Store](../images/shadowlab-artifacts-evidence-store.png)
 
-Artifacts stores reports, exports, and collected evidence in an operator-friendly repository. Preview and detail panels make it practical to inspect outputs without leaving the product.
+Artifacts stores reports, exports, and collected evidence in an operator-friendly repository.
 
 ### Enterprise Case Ops Workspace
 
 ![Enterprise Case Ops Workspace](../images/shadowlab-enterprise-case-ops.png)
 
-Enterprise is the structured investigation suite. The screenshot reflects the case-centric operations side, where tasks, approvals, assignments, notes, export actions, and case workflow are managed.
+Enterprise is the structured investigation suite for tasks, approvals, assignments, notes, export actions, and case workflow.
 
 ### Security Ops Workspace
 
 ![Security Ops Workspace](../images/shadowlab-security-ops-readiness.png)
 
-Security Ops is the platform-readiness and operational-maturity area. Integrity, observability, local YARA health, secret handling, and report/export controls are grouped here for operators and administrators.
-
-### Attack Scenario Simulator
-
-![Attack Scenario Simulator](../images/shadowlab-attack-scenario-simula.png)
-
-Scenarios provides a controlled telemetry-generation surface for testing and demonstrations. It is valuable when detections, integrations, or workflows need a repeatable stimulus.
+Security Ops groups integrity, observability, local YARA health, secret handling, audit export, readiness, and report controls.
 
 ### About Creator Profile
 
 ![About Creator Profile](../images/shadowlab-about-faq-profile.png)
 
-The About / FAQ area now cleanly separates product identity from creator identity. ShadowLab messaging, project links, and quick FAQ stay on the left, while the creator profile and personal links stay on the right.
+The About / FAQ area separates product identity from creator identity and keeps quick project links visible.
 
 ## What This Guide Is Useful For
 
-This guide works well for product presentation, onboarding, and answering the question of what the project really does on GitHub. The README can remain a shorter project entry point. This guide serves as the broader, more product-oriented explanation.
-
-updated
-
+This guide is useful for product presentation, onboarding, security review, and explaining what ShadowLab does today. The README remains the shorter project entry point; this guide is the broader operator and product overview.

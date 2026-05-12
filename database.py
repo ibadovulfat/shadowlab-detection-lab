@@ -40,6 +40,8 @@ _SAFE_COLUMN_NAMES = {
     "actor",
     "attack_chain",
     "allowed_scopes",
+    "prev_hash",
+    "row_hash",
     "approval_status",
     "approved_at",
     "auth_source",
@@ -175,13 +177,46 @@ def _translate_sql(sql: str, backend: str) -> str:
     if backend != "postgresql":
         return sql
     translated = sql
-    translated = translated.replace("?", "%s")
+    # `?` → `%s` only OUTSIDE of single-quoted string literals. The naive
+    # str.replace also rewrote `?` inside `'foo?bar'` literals and corrupted
+    # `LIKE '%?%'`-style filter patterns when they happened to appear.
+    translated = _replace_qmark_placeholders(translated)
     translated = translated.replace("(strftime('%s', 'now'))", "EXTRACT(EPOCH FROM NOW())")
     translated = translated.replace("strftime('%s', 'now')", "EXTRACT(EPOCH FROM NOW())")
     translated = translated.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
     translated = translated.replace("DATETIME DEFAULT CURRENT_TIMESTAMP", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     translated = translated.replace("REAL DEFAULT (EXTRACT(EPOCH FROM NOW()))", "DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM NOW())")
     return translated
+
+
+def _replace_qmark_placeholders(sql: str) -> str:
+    """Convert SQLite `?` placeholders to psycopg `%s` while leaving
+    string literals (`'...'`) untouched. SQL only uses single quotes for
+    literals; `''` is the standard escape for an embedded quote.
+    """
+    out: list[str] = []
+    in_literal = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            # Handle `''` escape: stay inside the literal.
+            if in_literal and i + 1 < n and sql[i + 1] == "'":
+                out.append("''")
+                i += 2
+                continue
+            in_literal = not in_literal
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "?" and not in_literal:
+            out.append("%s")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def create_connection():
@@ -405,7 +440,9 @@ def create_table(conn):
                 status_code INTEGER,
                 role TEXT DEFAULT '',
                 client_ip TEXT DEFAULT '',
-                detail TEXT DEFAULT ''
+                detail TEXT DEFAULT '',
+                prev_hash TEXT DEFAULT '',
+                row_hash TEXT DEFAULT ''
             );
             """
         )
@@ -1044,7 +1081,9 @@ def _create_table_postgres(conn) -> None:
             status_code INTEGER,
             role TEXT DEFAULT '',
             client_ip TEXT DEFAULT '',
-            detail TEXT DEFAULT ''
+            detail TEXT DEFAULT '',
+            prev_hash TEXT DEFAULT '',
+            row_hash TEXT DEFAULT ''
         )
         """,
         """
@@ -1335,11 +1374,14 @@ def _create_table_postgres(conn) -> None:
     _ensure_column(conn, "quarantine_log", "workspace_id", "TEXT DEFAULT 'default'")
     _ensure_column(conn, "alert_log", "workspace_id", "TEXT DEFAULT 'default'")
     _ensure_column(conn, "remediation_log", "workspace_id", "TEXT DEFAULT 'default'")
+    _ensure_column(conn, "action_audit_log", "prev_hash", "TEXT DEFAULT ''")
+    _ensure_column(conn, "action_audit_log", "row_hash", "TEXT DEFAULT ''")
     _migrate_connector_registry_workspace_schema(conn)
     _ensure_indexes(conn)
     _record_migration(conn, "2026_03_backend_hardening")
     _record_migration(conn, "2026_04_policy_workspace_foundation")
     _record_migration(conn, "2026_04_tenant_storage_cleanup")
+    _record_migration(conn, "2026_05_audit_hash_chain")
 
 
 def _ensure_indexes(conn) -> None:
@@ -1745,14 +1787,107 @@ def log_action_audit(
     detail: str = "",
     workspace_id: str = "default",
 ):
+    """Append an audit row, chained to the previous row via SHA-256.
+
+    Hash chain (`prev_hash` / `row_hash`) gives tamper-evident audit:
+    deleting or mutating a historical row breaks the chain at every row
+    after it, which `verify_action_audit_chain()` can detect. This does
+    not stop a DB-admin attacker from rewriting *every* subsequent row,
+    but combined with periodic chain-tip exports (or the integrity
+    manifest history) it makes silent rewriting impractical.
+    """
+    import hashlib
+
+    cursor = conn.execute(
+        "SELECT row_hash FROM action_audit_log ORDER BY id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    prev_hash = str(row[0]) if row and row[0] else ""
+
+    chain_payload = "|".join(
+        [
+            prev_hash,
+            str(workspace_id or ""),
+            str(method or ""),
+            str(path or ""),
+            str(int(status_code)),
+            str(role or ""),
+            str(client_ip or ""),
+            str(detail or ""),
+        ]
+    )
+    row_hash = hashlib.sha256(chain_payload.encode("utf-8")).hexdigest()
+
     conn.execute(
         """
-        INSERT INTO action_audit_log (workspace_id, method, path, status_code, role, client_ip, detail)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO action_audit_log (workspace_id, method, path, status_code, role, client_ip, detail, prev_hash, row_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (workspace_id, method, path, status_code, role, client_ip, detail),
+        (workspace_id, method, path, status_code, role, client_ip, detail, prev_hash, row_hash),
     )
     conn.commit()
+
+
+def verify_action_audit_chain(conn, *, limit: int = 0) -> dict[str, Any]:
+    """Walk the audit table and report the first chain break (if any).
+
+    Returns `{"ok": True, "rows_checked": N, "tip": <last row_hash>}` on
+    a clean chain. `{"ok": False, "broken_at_id": <id>, "expected_hash":
+    ..., "stored_hash": ...}` when a row's recomputed hash disagrees
+    with what's stored (tampering or migration glitch).
+
+    `limit` caps how many rows are walked from the head; 0 = all.
+    """
+    import hashlib
+
+    sql = "SELECT id, workspace_id, method, path, status_code, role, client_ip, detail, prev_hash, row_hash FROM action_audit_log ORDER BY id ASC"
+    if limit and limit > 0:
+        sql += f" LIMIT {int(limit)}"
+    cursor = conn.execute(sql)
+    rows_checked = 0
+    last_hash = ""
+    for row in cursor.fetchall():
+        row_id = row[0]
+        workspace_id = row[1] or ""
+        method = row[2] or ""
+        path = row[3] or ""
+        status_code = int(row[4] or 0)
+        role = row[5] or ""
+        client_ip = row[6] or ""
+        detail = row[7] or ""
+        prev_hash = row[8] or ""
+        stored_hash = row[9] or ""
+        # Legacy rows (pre-hash-chain) have empty prev_hash/row_hash —
+        # the chain starts at the first row with a non-empty row_hash.
+        if not stored_hash and not prev_hash:
+            rows_checked += 1
+            continue
+        chain_payload = "|".join(
+            [
+                last_hash,
+                str(workspace_id),
+                str(method),
+                str(path),
+                str(status_code),
+                str(role),
+                str(client_ip),
+                str(detail),
+            ]
+        )
+        expected = hashlib.sha256(chain_payload.encode("utf-8")).hexdigest()
+        if prev_hash != last_hash or stored_hash != expected:
+            return {
+                "ok": False,
+                "broken_at_id": int(row_id),
+                "rows_checked": rows_checked,
+                "expected_hash": expected,
+                "stored_hash": stored_hash,
+                "expected_prev": last_hash,
+                "stored_prev": prev_hash,
+            }
+        last_hash = stored_hash
+        rows_checked += 1
+    return {"ok": True, "rows_checked": rows_checked, "tip": last_hash}
 
 
 def get_action_audits(conn, workspace_id: str = "") -> pd.DataFrame:

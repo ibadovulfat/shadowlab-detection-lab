@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 import json
+import requests
 
 import plugins.memory_forensics as memory_forensics
 import plugins.yara_scanner as yara_scanner
@@ -319,6 +321,61 @@ class ThreatIntelligenceTests(unittest.TestCase):
 
         self.assertTrue(suppressed["suppressed"])
         self.assertIn("memory rule pattern suppressed by local policy", suppressed["suppression_reasons"])
+
+    def test_vt_lookup_uses_ttl_cache_for_same_hash_and_key(self):
+        client = threat_intelligence.ThreatIntelClient()
+        response = mock.Mock()
+        response.status_code = 200
+        response.ok = True
+        response.json.return_value = {"data": {"attributes": {"last_analysis_stats": {"malicious": 1}}}}
+
+        with mock.patch.object(client, "_safe_request", return_value=response) as request_mock:
+            first = client.check_file_vt("a" * 64, api_key="key-1")
+            second = client.check_file_vt("a" * 64, api_key="key-1")
+
+        self.assertEqual(request_mock.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first["last_analysis_stats"]["malicious"], 1)
+
+    def test_safe_request_retries_retryable_http_status_and_succeeds(self):
+        response_429 = mock.Mock()
+        response_429.status_code = 429
+        response_429.ok = False
+        response_429.text = "rate limited"
+        response_200 = mock.Mock()
+        response_200.status_code = 200
+        response_200.ok = True
+        response_200.text = "ok"
+        session = mock.Mock()
+        session.request.side_effect = [response_429, response_200]
+
+        with mock.patch.dict(os.environ, {"SHADOWLAB_TI_MAX_RETRIES": "1"}, clear=False):
+            client = threat_intelligence.ThreatIntelClient(session=session)
+        with mock.patch("threat_intelligence.time.sleep", return_value=None):
+            result = client._safe_request("virustotal", "GET", "https://www.virustotal.com/api/v3/files/test")
+
+        self.assertEqual(session.request.call_count, 2)
+        self.assertEqual(result.status_code, 200)
+
+    def test_safe_request_opens_circuit_after_repeated_failures(self):
+        session = mock.Mock()
+        session.request.side_effect = requests.RequestException("boom")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SHADOWLAB_TI_MAX_RETRIES": "0",
+                "SHADOWLAB_TI_CIRCUIT_THRESHOLD": "1",
+                "SHADOWLAB_TI_CIRCUIT_OPEN_SECONDS": "60",
+            },
+            clear=False,
+        ):
+            client = threat_intelligence.ThreatIntelClient(session=session)
+
+        with self.assertRaises(requests.RequestException):
+            client._safe_request("malwarebazaar", "POST", "https://mb-api.abuse.ch/api/v1/")
+        with self.assertRaises(RuntimeError):
+            client._safe_request("malwarebazaar", "POST", "https://mb-api.abuse.ch/api/v1/")
+        self.assertEqual(session.request.call_count, 1)
 
 
 class ResponsePlanTests(unittest.TestCase):
