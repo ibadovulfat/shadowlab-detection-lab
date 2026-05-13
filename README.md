@@ -4,7 +4,11 @@
 
 ## Demo Video
 
-[![Watch Demo](https://img.youtube.com/vi/dx9p0JfBWEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=dx9p0JfBWEM)
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=dx9p0JfBWEM">
+    <img src="https://img.youtube.com/vi/dx9p0JfBWEM/maxresdefault.jpg" width="700">
+  </a>
+</p>
 
 
 **Created by [Ulfat Ibadov](https://www.linkedin.com/in/ibadovulfat/)**
