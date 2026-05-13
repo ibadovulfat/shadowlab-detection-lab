@@ -2,6 +2,11 @@
 
 > Use only in systems and networks you own or explicitly control.
 
+## Demo Video
+
+[![Watch Demo](https://img.youtube.com/vi/dx9p0JfBWEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=dx9p0JfBWEM)
+
+
 **Created by [Ulfat Ibadov](https://www.linkedin.com/in/ibadovulfat/)**
 
 ShadowLab is a Windows-focused cybersecurity operations platform built around a local FastAPI backend and a PySide6 desktop operator console. It brings host telemetry, process investigation, persistence review, file and malware analysis, network visibility, containment, casework, ATT&CK context, reporting, and security-operations readiness into one lab-friendly stack.
