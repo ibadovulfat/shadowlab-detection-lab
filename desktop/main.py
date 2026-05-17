@@ -89,7 +89,15 @@ except Exception:
 try:
     import sys as _sys
     from pathlib import Path as _Path
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    # Append rather than insert(0): we want to fall through to the
+    # stdlib first so that a stray `json.py` / `ssl.py` / `pathlib.py`
+    # dropped at repo root (supply-chain footgun) cannot hijack the
+    # import graph for the rest of the process. The desktop modules
+    # already importable via the parent path stay reachable because
+    # they're imported by absolute name (`services.secret_store`).
+    _repo_root = str(_Path(__file__).resolve().parent.parent)
+    if _repo_root not in _sys.path:
+        _sys.path.append(_repo_root)
     from services.secret_store import secret_store as _secret_store, is_encrypted_secret as _is_encrypted_secret
 except Exception:
     _secret_store = None
@@ -122,6 +130,7 @@ class ShadowLabDesktop(QMainWindow):
         self.evidence_items = []
         self.latest_monitor_rows: list[dict] = []
         self.latest_monitor_result: dict = {}
+        self.latest_history_telemetry_rows: list[dict] = []
         self.threat_history: list[dict[str, str]] = []
         self.custom_toolbar_buttons: list[dict[str, str]] = []
         self.auth_context: dict = {}
@@ -528,7 +537,15 @@ class ShadowLabDesktop(QMainWindow):
         ops_form.setColumnStretch(0, 1)
         ops_form.setColumnStretch(1, 1)
         ops_form.setColumnStretch(2, 1)
-        ops_form.addWidget(self._field_block("API Base URL", self.base), 0, 0)
+        # NOTE: the grid is populated once, below (after auth_row /
+        # access_status are built). A stray duplicate
+        # `addWidget(_field_block("API Base URL", self.base), 0, 0)`
+        # used to sit here — it created an orphan label-only block and,
+        # because `self.base` gets reparented into the second
+        # field_block, left two overlapping widgets in cell (0,0). That
+        # threw off every grid row height and made the last cell
+        # (Persistence Filter at 3,2) render shifted and without its
+        # input box. Removed; the single population is lines below.
         auth_row = QWidget()
         auth_row_layout = QHBoxLayout(auth_row)
         auth_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -586,7 +603,17 @@ class ShadowLabDesktop(QMainWindow):
         ops_form.addWidget(self._field_block("Webhook URL", self.webhook_url), 2, 2)
         ops_form.addWidget(self._field_block("Threat IP", self.ip_input), 3, 0)
         ops_form.addWidget(self._field_block("Threat Hash", self.hash_input), 3, 1)
-        ops_form.addWidget(self._field_block("Persistence Filter", self.persist_filter), 3, 2)
+        # NOTE: the legacy "Persistence Filter" field was removed here.
+        # `self.persist_filter` is the SAME QLineEdit the Persistence
+        # tab adds to its own search row (intel_ops.py:
+        # `f1.addWidget(app.persist_filter)` — its comment literally
+        # says it "replaces the legacy app.persist_filter field"). A Qt
+        # widget can only live in one layout, and the Persistence tab is
+        # built after Primary Controls, so it reparented the input out
+        # of this cell — leaving an orphan "Persistence Filter" label
+        # with no box. The control lives on the Persistence tab (and the
+        # "Filter Persistence" toolbar button); duplicating its label
+        # here only ever rendered broken.
         ops_layout.addWidget(ops_header)
         ops_layout.addSpacing(1)
         ops_layout.addLayout(ops_form)
@@ -676,23 +703,14 @@ class ShadowLabDesktop(QMainWindow):
         hero_actions_row.setContentsMargins(0, 0, 0, 0)
         hero_actions_row.setSpacing(8)
         hero_actions_row.addWidget(self.toggle_advanced_btn)
-        # Track the Dashboards-only quick-action buttons so the shell can
-        # hide them on every other tab — they are global hub actions and
-        # have no business sitting on Antivirus/Network/Enterprise/etc.
+        # The operator action buttons (Run Monitor, Load Processes,
+        # Lookup Hash, Lookup IP, Filter Persistence) were moved OUT of
+        # this global header into the Process Hunt console (Processes
+        # tab) where they belong — they're per-investigation actions,
+        # not header chrome. `dashboard_only_action_buttons` stays as an
+        # empty list so the shell's per-tab visibility loop
+        # (shell_ops.py) remains a harmless no-op without a code change.
         self.dashboard_only_action_buttons = []
-        for btn_text, fn in [
-            ("Run Monitor", self.run_monitor),
-            ("Load Processes", self.refresh_processes),
-            ("Lookup Hash", self.lookup_hash),
-            ("Lookup IP", self.lookup_ip),
-            ("Filter Persistence", self.apply_persistence_filter),
-        ]:
-            btn = QPushButton(btn_text)
-            btn.clicked.connect(fn)
-            if btn_text in top_capabilities:
-                self._bind_capability(btn, top_capabilities[btn_text])
-            hero_actions_row.addWidget(btn)
-            self.dashboard_only_action_buttons.append(btn)
         hero_actions_row.addStretch(1)
         hero_actions_row.addWidget(self.health, 0, Qt.AlignRight)
         hero_actions_row.addWidget(self.auth_role, 0, Qt.AlignRight)
@@ -1072,10 +1090,44 @@ class ShadowLabDesktop(QMainWindow):
         except Exception:
             pass
 
+    def _base_url_is_secure_for_credentials(self) -> bool:
+        """True when the configured backend URL is safe to receive secrets.
+
+        VT / MalwareBazaar / YARAify / Hybrid-Analysis keys are long-
+        lived third-party credentials. Allowing them to traverse a
+        plaintext `http://` link to a non-loopback host quietly leaks
+        the keys to anyone on the network path. We accept HTTPS
+        unconditionally and HTTP only when the destination is the
+        operator's own loopback.
+        """
+        from urllib.parse import urlparse
+        raw = (self.base.text() if hasattr(self, "base") else "") or ""
+        try:
+            parsed = urlparse(raw.strip())
+        except ValueError:
+            return False
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        if scheme == "https":
+            return True
+        if scheme == "http" and host in {"127.0.0.1", "localhost", "::1"}:
+            return True
+        return False
+
     def _push_av_credential(self, slot: str, value: str) -> None:
         """Send a single VT/MalwareBazaar/YARAify/Hybrid-Analysis key to
         `PUT /antivirus/credentials`. Empty string clears the slot."""
         if not getattr(self, "auth_session_ready", False):
+            return
+        if not self._base_url_is_secure_for_credentials():
+            try:
+                self.statusBar().showMessage(
+                    f"Refusing to push {slot} credential over plaintext HTTP to a "
+                    "non-loopback host. Switch the API base to https:// first.",
+                    8000,
+                )
+            except Exception:
+                pass
             return
         try:
             self.api_client.put("/antivirus/credentials", json={slot: (value or "").strip()}, timeout=10)
@@ -1105,6 +1157,16 @@ class ShadowLabDesktop(QMainWindow):
             if text:
                 payload[slot] = text
         if not payload:
+            return
+        if not self._base_url_is_secure_for_credentials():
+            try:
+                self.statusBar().showMessage(
+                    "Refusing to sync AV credentials over plaintext HTTP to a "
+                    "non-loopback host. Switch the API base to https:// first.",
+                    8000,
+                )
+            except Exception:
+                pass
             return
         try:
             self.api_client.put("/antivirus/credentials", json=payload, timeout=10)

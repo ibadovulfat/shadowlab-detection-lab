@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 
 from api.schemas import IncidentUpdateRequest
 
@@ -17,7 +17,7 @@ def register_routes(app: FastAPI, ctx: dict[str, Any]) -> None:
     build_auth_anomalies = ctx["_build_auth_anomalies"]
 
     @app.get("/history/telemetry", dependencies=[Depends(require_analyst_or_admin)])
-    def telemetry_history(request: Request) -> list[dict[str, Any]]:
+    def telemetry_history(request: Request, limit: int | None = Query(default=None, ge=1, le=5000)) -> list[dict[str, Any]]:
         conn = db.create_connection()
         if not conn:
             raise HTTPException(status_code=500, detail="Database unavailable")
@@ -25,6 +25,8 @@ def register_routes(app: FastAPI, ctx: dict[str, Any]) -> None:
             history_df = db.get_historical_data(conn, workspace_id=request_workspace_id(request))
         finally:
             conn.close()
+        if limit is not None:
+            history_df = history_df.head(limit)
         return history_df.to_dict(orient="records")
 
     @app.get("/history/responses", dependencies=[Depends(require_analyst_or_admin)])

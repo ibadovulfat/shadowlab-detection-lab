@@ -30,6 +30,11 @@ try:
 except ImportError:  # pragma: no cover
     from desktop._response_dialog import prompt_response_reason as _prompt_response_reason
 
+try:
+    from _safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
+except ImportError:  # pragma: no cover
+    from desktop._safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
+
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -94,6 +99,33 @@ class HistoryWorkspaceController:
 
     def load_audit_log(self) -> list[dict]:
         return self._audit_store.load()
+
+    def _reject_unsafe_export_path(self, path: str) -> bool:
+        """Return True (and surface an error) if `path` resolves into the
+        Windows tree, Program Files, or a Startup folder. Resolving the
+        real path first defeats `..` traversal and 8.3 short names.
+        Mirrors the File-Analysis / Timeline export hardening."""
+        import os
+        try:
+            dest = str(Path(path).resolve()).lower().replace("/", "\\")
+        except Exception:
+            dest = str(path).lower().replace("/", "\\")
+        system_root = str(
+            Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+        ).lower().replace("/", "\\")
+        blocked = [
+            system_root + "\\",
+            os.environ.get("ProgramFiles", r"C:\Program Files").lower().replace("/", "\\") + "\\",
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)").lower().replace("/", "\\") + "\\",
+        ]
+        if any(dest.startswith(p) for p in blocked) or "\\start menu\\programs\\startup\\" in dest:
+            self.app._show_error(
+                self.app.art_detail,
+                "Export destination blocked",
+                Exception(f"Refusing to write into a Windows system / Startup folder: {path}"),
+            )
+            return True
+        return False
 
     def _capture_reason(self, action: str) -> dict | None:
         result = _prompt_response_reason(self.app, action)
@@ -625,6 +657,11 @@ class HistoryWorkspaceController:
             chk.toggled.connect(self._apply_artifact_filters)
             self._artifact_type_chips[slug] = chk
             f2.addWidget(chk)
+        self._artifacts_filter_status = QLabel("0 / 0 artifacts")
+        self._artifacts_filter_status.setStyleSheet(
+            "color:#7fe39d;font-size:10px;font-weight:700;"
+        )
+        f2.addWidget(self._artifacts_filter_status)
         f2.addStretch(1)
         reset_btn = QPushButton("Reset Filters")
         reset_btn.setMaximumWidth(110)
@@ -662,9 +699,22 @@ class HistoryWorkspaceController:
             "audit chain records the actor + reason."
         )
         delete_btn.setStyleSheet(
-            "QPushButton { color: #feb2b2; } QPushButton:hover { background:#5f1d1d; }"
+            "QPushButton{background:#2c1820;color:#feb2b2;border:1px solid #5f1d1d;"
+            "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;}"
+            "QPushButton:hover{background:#3d2129;border-color:#8a2a2a;color:#ffd0d0;}"
+            "QPushButton:pressed{background:#511c1c;border-color:#a83232;padding-top:5px;padding-bottom:3px;}"
+            "QPushButton:disabled{background:#1f1418;color:#7a5a5a;border-color:#3a2024;}"
         )
         delete_btn.clicked.connect(self._delete_selected_artifact)
+        _artifact_btn_qss = (
+            "QPushButton{background:#1a2a3d;color:#c8d8ea;border:1px solid #2c4260;"
+            "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;}"
+            "QPushButton:hover{background:#23394f;border-color:#4a6c95;color:#eaf2fb;}"
+            "QPushButton:pressed{background:#2f4f70;border-color:#5d8aa8;padding-top:5px;padding-bottom:3px;}"
+            "QPushButton:disabled{background:#141d28;color:#5e6f80;border-color:#23303f;}"
+        )
+        for btn in (refresh_btn, open_btn, verify_btn, case_btn, export_btn):
+            btn.setStyleSheet(_artifact_btn_qss)
         for btn in (refresh_btn, open_btn, verify_btn, case_btn, export_btn, delete_btn):
             app._bind_capability(btn, "can_view_history")
             cr.addWidget(btn)
@@ -790,12 +840,25 @@ class HistoryWorkspaceController:
         endpoint hiccup doesn't blank the rest of the workspace.
         """
         app = self.app
-        resp = partials.get("responses") or []
-        tel = (partials.get("telemetry") or [])[-200:]
-        incidents = partials.get("incidents") or []
-        alerts = partials.get("alerts") or []
-        remediations = partials.get("remediations") or []
-        auth_events = partials.get("auth") or []
+        # Every list below is iterated with item.get(...). A malformed or
+        # hostile backend can return a non-list (dict error envelope) or
+        # a list with non-dict elements; without this filter that raises
+        # AttributeError/TypeError and blanks the entire workspace
+        # (KPIs, audit panel, timeline, dashboard). Mirror the telemetry
+        # guard for every history list, and feed the SAME filtered lists
+        # to _update_history_kpis so counts match the rendered tables.
+        def _dicts(value) -> list[dict]:
+            return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+        resp = _dicts(partials.get("responses"))
+        telemetry_history = _dicts(partials.get("telemetry"))
+        tel_table = telemetry_history[:200]
+        tel_chart = list(reversed(tel_table))
+        app.latest_history_telemetry_rows = tel_chart
+        incidents = _dicts(partials.get("incidents"))
+        alerts = _dicts(partials.get("alerts"))
+        remediations = _dicts(partials.get("remediations"))
+        auth_events = _dicts(partials.get("auth"))
         anomalies = partials.get("auth_anomalies")
 
         app.resp_table.setRowCount(len(resp))
@@ -804,20 +867,23 @@ class HistoryWorkspaceController:
                 app.resp_table.setItem(r, c, QTableWidgetItem(str(value)))
             app._paint_row(app.resp_table, r, app._severity_color("high" if item.get("action") == "KILL" else "medium"))
 
-        app.tel_table.setRowCount(len(tel))
-        for r, item in enumerate(tel):
+        app.tel_table.setRowCount(len(tel_table))
+        for r, item in enumerate(tel_table):
             for c, value in enumerate([item.get("ts", ""), item.get("cpu", ""), item.get("mem_percent", ""), item.get("proc_threads", ""), item.get("tcp_conns", "")]):
                 app.tel_table.setItem(r, c, QTableWidgetItem(str(value)))
-            cpu = float(item.get("cpu", 0) or 0)
+            try:
+                cpu = float(item.get("cpu", 0) or 0)
+            except (TypeError, ValueError):
+                cpu = 0.0
             if cpu >= 30:
                 app._paint_row(app.tel_table, r, QColor("#d64550"))
         if app.latest_monitor_rows:
             app.metric_tel.setText(f"Telemetry Rows: {len(app.latest_monitor_rows)}")
             app._update_cpu_chart(app.latest_monitor_rows)
         else:
-            app.metric_tel.setText(f"Telemetry Rows: {len(tel)}")
-            app._update_cpu_chart(tel)
-        if not tel and not app.latest_monitor_rows and not app.monitor_out.toPlainText().strip():
+            app.metric_tel.setText(f"Telemetry Rows: {len(tel_chart)}")
+            app._update_cpu_chart(tel_chart)
+        if not tel_chart and not app.latest_monitor_rows and not app.monitor_out.toPlainText().strip():
             app.monitor_out.setHtml("<div style='color:#9fb2c6;padding:6px;'>Run a monitor session to populate telemetry trend data.</div>")
 
         # Cache the full incident list so the filter row can re-render
@@ -833,15 +899,16 @@ class HistoryWorkspaceController:
             )
             app.metric_inc.setText(f"Last Incident: {latest_incident.get('incident_id', '-') or '-'} ({severity})")
             if not app.latest_monitor_result:
-                telemetry_count = len(app.latest_monitor_rows) if app.latest_monitor_rows else len(tel)
+                telemetry_count = len(app.latest_monitor_rows) if app.latest_monitor_rows else len(tel_chart)
                 incident_payload = {
                     "incident": latest_incident,
                     "summary": {
                         "process_count": len(resp),
-                        "connection_count": sum(app._safe_int(item.get("tcp_conns", 0)) for item in tel[:20]),
+                        "connection_count": sum(app._safe_int(item.get("tcp_conns", 0)) for item in tel_table[:20]),
                         "severity": severity,
                     },
                     "telemetry_count": telemetry_count,
+                    "telemetry_rows": tel_chart,
                 }
                 app.monitor_out.setHtml(app._render_monitor_brief(incident_payload, latest_incident))
         else:
@@ -1138,6 +1205,8 @@ class HistoryWorkspaceController:
             str(r.get("name", "")): r
             for r in getattr(self.app, "artifact_records", []) or []
         }
+        visible_count = 0
+        total_rows = table.rowCount()
         for row in range(table.rowCount()):
             cell = table.item(row, 0)
             if cell is None:
@@ -1151,9 +1220,25 @@ class HistoryWorkspaceController:
             hide = False
             if needle and needle not in haystack:
                 hide = True
-            if active_types and type_slug not in active_types:
+            if type_slug not in active_types:
                 hide = True
             table.setRowHidden(row, hide)
+            if not hide:
+                visible_count += 1
+        if hasattr(self, "_artifacts_filter_status"):
+            if total_rows == 0:
+                self._artifacts_filter_status.setText("0 / 0 artifacts - refresh first")
+                self._artifacts_filter_status.setStyleSheet(
+                    "color:#ffcf7a;font-size:10px;font-weight:700;"
+                )
+            else:
+                self._artifacts_filter_status.setText(f"{visible_count} / {total_rows} artifacts")
+                tone = "#7fe39d" if visible_count else "#ffcf7a"
+                self._artifacts_filter_status.setStyleSheet(
+                    f"color:{tone};font-size:10px;font-weight:700;"
+                )
+        if total_rows == 0:
+            self.app.statusBar().showMessage("Artifact list is not loaded yet. Press Refresh All first.")
 
     def _reset_artifact_filters(self) -> None:
         if hasattr(self, "_artifacts_search"):
@@ -1186,14 +1271,21 @@ class HistoryWorkspaceController:
             _QMB.warning(self.app, "Hash verification", "On-disk artifact is missing - cannot recompute.")
             return
         recomputed = artifacts_ops._sha256_file(path)
-        stored = str(record.get("sha256", ""))
         signature_status = str(record.get("signature_status", "unsigned"))
-        same = bool(recomputed) and recomputed == stored
+        # Compare against the integrity manifest's AUTHORITATIVE expected
+        # hash. Comparing against record["sha256"] (the hash taken at the
+        # last refresh) only ever catches tampering between refresh and
+        # verify and rubber-stamps a file that was already tampered
+        # before the refresh — i.e. a no-op integrity check.
+        expected = str(record.get("expected_sha256", "") or "").lower()
+        baseline = expected or str(record.get("sha256", ""))
+        baseline_label = "Manifest expected" if expected else "Refresh-time hash (no manifest baseline)"
+        same = bool(recomputed) and bool(baseline) and recomputed.lower() == baseline.lower()
         message = (
             f"<b>Artifact:</b> {html.escape(str(record.get('name', '')))}<br>"
-            f"<b>Stored:</b> <code>{stored or '—'}</code><br>"
-            f"<b>Recomputed:</b> <code>{recomputed or '—'}</code><br>"
-            f"<b>Manifest status:</b> {signature_status}<br>"
+            f"<b>{html.escape(baseline_label)}:</b> <code>{html.escape(baseline) or '—'}</code><br>"
+            f"<b>Recomputed:</b> <code>{html.escape(recomputed) or '—'}</code><br>"
+            f"<b>Manifest status:</b> {html.escape(signature_status)}<br>"
             f"<b>Result:</b> {'✓ match' if same else '✗ MISMATCH'}"
         )
         dlg = _QMB(self.app)
@@ -1234,6 +1326,8 @@ class HistoryWorkspaceController:
         )
         if not path:
             return
+        if self._reject_unsafe_export_path(path):
+            return
         try:
             if path.lower().endswith(".json"):
                 with open(path, "w", encoding="utf-8") as handle:
@@ -1264,7 +1358,20 @@ class HistoryWorkspaceController:
         if record is None:
             self.app.statusBar().showMessage("Select an artifact row first.", 4000)
             return
-        path = Path(str(record.get("path", "")))
+        raw_path = str(record.get("path", ""))
+        # `record["path"]` is server-supplied — without this gate a
+        # compromised backend can hand the desktop any absolute path
+        # the operator has write rights to (hosts file, AV manifests,
+        # autoruns) and `path.unlink()` would happily oblige.
+        try:
+            path = ensure_under_artifact_root(raw_path)
+        except UnsafeArtifactPath as exc:
+            self.app._show_error(
+                self.app.art_detail,
+                "Artifact delete blocked",
+                f"Refusing to delete a path outside the evidence locker: {exc}",
+            )
+            return
         confirm = _QMB(self.app)
         confirm.setWindowTitle("Confirm artifact deletion")
         confirm.setIcon(_QMB.Critical)

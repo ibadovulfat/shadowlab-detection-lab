@@ -69,7 +69,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QThread, QTimer
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 
 try:
     from process_hunt_jobs import ProcessWorker
@@ -80,6 +80,43 @@ try:
     from _response_dialog import prompt_response_reason
 except ImportError:  # pragma: no cover
     from desktop._response_dialog import prompt_response_reason
+
+
+class _MainThreadInvoker(QObject):
+    """Marshals an arbitrary callable onto the GUI (main) thread.
+
+    `ProcessWorker.run` emits its `finished`/`failed` signals from
+    inside a QThread. PySide6 delivers a plain-closure slot as a
+    DirectConnection, so the success/failure handler — and every widget
+    / QtCharts mutation it triggers downstream — would otherwise run on
+    the worker thread. Touching Qt objects off the GUI thread is a hard
+    Qt-rule violation and crashes the process with a native access
+    violation (observed: monitor_ops.update_cpu_chart →
+    dashboard_ops.refresh_overview_widgets mutating QLineSeries from a
+    worker thread).
+
+    A cross-thread queued `Signal` is Qt's canonical thread-marshalling
+    primitive and works on every PySide6 version (unlike the
+    `QMetaObject.invokeMethod` functor overload, which is absent in
+    PySide6 6.11). This object is parented to the main-thread `parent`,
+    so emitting `dispatch` from any thread delivers `_run` on the GUI
+    thread via an auto-queued connection.
+    """
+
+    dispatch = Signal(object)
+
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        self.dispatch.connect(self._run, Qt.QueuedConnection)
+
+    def _run(self, fn: Callable[[], None]) -> None:
+        try:
+            fn()
+        except Exception:
+            # A failure inside the marshalled callback must not take
+            # down the invoker; the originating handler already wraps
+            # user code in try/finally.
+            pass
 
 
 class ActionGate:
@@ -224,7 +261,19 @@ def submit_async_call(
         worker.deleteLater()
         thread.deleteLater()
 
-    def handle_success(result: Any) -> None:
+    invoker = _MainThreadInvoker(parent)
+
+    def _run_on_main(fn: Callable[[], None]) -> None:
+        """Marshal `fn` onto the GUI thread via the queued-signal relay.
+
+        Emitting a Signal from the worker thread to a slot on the
+        main-thread `invoker` is auto-delivered as a QueuedConnection,
+        so `fn` always executes on the GUI event loop. See
+        `_MainThreadInvoker` for the full rationale.
+        """
+        invoker.dispatch.emit(fn)
+
+    def _do_success(result: Any) -> None:
         if finished["value"]:
             return
         finished["value"] = True
@@ -233,7 +282,7 @@ def submit_async_call(
         finally:
             cleanup()
 
-    def handle_failure(message: str) -> None:
+    def _do_failure(message: str) -> None:
         if finished["value"]:
             return
         finished["value"] = True
@@ -242,7 +291,18 @@ def submit_async_call(
         finally:
             cleanup()
 
+    def handle_success(result: Any) -> None:
+        _run_on_main(lambda: _do_success(result))
+
+    def handle_failure(message: str) -> None:
+        _run_on_main(lambda: _do_failure(message))
+
     def watchdog() -> None:
+        # singleShot's timer is created on the calling (main) thread, so
+        # watchdog already runs on the GUI thread — no marshalling
+        # needed here. The `finished` flag is now only ever mutated on
+        # the main thread (via _do_success/_do_failure/watchdog), so the
+        # check-then-set is race-free.
         if finished["value"]:
             return
         finished["value"] = True

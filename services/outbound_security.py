@@ -9,6 +9,17 @@ from urllib.parse import urlparse
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
+# Hostnames whose loopback-IP resolution is intentional. Anything else
+# that DNS-resolves to 127.0.0.1 / ::1 (e.g. `lvh.me`, `localtest.me`,
+# or an attacker-controlled public domain) is rejected so an operator
+# who whitelists `https://api.partner.example` cannot be redirected to
+# their own admin API via a hostile DNS answer.
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _hostname_is_loopback_literal(hostname: str) -> bool:
+    return (hostname or "").strip().lower() in _LOOPBACK_HOSTNAMES
+
 
 def normalize_outbound_url(raw_url: Any, *, allow_http_localhost: bool = True) -> str:
     candidate = str(raw_url or "").strip()
@@ -58,6 +69,7 @@ def resolve_safe_outbound_address(raw_url: Any, *, allow_http_localhost: bool = 
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
         return None
+    hostname_is_loopback = _hostname_is_loopback_literal(hostname)
     for info in infos:
         sockaddr = info[4]
         if not sockaddr:
@@ -67,7 +79,7 @@ def resolve_safe_outbound_address(raw_url: Any, *, allow_http_localhost: bool = 
             ip_obj = ipaddress.ip_address(address)
         except ValueError:
             continue
-        if _ip_is_allowed(ip_obj):
+        if _ip_is_allowed(ip_obj, hostname_is_loopback_literal=hostname_is_loopback):
             return normalized, str(ip_obj)
     return None
 
@@ -83,9 +95,10 @@ def _host_is_allowed(hostname: str) -> bool:
         return False
     if lowered == "localhost":
         return True
+    hostname_is_loopback = _hostname_is_loopback_literal(lowered)
     try:
         ip_obj = ipaddress.ip_address(lowered)
-        return _ip_is_allowed(ip_obj)
+        return _ip_is_allowed(ip_obj, hostname_is_loopback_literal=hostname_is_loopback)
     except ValueError:
         pass
     try:
@@ -103,16 +116,26 @@ def _host_is_allowed(hostname: str) -> bool:
         except ValueError:
             return False
         resolved_any = True
-        if not _ip_is_allowed(ip_obj):
+        if not _ip_is_allowed(ip_obj, hostname_is_loopback_literal=hostname_is_loopback):
             return False
     return resolved_any
 
 
-def _ip_is_allowed(ip_obj: ipaddress._BaseAddress) -> bool:
+def _ip_is_allowed(
+    ip_obj: ipaddress._BaseAddress,
+    *,
+    hostname_is_loopback_literal: bool = False,
+) -> bool:
     if ip_obj.is_unspecified or ip_obj.is_multicast or ip_obj.is_reserved:
         return False
     if ip_obj.is_loopback:
-        return True
+        # A public hostname that resolves to 127.0.0.1 (e.g. `lvh.me`,
+        # `localtest.me`, attacker-controlled DNS) is SSRF dressed up as
+        # a webhook. Only accept loopback IPs when the URL hostname was
+        # itself a literal loopback name (`localhost`, `127.0.0.1`,
+        # `::1`) — anything else means a public name is being rebound
+        # to point at our own admin surface.
+        return hostname_is_loopback_literal
     if ip_obj.is_link_local:
         return False
     if ip_obj.is_private and not _allow_private_egress():

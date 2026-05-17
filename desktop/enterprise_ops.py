@@ -1307,8 +1307,18 @@ class EnterpriseWorkspaceController:
         app.enterprise_mitre_summary.setHtml(app._render_enterprise_mitre_summary(mitre_status, mitre_summary, mitre_compare, mitre_discover))
         app._show_json(app.enterprise_detail, {"triage": triage, "assets": assets, "approvals": approvals, "detections": detections, "mitre_status": mitre_status, "mitre_summary": mitre_summary, "mitre_discover": mitre_discover, "mitre_compare": mitre_compare, "story": story})
         if cases:
-            selected_row = next((idx for idx, item in enumerate(cases) if int(item.get("id", 0) or 0) == preferred_case_id), 0)
-            app.enterprise_cases_table.selectRow(selected_row)
+            # The cases table is sortable; populate re-enables sorting so
+            # a pre-sort index into `cases` no longer maps to the visual
+            # row. Locate the row by its column-0 case id instead, or the
+            # Refresh would load a different case's board.
+            tbl = app.enterprise_cases_table
+            selected_row = 0
+            for r in range(tbl.rowCount()):
+                cell = tbl.item(r, 0)
+                if cell is not None and cell.text().strip() == str(preferred_case_id):
+                    selected_row = r
+                    break
+            tbl.selectRow(selected_row)
             app.load_selected_case_board()
             app.enterprise_loaded_once = True
             app.enterprise_live_status.setText(f"Live sync updated {time.strftime('%H:%M:%S')}")
@@ -2141,7 +2151,12 @@ class EnterpriseWorkspaceController:
         # Reassigning a case is a state change with regulatory weight —
         # who owned it before, who owns it now, why. Capture a
         # structured reason so the audit chain is actionable.
-        reason = self._capture_reason(f"assign (case {case_id} → {analyst.strip()})")
+        # MUST be the canonical token — ReasonCapture only prompts when
+        # the action is in ENTERPRISE_REASON_REQUIRED_ACTIONS. A
+        # formatted string returns {} (no modal) and then reason[...]
+        # KeyErrors below. Case/analyst context is already recorded via
+        # _record_audit(target=...).
+        reason = self._capture_reason("assign")
         if reason is None:
             return
         actor, _ws = actor_workspace_pair(app)
@@ -2390,7 +2405,7 @@ class EnterpriseWorkspaceController:
         # The PDF report leaves the appliance — capture *why* it was
         # exported so the chain-of-custody record matches the evidence
         # bundle.
-        reason = self._capture_reason(f"export-report (case {case_id})")
+        reason = self._capture_reason("export-report")  # canonical token (see assign_case)
         if reason is None:
             return
         try:
@@ -2456,7 +2471,7 @@ class EnterpriseWorkspaceController:
         # being staged. Capture a real ticket + reason so the approver
         # has context to act on, instead of the previous boilerplate
         # "High impact response requires approval." string.
-        reason = self._capture_reason(f"approval (case {case_id})")
+        reason = self._capture_reason("approval")  # canonical token (see assign_case)
         if reason is None:
             return
         actor, _ws = actor_workspace_pair(app)
@@ -2590,7 +2605,7 @@ class EnterpriseWorkspaceController:
         # the same risk profile as a controlled simulation. Capture
         # the ticket so the audit chain explains what corner of the
         # estate is being re-tested.
-        reason = self._capture_reason(f"purple-replay ({artifact})")
+        reason = self._capture_reason("purple-replay")  # canonical token (see assign_case)
         if reason is None:
             return
         try:

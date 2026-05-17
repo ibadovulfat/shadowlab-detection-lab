@@ -8,6 +8,11 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
+
+try:
+    from _safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
+except ImportError:  # pragma: no cover
+    from desktop._safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -735,26 +740,33 @@ class IntegrationsWorkspaceController:
         # wall of identical chips becomes a visual hierarchy.
         # Group palette mirrors the network tab's "category card" pattern.
         controls_actions = QWidget()
-        controls_actions_layout = QHBoxLayout(controls_actions)
+        controls_actions_layout = QVBoxLayout(controls_actions)
         controls_actions_layout.setContentsMargins(0, 0, 0, 0)
         controls_actions_layout.setSpacing(6)
 
         # Common style helpers.
         def _style_button(btn, *, destructive: bool = False) -> None:
             btn.setMinimumHeight(28)
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn.setMinimumWidth(max(92, btn.sizeHint().width() + 18))
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             if destructive:
                 # Destructive actions get the muted red tone shared with
-                # Security Ops + Network Warfare. Hovering brightens the
-                # whole row so accidental clicks are visible.
+                # Security Ops + Network Warfare. Hover brightens and the
+                # pressed state visibly sinks so accidental clicks register.
                 btn.setStyleSheet(
-                    "background:#2c1820;color:#feb2b2;border:1px solid #5f1d1d;"
-                    "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;"
+                    "QPushButton{background:#2c1820;color:#feb2b2;border:1px solid #5f1d1d;"
+                    "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;}"
+                    "QPushButton:hover{background:#3d2129;border-color:#8a2a2a;color:#ffd0d0;}"
+                    "QPushButton:pressed{background:#511c1c;border-color:#a83232;padding-top:5px;padding-bottom:3px;}"
+                    "QPushButton:disabled{background:#1f1418;color:#7a5a5a;border-color:#3a2024;}"
                 )
             else:
                 btn.setStyleSheet(
-                    "background:#1a2a3d;color:#c8d8ea;border:1px solid #2c4260;"
-                    "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;"
+                    "QPushButton{background:#1a2a3d;color:#c8d8ea;border:1px solid #2c4260;"
+                    "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;}"
+                    "QPushButton:hover{background:#23394f;border-color:#4a6c95;color:#eaf2fb;}"
+                    "QPushButton:pressed{background:#2f4f70;border-color:#5d8aa8;padding-top:5px;padding-bottom:3px;}"
+                    "QPushButton:disabled{background:#141d28;color:#5e6f80;border-color:#23303f;}"
                 )
 
         # Pre-mark the destructive buttons so the operator can see the
@@ -774,6 +786,7 @@ class IntegrationsWorkspaceController:
         def _make_group(title: str, accent: str, buttons: list[QPushButton]) -> QWidget:
             group = QFrame()
             group.setProperty("card", True)
+            group.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
             group.setStyleSheet(
                 "QFrame[card='true']{"
                 f"background:#0e1720;border:1px solid {accent};border-radius:7px;padding:2px 4px;"
@@ -797,9 +810,23 @@ class IntegrationsWorkspaceController:
             ("Rules",      "#9b6ca8", [query_rules_btn, add_rules_btn, delete_rules_btn]),
             ("Policy",     "#a87d6c", [load_policy_btn, save_policy_btn, import_btn]),
         ]
-        for title, accent, buttons in action_groups:
-            controls_actions_layout.addWidget(_make_group(title, accent, buttons))
-        controls_actions_layout.addStretch(1)
+        # Two content-sized rows. The IoC group rides up onto the top
+        # row so the wide empty space to the right of Scheduler is used
+        # instead of wasted, leaving a balanced Rules/Policy bottom row.
+        # Each group hugs its own buttons and a trailing stretch keeps
+        # them left-packed — the previous QGridLayout forced shared
+        # column widths, so the IoC card was stretched to the 5-button
+        # Ingest width and rendered a wide empty gap before its buttons.
+        for row_groups in ([0, 1, 2], [3, 4]):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            for idx in row_groups:
+                title, accent, buttons = action_groups[idx]
+                row_layout.addWidget(_make_group(title, accent, buttons))
+            row_layout.addStretch(1)
+            controls_actions_layout.addWidget(row_widget)
         l.addWidget(controls_actions)
 
         # Track every action button so the BusyController + capability
@@ -929,8 +956,11 @@ class IntegrationsWorkspaceController:
             btn.setMinimumHeight(28)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.setStyleSheet(
-                "background:#1a2a3d;color:#c8d8ea;border:1px solid #2c4260;"
-                "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;"
+                "QPushButton{background:#1a2a3d;color:#c8d8ea;border:1px solid #2c4260;"
+                "border-radius:8px;padding:4px 8px;font-weight:600;font-size:10px;}"
+                "QPushButton:hover{background:#23394f;border-color:#4a6c95;color:#eaf2fb;}"
+                "QPushButton:pressed{background:#2f4f70;border-color:#5d8aa8;padding-top:5px;padding-bottom:3px;}"
+                "QPushButton:disabled{background:#141d28;color:#5e6f80;border-color:#23303f;}"
             )
             actions_row_layout.addWidget(btn)
         open_hids_target_btn.clicked.connect(app.open_selected_hids_target)
@@ -1022,6 +1052,11 @@ class IntegrationsWorkspaceController:
         except Exception as exc:
             self.app._show_error(self.app.whids_detail, "WHIDS refresh failed", exc)
             return
+        # A misbehaving/hostile manager can return a non-object JSON
+        # (list/str/null); the .get() calls below would then raise an
+        # uncaught AttributeError and break the whole refresh.
+        if not isinstance(scheduler, dict):
+            scheduler = {}
         dedupe_skips = len([item for item in exports if str(item.get("export_type", "")) == "dedupe_skip"])
         self.app.whids_table.setRowCount(len(exports))
         for r, item in enumerate(exports):
@@ -1080,6 +1115,8 @@ class IntegrationsWorkspaceController:
         except Exception as exc:
             self.app._show_error(self.app.hids_detail, "HIDS refresh failed", exc)
             return
+        if not isinstance(live_status, dict):
+            live_status = {}
         dedupe_skips = len([item for item in exports if str(item.get("export_type", "")) == "dedupe_skip"])
         successes = len([item for item in exports if str(item.get("status", "")).lower() in {"success", "ok"}])
         failures = len(exports) - successes
@@ -1172,7 +1209,7 @@ class IntegrationsWorkspaceController:
         api_key = self.app.whids_manager_api_key.text().strip()
         endpoint_uuid = self.app.whids_endpoint_uuid.text().strip()
         if not manager_url or not api_key:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         payload = {
             "manager_url": manager_url,
@@ -1196,7 +1233,7 @@ class IntegrationsWorkspaceController:
         manager_url = self.app.whids_manager_url.text().strip()
         api_key = self.app.whids_manager_api_key.text().strip()
         if not manager_url or not api_key:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         payload = {
             "manager_url": manager_url,
@@ -1221,7 +1258,7 @@ class IntegrationsWorkspaceController:
         api_key = self.app.whids_manager_api_key.text().strip()
         endpoint_uuid = self.app.whids_endpoint_uuid.text().strip()
         if not manager_url or not api_key or not endpoint_uuid:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL, X-Api-Key and Endpoint UUID first")
+            self._show_whids_missing_input("Provide WHIDS manager URL, X-Api-Key and Endpoint UUID first")
             return
         payload = {
             "manager_url": manager_url,
@@ -1264,15 +1301,13 @@ class IntegrationsWorkspaceController:
             return
         incident_id = self.app.hids_incident_id.text().strip()
         if not incident_id:
-            row = self.app.hids_table.currentRow()
-            if row >= 0:
-                current_detail = self.app.hids_detail.toPlainText().strip()
-                try:
-                    payload = json.loads(current_detail)
-                    incident_id = str(payload.get("incident_id", "")).strip()
-                except Exception:
-                    incident_id = ""
-        if not incident_id:
+            # Do NOT infer the incident id from the detail panel. It is
+            # not bound to the selected row — `show_selected_hids_export`
+            # never writes an `incident_id`, so the panel only ever holds
+            # an unrelated source (a prior refresh's exports[0] or an
+            # earlier response result). Inferring it here would aim a
+            # kill/quarantine at the wrong incident while the dialog
+            # looks legitimate. Require an explicit target instead.
             incident_id, ok = QInputDialog.getText(self.app, "Incident Response", "Incident ID:")
             if not ok or not incident_id.strip():
                 self.app.statusBar().showMessage("Provide an incident ID first")
@@ -1335,6 +1370,18 @@ class IntegrationsWorkspaceController:
             "verify_tls": self.app.whids_verify_tls.isChecked(),
         }
 
+    def _show_whids_missing_input(self, message: str) -> None:
+        self.app.statusBar().showMessage(message)
+        if hasattr(self.app, "whids_detail"):
+            self.app.whids_detail.setPlainText(
+                f"{message}\n\n"
+                "Required fields for manager-backed WHIDS actions:\n"
+                "- WHIDS Manager URL\n"
+                "- X-Api-Key\n"
+                "- Endpoint UUID for artifact/config/archive actions\n\n"
+                "Refresh WHIDS only reloads local cached history; it does not contact the manager."
+            )
+
     def load_integration_policy(self) -> None:
         try:
             result = self.app._get("/integrations/response-policy", timeout=45).json()
@@ -1384,7 +1431,7 @@ class IntegrationsWorkspaceController:
     def start_whids_scheduler(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"]:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         payload["endpoint_uuid"] = self.app.whids_endpoint_uuid.text().strip()
         payload["poll_interval"] = self.app.whids_scheduler_interval.value()
@@ -1423,7 +1470,7 @@ class IntegrationsWorkspaceController:
     def query_whids_iocs(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"]:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         filters = {}
         if self.app.whids_rule_name.text().strip():
@@ -1439,7 +1486,7 @@ class IntegrationsWorkspaceController:
     def add_whids_iocs(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"]:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         try:
             payload["items"] = self.parse_json_text(self.app.whids_ioc_payload, [])
@@ -1453,7 +1500,7 @@ class IntegrationsWorkspaceController:
     def delete_whids_iocs(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"]:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         if not self._check_action_gate("ioc-delete"):
             return
@@ -1504,7 +1551,7 @@ class IntegrationsWorkspaceController:
     def query_whids_rules(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"]:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         payload["name_filter"] = self.app.whids_rule_name.text().strip()
         try:
@@ -1517,7 +1564,7 @@ class IntegrationsWorkspaceController:
     def add_whids_rules(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"]:
-            self.app.statusBar().showMessage("Provide WHIDS manager URL and X-Api-Key first")
+            self._show_whids_missing_input("Provide WHIDS manager URL and X-Api-Key first")
             return
         try:
             payload["rules"] = self.parse_json_text(self.app.whids_rule_payload, [])
@@ -1531,7 +1578,7 @@ class IntegrationsWorkspaceController:
     def delete_whids_rules(self) -> None:
         payload = self.whids_manager_payload_base()
         if not payload["manager_url"] or not payload["api_key"] or not self.app.whids_rule_name.text().strip():
-            self.app.statusBar().showMessage("Provide WHIDS manager URL, X-Api-Key and rule name first")
+            self._show_whids_missing_input("Provide WHIDS manager URL, X-Api-Key and rule name first")
             return
         if not self._check_action_gate("rule-delete"):
             return
@@ -1541,10 +1588,15 @@ class IntegrationsWorkspaceController:
         # positive? deprecated? attacker insider?).
         confirm = QMessageBox(self.app)
         confirm.setWindowTitle("Confirm WHIDS rule delete")
-        confirm.setText(f"Delete WHIDS rule `{rule_name}`?")
+        # This field is a name / filter substring (see the input
+        # placeholder), so the manager may match and remove MORE than one
+        # rule. The confirmation must not imply a single exact rule.
+        confirm.setText(f"Delete WHIDS rule(s) matching `{html.escape(rule_name)}`?")
         confirm.setInformativeText(
-            "The rule will be removed from the WHIDS manager. Coverage drops "
-            "until a replacement is deployed. Structured reason required."
+            "This is a name / filter substring — every rule on the WHIDS "
+            "manager whose name matches it will be removed, not just one. "
+            "Coverage drops until a replacement is deployed. Structured "
+            "reason required."
         )
         confirm.setIcon(QMessageBox.Warning)
         confirm.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
@@ -1665,11 +1717,19 @@ class IntegrationsWorkspaceController:
         if not candidate:
             self.app.statusBar().showMessage("No local target is attached to this export")
             return
-        path = Path(candidate)
+        # The target column is populated from WHIDS/HIDS server JSON; a
+        # malicious manager (or MitM) could otherwise hand the operator
+        # `\\evil-share\payload.lnk` or a path inside System32 and we'd
+        # shell-launch it via the default file association.
+        try:
+            path = ensure_under_artifact_root(candidate, allow_shell_open=True)
+        except UnsafeArtifactPath as exc:
+            self.app.statusBar().showMessage(f"Open blocked: {exc}", 8000)
+            return
         if path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
             return
-        self.app.statusBar().showMessage(f"Target not found locally: {candidate}")
+        self.app.statusBar().showMessage(f"Target not found locally: {path}")
 
     def open_enterprise_case_for_incident(self, *, prefix: str = "") -> None:
         incident_id = self.app.hids_incident_id.text().strip()
@@ -1687,8 +1747,13 @@ class IntegrationsWorkspaceController:
         except Exception as exc:
             self.app.statusBar().showMessage(f"Enterprise case lookup failed: {exc}")
             return
+        if not isinstance(cases, list):
+            # Backend may return an error envelope ({"error": ...}); the
+            # loop below would otherwise enumerate dict keys and crash.
+            self.app.statusBar().showMessage("Enterprise case lookup returned an unexpected response")
+            return
         for idx, item in enumerate(cases):
-            if str(item.get("incident_id", "")).strip() == incident_id:
+            if isinstance(item, dict) and str(item.get("incident_id", "")).strip() == incident_id:
                 self.app._switch_to_tab("Enterprise")
                 self.app.refresh_enterprise_workspace()
                 self.app.enterprise_cases_table.selectRow(idx)

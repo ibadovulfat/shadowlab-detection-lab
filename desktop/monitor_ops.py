@@ -54,17 +54,35 @@ class MonitorWorkspaceController:
 
     def update_cpu_chart(self, rows) -> None:
         app = self.app
-        app.cpu_series.clear()
+        # Atomic `replace(list[QPointF])` rather than clear() + per-point
+        # append(). This series is shared with
+        # dashboard_ops.refresh_overview_widgets; clearing then appending
+        # point-by-point while the chart is mid-paint (or while the
+        # overview refresh touches the same series) is the classic
+        # PySide6 QtCharts segfault. replace() swaps the whole vector in
+        # one call.
+        from PySide6.QtCore import QPointF
         if rows:
             recent = self.sanitize_telemetry_rows(rows[-60:])
-            for idx, item in enumerate(recent):
-                app.cpu_series.append(idx, float(item.get("cpu", 0) or 0))
+            cpu_vals = [float(item.get("cpu", 0) or 0) for item in recent]
+            app.cpu_series.replace([
+                QPointF(idx, value) for idx, value in enumerate(cpu_vals)
+            ])
             app.cpu_axis_x.setRange(0, max(1, len(recent) - 1))
-            max_cpu = max(float(item.get("cpu", 0) or 0) for item in recent)
-            app.cpu_axis_y.setRange(0, max(25, min(100, max_cpu + 10)))
-            avg_cpu = sum(float(item.get("cpu", 0) or 0) for item in recent) / max(1, len(recent))
+            # `cpu_axis_y` is SHARED with the MEM series (see
+            # _build_overview_chart_view: mem_series.attachAxis(axis_y)).
+            # Scaling it from CPU alone clipped MEM off-chart entirely —
+            # e.g. CPU 4.6% → range 0..25 while MEM sits at ~78%, so the
+            # MEM line the legend advertises was invisible. Scale the
+            # shared "Utilisation %" axis to whichever series peaks.
+            mem_vals = [float(item.get("mem_percent", 0) or 0) for item in recent]
+            max_cpu = max(cpu_vals) if cpu_vals else 0.0
+            max_util = max([max_cpu] + mem_vals) if mem_vals else max_cpu
+            app.cpu_axis_y.setRange(0, max(25, min(100, max_util + 10)))
+            avg_cpu = sum(cpu_vals) / max(1, len(cpu_vals))
             app.cpu_chart.setTitle(f"Telemetry CPU Trend - {len(recent)} samples | avg {avg_cpu:.1f}%")
         else:
+            app.cpu_series.replace([])
             app.cpu_axis_x.setRange(0, 1)
             app.cpu_axis_y.setRange(0, 100)
             app.cpu_chart.setTitle("Telemetry CPU Trend - no telemetry collected yet")

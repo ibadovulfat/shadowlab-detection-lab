@@ -10,7 +10,7 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
+      - "automation/**"
   pull_request:
 
 permissions:

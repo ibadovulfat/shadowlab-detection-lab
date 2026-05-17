@@ -182,6 +182,8 @@ Current enterprise hardening highlights:
 - enterprise records, approvals, connector queue state, artifacts, and audit exports are workspace-aware
 - connector storage uses tenant-aware `workspace_id + name` persistence
 - replay protection, rate-limit state, request nonces, audit logs, and migration metadata are persisted
+- behavioral scoring is signal-first, so a clean host stays near zero and only a true malware or injection indicator raises an incident
+- server-supplied paths reaching the desktop client are sandboxed to the artifact roots before any open, delete, or hash
 
 ## Validation
 

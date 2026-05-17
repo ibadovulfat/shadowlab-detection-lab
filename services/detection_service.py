@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+import threading
 import time
 from collections import Counter
 from itertools import chain
+from pathlib import Path
 from typing import Any
 
 from core.models import IncidentRecord
@@ -10,11 +14,101 @@ from core.normalization import summarize_to_security_events
 from detections.rule_engine import RuleEngine
 from plugins.detection_models.ai_engine import DetectionScorer
 
+# Likelihood at/above which a window is escalated to an incident
+# (MEDIUM). Mirrors the severity thresholds in build_incident.
+_INCIDENT_THRESHOLD = 0.45
+
+# EWMA smoothing for the per-host/workspace resource baseline. ~0.2
+# means each benign window nudges the baseline 20% toward the new
+# observation, so the baseline tracks gradual drift (new workload) but
+# resists single-window spikes.
+_BASELINE_ALPHA = 0.2
+
+# Baseline is only LEARNED from benign windows (no true signal). A
+# compromised window must never poison the "normal" the host is scored
+# against.
+_BASELINE_KEYS = ("avg_cpu", "avg_threads", "avg_tcp_conns")
+
+
+class _BaselineStore:
+    """Persistent per-workspace resource baseline (EWMA).
+
+    Stored as a small JSON doc under ``shadowlab_out`` rather than a new
+    DB table to avoid a schema migration — it is host-local advisory
+    state, not audit data. Updated ONLY with benign windows so a real
+    incident can't shift "normal" and mask follow-on activity.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        base = Path(__file__).resolve().parent.parent / "shadowlab_out"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self._path = path or (base / "detection_baseline.json")
+        self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            with self._path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def get(self, workspace_id: str) -> dict[str, float] | None:
+        ws = str(workspace_id or "default").strip().lower() or "default"
+        entry = self._load().get(ws)
+        if not isinstance(entry, dict):
+            return None
+        out: dict[str, float] = {}
+        for key in _BASELINE_KEYS:
+            try:
+                out[key] = float(entry[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out or None
+
+    def update(self, workspace_id: str, observed: dict[str, float]) -> None:
+        ws = str(workspace_id or "default").strip().lower() or "default"
+        with self._lock:
+            data = self._load()
+            entry = data.get(ws) if isinstance(data.get(ws), dict) else {}
+            updated: dict[str, float] = {}
+            for key in _BASELINE_KEYS:
+                obs = observed.get(key)
+                if obs is None:
+                    continue
+                obs = float(obs)
+                prev = entry.get(key)
+                if prev is None:
+                    updated[key] = obs
+                else:
+                    updated[key] = (1.0 - _BASELINE_ALPHA) * float(prev) + _BASELINE_ALPHA * obs
+            if not updated:
+                return
+            entry.update(updated)
+            entry["updated_at"] = time.time()
+            data[ws] = entry
+            tmp = self._path.with_suffix(".tmp")
+            try:
+                with tmp.open("w", encoding="utf-8") as fh:
+                    json.dump(data, fh)
+                os.replace(tmp, self._path)
+            except OSError:
+                # Baseline persistence is advisory; a write failure must
+                # never break scoring.
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
 
 class DetectionOrchestrator:
     def __init__(self):
         self.scorer = DetectionScorer()
         self.rule_engine = RuleEngine()
+        self._baseline = _BaselineStore()
 
     def _event_count(self, mapping: dict[str, Any], *labels: str) -> float:
         for label in labels:
@@ -119,23 +213,44 @@ class DetectionOrchestrator:
             "sysmon_registry_set": registry_sets,
         }
 
+    def _window_resources(self, telemetry_rows: list[dict[str, Any]]) -> dict[str, float]:
+        """avg_cpu / avg_threads / avg_tcp_conns for this window (baseline I/O)."""
+        if not telemetry_rows:
+            return {}
+        n = float(len(telemetry_rows))
+        return {
+            "avg_cpu": sum(float(r.get("cpu", 0.0) or 0.0) for r in telemetry_rows) / n,
+            "avg_threads": sum(float(r.get("proc_threads", 0.0) or 0.0) for r in telemetry_rows) / n,
+            "avg_tcp_conns": sum(float(r.get("tcp_conns", 0.0) or 0.0) for r in telemetry_rows) / n,
+        }
+
     def incremental_score(
         self,
         telemetry_rows: list[dict[str, Any]],
         defender_summary: dict[str, Any],
         sysmon_summary: dict[str, Any],
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
-        base = self.scorer.heuristic(telemetry_rows, defender_summary, sysmon_summary)
+        baseline = self._baseline.get(workspace_id)
+        base = self.scorer.heuristic(telemetry_rows, defender_summary, sysmon_summary, baseline=baseline)
         findings = self._deduplicate_findings(
             self.rule_engine.evaluate(self.compute_metrics(telemetry_rows, defender_summary, sysmon_summary))
         )
         if findings:
-            boost = min(0.35, sum(f.score for f in findings))
-            base["likelihood"] = max(0.0, min(1.0, base["likelihood"] + boost))
-            base["notes"] = self._deduplicate_notes(list(base.get("notes", [])) + [finding.title for finding in findings])
+            # Rules surface correlation context regardless, but the
+            # likelihood BOOST is gated on a true signal: a window with
+            # no Defender malware verdict and no injection telemetry must
+            # not be escalated to MEDIUM purely because volume-based
+            # rules matched routine activity.
             base["rule_findings"] = [finding.to_dict() for finding in findings]
+            base["notes"] = self._deduplicate_notes(
+                list(base.get("notes", [])) + [finding.title for finding in findings]
+            )
             base["attack_chain"] = self._build_attack_chain(findings)
             base["mitre_mapping"] = sorted({tech for finding in findings for tech in finding.mitre_techniques})
+            if base.get("has_true_signal"):
+                boost = min(0.35, sum(f.score for f in findings))
+                base["likelihood"] = max(0.0, min(1.0, base["likelihood"] + boost))
             base["correlation_story"] = self._build_correlation_story(findings, base["likelihood"])
         return base
 
@@ -144,14 +259,17 @@ class DetectionOrchestrator:
         telemetry_rows: list[dict[str, Any]],
         defender_summary: dict[str, Any],
         sysmon_summary: dict[str, Any],
+        workspace_id: str = "default",
     ) -> dict[str, Any]:
-        base = self.scorer.final_score(telemetry_rows, defender_summary, sysmon_summary)
+        baseline = self._baseline.get(workspace_id)
+        base = self.scorer.final_score(telemetry_rows, defender_summary, sysmon_summary, baseline=baseline)
         findings = self._deduplicate_findings(
             self.rule_engine.evaluate(self.compute_metrics(telemetry_rows, defender_summary, sysmon_summary))
         )
         if findings:
             base["rule_findings"] = [finding.to_dict() for finding in findings]
-            base["likelihood"] = max(0.0, min(1.0, base["likelihood"] + min(0.4, sum(f.score for f in findings))))
+            if base.get("has_true_signal"):
+                base["likelihood"] = max(0.0, min(1.0, base["likelihood"] + min(0.4, sum(f.score for f in findings))))
             base["notes"] = self._deduplicate_notes(
                 list(base.get("notes", [])) + [f"Rule matched: {finding.rule_id}" for finding in findings]
             )
@@ -172,20 +290,54 @@ class DetectionOrchestrator:
         telemetry_rows: list[dict[str, Any]],
         defender_summary: dict[str, Any],
         sysmon_summary: dict[str, Any],
+        workspace_id: str = "default",
     ) -> IncidentRecord:
-        final = self.final_score(telemetry_rows, defender_summary, sysmon_summary)
+        final = self.final_score(telemetry_rows, defender_summary, sysmon_summary, workspace_id=workspace_id)
         findings = self._deduplicate_findings(
             self.rule_engine.evaluate(self.compute_metrics(telemetry_rows, defender_summary, sysmon_summary))
         )
-        severity = "high" if final["likelihood"] >= 0.85 else "medium" if final["likelihood"] >= 0.45 else "low"
-        recommended_actions = self._recommended_actions(final["likelihood"], findings)
+        likelihood = float(final.get("likelihood", 0.0))
+        has_true_signal = bool(final.get("has_true_signal"))
+
+        # Severity is gated on a true malicious indicator. Without one,
+        # the window is informational ("low") no matter how much routine
+        # volume it carried — this is what stops a clean production host
+        # from showing a permanent phantom MEDIUM incident.
+        if has_true_signal and likelihood >= 0.85:
+            severity = "high"
+        elif has_true_signal and likelihood >= _INCIDENT_THRESHOLD:
+            severity = "medium"
+        else:
+            severity = "low"
+
+        if has_true_signal:
+            title = "Behavioral detection incident"
+            summary = "Automated incident generated from telemetry, event logs, and rule correlation."
+        else:
+            title = "Baseline telemetry snapshot"
+            summary = (
+                "No malicious indicator detected. Host telemetry within learned baseline; "
+                "correlation context retained for review only."
+            )
+
+        # Learn the host's "normal" ONLY from benign windows so a real
+        # incident can't shift the baseline and mask follow-on activity.
+        if not has_true_signal and likelihood < _INCIDENT_THRESHOLD:
+            resources = self._window_resources(telemetry_rows)
+            if resources:
+                try:
+                    self._baseline.update(workspace_id, resources)
+                except Exception:
+                    pass
+
+        recommended_actions = self._recommended_actions(likelihood, findings)
         return IncidentRecord(
             incident_id=f"INC-{int(time.time())}",
             created_at=time.time(),
             severity=severity,
-            title="Behavioral detection incident",
-            summary="Automated incident generated from telemetry, event logs, and rule correlation.",
-            likelihood=float(final.get("likelihood", 0.0)),
+            title=title,
+            summary=summary,
+            likelihood=likelihood,
             findings=findings,
             notes=self._deduplicate_notes(list(final.get("notes", []))),
             recommended_actions=recommended_actions,

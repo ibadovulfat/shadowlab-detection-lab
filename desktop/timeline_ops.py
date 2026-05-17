@@ -1124,6 +1124,13 @@ class TimelineWorkspaceController:
                 table_item = QTableWidgetItem(value)
                 if c == 2:
                     table_item.setForeground(QBrush(QColor(_severity_colour(value))))
+                if c == 0:
+                    # Anchor the index into _filtered_events on the row.
+                    # The table is sortable, so a visual row no longer
+                    # maps to _filtered_events[row] after a header sort —
+                    # selection/pivot would otherwise act on the wrong
+                    # event. Qt keeps item data with the item across sorts.
+                    table_item.setData(Qt.UserRole, row)
                 table.setItem(row, c, table_item)
         table.setSortingEnabled(True)
         if not items:
@@ -1148,7 +1155,18 @@ class TimelineWorkspaceController:
                 span_text = f"{span_sec // 60}m"
             else:
                 span_text = f"{span_sec}s"
-        latest_event = items[0].get("title", "") if items else "—"
+        # The HTTP refresh path does not sort `items`, so items[0] is an
+        # arbitrary (often oldest) event. Pick the chronologically newest
+        # by parsed timestamp; fall back to items[0] only if no event has
+        # a usable time.
+        latest_ev = None
+        if items:
+            timed = [e for e in items if _SwimlaneView._to_epoch(e.get("time")) > 0]
+            latest_ev = (
+                max(timed, key=lambda e: _SwimlaneView._to_epoch(e.get("time")))
+                if timed else items[0]
+            )
+        latest_event = latest_ev.get("title", "") if latest_ev else "—"
 
         self._kpis["total_events"].update(
             str(total),
@@ -1174,18 +1192,38 @@ class TimelineWorkspaceController:
         self._kpis["latest"].update(
             latest_short or "—",
             "neutral",
-            self._format_time(items[0].get("time")) if items else "no events",
+            self._format_time(latest_ev.get("time")) if latest_ev else "no events",
         )
 
     # ------------------------------------------------------------------ #
     # Selection / interaction
     # ------------------------------------------------------------------ #
 
+    def _data_index_for_visual_row(self, row: int) -> int:
+        """Map a visual table row to its _filtered_events index via the
+        Qt.UserRole anchor (sort-safe). Falls back to the raw row."""
+        if row < 0:
+            return -1
+        anchor = self.app.timeline_table.item(row, 0)
+        if anchor is not None:
+            di = anchor.data(Qt.UserRole)
+            if isinstance(di, int) and 0 <= di < len(self._filtered_events):
+                return di
+        return row if row < len(self._filtered_events) else -1
+
+    def _visual_row_for_data_index(self, idx: int) -> int:
+        table = self.app.timeline_table
+        for r in range(table.rowCount()):
+            anchor = table.item(r, 0)
+            if anchor is not None and anchor.data(Qt.UserRole) == idx:
+                return r
+        return idx  # best effort if no anchor matched
+
     def show_selected_timeline(self) -> None:
-        row = self.app.timeline_table.currentRow()
-        if row < 0 or row >= len(self._filtered_events):
+        di = self._data_index_for_visual_row(self.app.timeline_table.currentRow())
+        if di < 0 or di >= len(self._filtered_events):
             return
-        event = self._filtered_events[row]
+        event = self._filtered_events[di]
         self.app._show_json(self.app.timeline_detail, event)
         self._refresh_pivot_buttons(event)
 
@@ -1193,9 +1231,10 @@ class TimelineWorkspaceController:
         if idx < 0 or idx >= len(self._filtered_events):
             return
         # Sync the table selection so the table view and swimlane never
-        # disagree about the highlighted event.
+        # disagree about the highlighted event. After a header sort the
+        # visual row != data index, so map back through the anchor.
         try:
-            self.app.timeline_table.selectRow(idx)
+            self.app.timeline_table.selectRow(self._visual_row_for_data_index(idx))
         except Exception:
             pass
         event = self._filtered_events[idx]
@@ -1245,10 +1284,10 @@ class TimelineWorkspaceController:
             )
 
     def _selected_event(self) -> dict[str, Any] | None:
-        row = self.app.timeline_table.currentRow()
-        if row < 0 or row >= len(self._filtered_events):
+        di = self._data_index_for_visual_row(self.app.timeline_table.currentRow())
+        if di < 0 or di >= len(self._filtered_events):
             return None
-        return self._filtered_events[row]
+        return self._filtered_events[di]
 
     def _pivot_selected_to_graph(self) -> None:
         event = self._selected_event()
@@ -1345,10 +1384,21 @@ class TimelineWorkspaceController:
 
             def run(self) -> None:
                 import requests as _requests
-                from urllib.parse import urljoin
+                from urllib.parse import urljoin, urlparse
                 base = outer_app.base.text().strip() if hasattr(outer_app, "base") else ""
                 url = urljoin((base or "http://127.0.0.1:8000").rstrip("/") + "/", "timeline/stream")
                 api_key = outer_app.api_key.text().strip() if hasattr(outer_app, "api_key") else ""
+                # The API key rides this connection for the lifetime of
+                # the SSE stream — long-lived plaintext credentials on
+                # the wire to anything other than loopback is a hard no.
+                parsed = urlparse(url)
+                host = (parsed.hostname or "").lower()
+                if parsed.scheme.lower() == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+                    self.stream_failed.emit(
+                        "Refusing to stream timeline events over plaintext HTTP to a "
+                        "non-loopback host. Switch the API base URL to https://."
+                    )
+                    return
                 headers = {"X-API-Key": api_key, "Accept": "text/event-stream"}
                 try:
                     with _requests.get(url, headers=headers, stream=True, timeout=(8, None)) as resp:
@@ -1526,9 +1576,10 @@ class TimelineWorkspaceController:
             return
         rows_to_flash: list[int] = []
         for r in range(table.rowCount()):
-            if r >= len(self._filtered_events):
-                break
-            ev = self._filtered_events[r]
+            di = self._data_index_for_visual_row(r)
+            if di < 0 or di >= len(self._filtered_events):
+                continue
+            ev = self._filtered_events[di]
             if self._event_identity(ev) in idents:
                 rows_to_flash.append(r)
         if not rows_to_flash:
@@ -1717,6 +1768,35 @@ class TimelineWorkspaceController:
     # P1 forensic helpers - snapshot, export, audit
     # ------------------------------------------------------------------ #
 
+    def _reject_unsafe_export_path(self, path: str) -> bool:
+        """Return True (and surface an error) if `path` resolves into the
+        Windows tree, Program Files, or a Startup folder. Resolving the
+        real path first defeats `..` traversal and 8.3 short names.
+        Mirrors the File-Analysis export hardening."""
+        import os
+        from pathlib import Path as _Path
+        try:
+            dest = str(_Path(path).resolve()).lower().replace("/", "\\")
+        except Exception:
+            dest = str(path).lower().replace("/", "\\")
+        system_root = str(
+            _Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+        ).lower().replace("/", "\\")
+        blocked = [
+            system_root + "\\",
+            os.environ.get("ProgramFiles", r"C:\Program Files").lower().replace("/", "\\") + "\\",
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)").lower().replace("/", "\\") + "\\",
+        ]
+        if any(dest.startswith(p) for p in blocked) or "\\start menu\\programs\\startup\\" in dest:
+            self.app._show_error(
+                self.app.timeline_detail,
+                "Export destination blocked",
+                Exception(f"Refusing to write into a Windows system / Startup folder: {path}"),
+            )
+            self._record_audit("export-blocked", target=str(path), payload_size=0)
+            return True
+        return False
+
     def _save_snapshot(self) -> None:
         """Persist the current filtered timeline + filter state to disk.
 
@@ -1737,6 +1817,8 @@ class TimelineWorkspaceController:
             self.app, "Save Timeline Snapshot", default, "JSON (*.json)",
         )
         if not path:
+            return
+        if self._reject_unsafe_export_path(path):
             return
         payload = {
             "saved_at": time.time(),
@@ -1830,6 +1912,8 @@ class TimelineWorkspaceController:
         )
         if not path:
             return
+        if self._reject_unsafe_export_path(path):
+            return
         try:
             scene = self._swimlane.scene()
             rect = scene.sceneRect()
@@ -1863,6 +1947,8 @@ class TimelineWorkspaceController:
             self.app, "Export Timeline JSON", default, "JSON (*.json)",
         )
         if not path:
+            return
+        if self._reject_unsafe_export_path(path):
             return
         try:
             with open(path, "w", encoding="utf-8") as handle:

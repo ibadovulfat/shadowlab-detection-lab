@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -542,9 +543,16 @@ class IntelWorkspaceController:
     # ---- Pivot + backup ------------------------------------------------
 
     def _selected_persistence_record(self) -> dict | None:
-        row = self.app.persist_table.currentRow()
+        table = self.app.persist_table
+        row = table.currentRow()
         if row < 0:
             return None
+        anchor = table.item(row, 0)
+        if anchor is not None:
+            rec = anchor.data(Qt.UserRole)
+            if isinstance(rec, dict):
+                return rec
+        # Legacy fallback for tables built before the row anchor existed.
         items = getattr(self.app, "filtered_persistence_items", []) or []
         if row < len(items):
             return items[row]
@@ -716,8 +724,18 @@ class IntelWorkspaceController:
         except Exception as exc:
             app._show_error(app.persist_detail, "Snapshot load failed", exc)
             return
-        snap_entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
-        live_entries = getattr(app, "filtered_persistence_items", []) or []
+        # The snapshot file is operator-chosen and may be hand-edited or
+        # planted: tolerate a non-object top level and non-dict entries
+        # instead of raising AttributeError out of the action handler.
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        snap_entries = [
+            e for e in (snapshot.get("entries", []) or []) if isinstance(e, dict)
+        ]
+        live_entries = [
+            e for e in (getattr(app, "filtered_persistence_items", []) or [])
+            if isinstance(e, dict)
+        ]
 
         def _ident(entry: dict) -> tuple[str, str, str]:
             return (
@@ -1138,10 +1156,14 @@ class IntelWorkspaceController:
             if not urls:
                 return
             local = urls[0].toLocalFile()
-            if local:
+            if local and os.path.isfile(local):
                 app.ma_file_path.setText(local)
                 app.ma_loaded_badge.setText(f"Loaded: {Path(local).name}")
                 app.statusBar().showMessage(f"File queued for analysis: {local}")
+            else:
+                # A folder, a non-existent path, or a remote/UNC URL — do
+                # not queue it; the backend would just error on it.
+                app.statusBar().showMessage("Drop a single existing local file (folders and remote URLs are ignored).")
             event.acceptProposedAction()
 
         w.dragEnterEvent = _drag_enter  # type: ignore[assignment]
@@ -1177,6 +1199,14 @@ class IntelWorkspaceController:
             app.ma_file_path.setText(path)
         sha = str(meta.get("sha256") or "")
         decision = str(meta.get("decision") or "")
+        # If the file is gone (or was replaced at the same path by a new
+        # drop), the stored SHA/decision no longer describe the bytes on
+        # disk. Showing them would let the analyst act on a stale verdict
+        # — blank them and warn instead.
+        file_present = bool(path) and os.path.isfile(path)
+        if not file_present:
+            sha = ""
+            decision = ""
         if hasattr(app, "ma_loaded_badge"):
             app.ma_loaded_badge.setText(f"Loaded: {Path(path).name or '—'}")
         if hasattr(app, "ma_loaded_hash"):
@@ -1185,7 +1215,12 @@ class IntelWorkspaceController:
         if hasattr(app, "ma_loaded_decision"):
             tag = decision.upper() if decision else "—"
             app.ma_loaded_decision.setText(f"Decision: {tag}")
-        app.statusBar().showMessage(f"Sample restored from history: {path}")
+        if file_present:
+            app.statusBar().showMessage(f"Sample restored from history: {path}")
+        else:
+            app.statusBar().showMessage(
+                f"⚠ History path no longer on disk — re-analyze before trusting any verdict: {path}"
+            )
 
     def refresh_persistence(self) -> None:
         app = self.app
@@ -1225,7 +1260,13 @@ class IntelWorkspaceController:
             slug for slug, chk in getattr(self, "_persist_type_chips", {}).items()
             if chk.isChecked()
         }
-        items_all = getattr(app, "persistence_items", []) or []
+        # Defence-in-depth: if the API ever returns a JSON object/scalar
+        # instead of a list, iterating it would yield dict keys (str) and
+        # crash `_classify_persistence_type`. Keep only dict records.
+        items_all = [
+            i for i in (getattr(app, "persistence_items", []) or [])
+            if isinstance(i, dict)
+        ]
         items: list[dict] = []
         for item in items_all:
             # Substring filter against the full JSON blob.
@@ -1320,6 +1361,14 @@ class IntelWorkspaceController:
             for c, value in enumerate(cells):
                 cell = QTableWidgetItem(value)
                 table.setItem(r, c, cell)
+            # Anchor the source record on the row itself. Column sorting
+            # reorders rows but not `filtered_persistence_items`, so
+            # resolving the selection by `currentRow()` index would act
+            # on the wrong (possibly destructive) entry after a sort.
+            # Qt keeps item data with the item across sorts.
+            anchor_cell = table.item(r, 0)
+            if anchor_cell is not None:
+                anchor_cell.setData(Qt.UserRole, item)
             # Tone-code Risk column (0).
             risk_cell = table.item(r, 0)
             if risk_cell is not None:
@@ -1397,8 +1446,10 @@ class IntelWorkspaceController:
         app = self.app
         row = app.persist_table.currentRow()
         if row < 0: return
-        items = getattr(app, "filtered_persistence_items", [])
-        detail = items[row] if row < len(items) else {}
+        # Resolve via the row anchor (sort-safe), same as the destructive
+        # path — indexing filtered_persistence_items by currentRow() would
+        # show a different entry after the operator sorts a column.
+        detail = self._selected_persistence_record() or {}
         if not detail:
             detail = {}
             for c, key in enumerate(["name","type","path","details"]):
@@ -1438,6 +1489,29 @@ class IntelWorkspaceController:
         else:  # legacy 4-column layout
             name = _cell(0); item_type = _cell(1); path = _cell(2); signer = ""; zone = ""
 
+        # The Type column shows a UI-derived classification label
+        # ("Registry", "Service", ...). The backend enum only accepts the
+        # scanner's verbatim type ("Registry Run Key", "Windows Service",
+        # ...), so sending the cell label 422s every Registry/Service/
+        # Driver/WMI remediation. Resolve the authoritative record (row-
+        # anchored, sort-safe) and use its real type/path/name.
+        record = self._selected_persistence_record()
+        _label_to_enum = {
+            "registry": "Registry Run Key",
+            "scheduled task": "Scheduled Task",
+            "scheduled_task": "Scheduled Task",
+            "service": "Windows Service",
+            "startup folder": "Startup Folder",
+            "startup_folder": "Startup Folder",
+        }
+        if isinstance(record, dict):
+            name = str(record.get("name") or name)
+            path = str(record.get("path") or path)
+            server_type = str(record.get("type") or "").strip()
+            item_type = server_type or _label_to_enum.get(item_type.strip().lower(), item_type)
+        else:
+            item_type = _label_to_enum.get(item_type.strip().lower(), item_type)
+
         # Sudo gate - block destructive action on stale sessions.
         if self._persistence_sudo_required():
             warn = QMessageBox(app)
@@ -1457,15 +1531,20 @@ class IntelWorkspaceController:
         confirm = QMessageBox(app)
         confirm.setWindowTitle("Confirm persistence remediation")
         confirm.setIcon(QMessageBox.Critical)
-        confirm.setText(f"Remediate {name} ({item_type})?")
+        # Name/path/signer are attacker-controlled (a malicious autorun
+        # picks its own strings). QMessageBox auto-renders rich text, so
+        # unescaped markup here could spoof or hide the real target on
+        # the very dialog the analyst uses to authorise an irreversible
+        # delete. Escape every interpolated value.
+        confirm.setText(f"Remediate {html.escape(name)} ({html.escape(item_type)})?")
         info_lines = [
-            f"<b>Path:</b> <code>{path}</code>",
-            f"<b>Type:</b> {item_type}",
+            f"<b>Path:</b> <code>{html.escape(path)}</code>",
+            f"<b>Type:</b> {html.escape(item_type)}",
         ]
         if zone:
-            info_lines.append(f"<b>Path zone:</b> {zone}")
+            info_lines.append(f"<b>Path zone:</b> {html.escape(zone)}")
         if signer:
-            info_lines.append(f"<b>Signer:</b> {signer}")
+            info_lines.append(f"<b>Signer:</b> {html.escape(signer)}")
         info_lines.extend([
             "",
             "<b>This will delete the registry value / scheduled task / service entry</b>",
@@ -1480,9 +1559,9 @@ class IntelWorkspaceController:
             return
         # Backup-before-delete - always write a JSON record under
         # shadowlab_out/ so the analyst has a reference if they need to
-        # restore the entry by hand.
-        record = self._selected_persistence_record()
-        if record is None:
+        # restore the entry by hand. Reuse the record resolved above so
+        # the backup matches the entry actually being deleted.
+        if not isinstance(record, dict) or not record:
             record = {"name": name, "type": item_type, "path": path}
         try:
             from _panel_kit import redact_payload as _redact
@@ -2167,12 +2246,25 @@ class IntelWorkspaceController:
         file_path, _ = QFileDialog.getSaveFileName(app, "Export File Analysis JSON", "shadowlab-file-analysis.json", "JSON Files (*.json)")
         if not file_path:
             return
-        # P0 export-destination guard. Refuse to write into Windows
-        # system folders even if the operator typed the path manually
-        # — accidental overwrites in System32 are unrecoverable.
-        dest_lower = file_path.lower().replace("/", "\\")
-        risky_roots = ("\\windows\\system32\\", "\\windows\\syswow64\\", "\\windows\\system\\")
-        if any(part in dest_lower for part in risky_roots):
+        # P0 export-destination guard. Resolve the REAL path first so
+        # `..` traversal and 8.3 short names cannot bypass the check,
+        # then refuse the entire Windows tree, Program Files, and any
+        # Startup folder (a renamed .json/.bat/.lnk dropped there is a
+        # logon-persistence / overwrite hazard).
+        try:
+            dest_resolved = Path(file_path).resolve()
+        except Exception:
+            dest_resolved = Path(file_path)
+        dest_lower = str(dest_resolved).lower().replace("/", "\\")
+        system_root = str(
+            Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+        ).lower().replace("/", "\\")
+        blocked_prefixes = [
+            system_root + "\\",
+            os.environ.get("ProgramFiles", r"C:\Program Files").lower().replace("/", "\\") + "\\",
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)").lower().replace("/", "\\") + "\\",
+        ]
+        if any(dest_lower.startswith(p) for p in blocked_prefixes) or "\\start menu\\programs\\startup\\" in dest_lower:
             app._show_error(
                 app.ma_output,
                 "Export destination blocked",
@@ -2194,8 +2286,14 @@ class IntelWorkspaceController:
         if reason is None:
             return
         try:
+            from _panel_kit import redact_payload as _redact
+        except ImportError:
+            from desktop._panel_kit import redact_payload as _redact
+        try:
             with open(file_path, "w", encoding="utf-8") as handle:
-                json.dump(result, handle, indent=2, ensure_ascii=False)
+                # Match the in-UI Raw tab: never let provider keys / tokens
+                # folded into the backend result leave the appliance.
+                json.dump(_redact(result), handle, indent=2, ensure_ascii=False)
             ok = True
             error = ""
         except Exception as exc:

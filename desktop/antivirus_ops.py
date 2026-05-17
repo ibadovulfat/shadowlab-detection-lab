@@ -9,6 +9,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices
+
+try:
+    from _safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
+except ImportError:  # pragma: no cover
+    from desktop._safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -249,6 +254,17 @@ class AntivirusWorkspaceController:
         # entire allowlist as reason-required; an action outside that
         # set yields the empty-dict sentinel.
         return self._reason.capture(action)
+
+    @staticmethod
+    def _safe_epoch_str(raw) -> str:
+        """Format an epoch-ish value without letting a non-numeric
+        `added_at` (e.g. an ISO string) raise ValueError mid-render."""
+        if raw in (None, "", 0):
+            return "—"
+        try:
+            return datetime.fromtimestamp(float(raw)).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return str(raw)
 
     def _submit_async(self, label: str, work, on_success, on_failure=None, *, timeout_seconds: int = 60) -> None:
         """Delegate to the shared `submit_async_call`.
@@ -1194,7 +1210,8 @@ class AntivirusWorkspaceController:
         if row < 0:
             app.statusBar().showMessage("Select a verdict row first")
             return
-        items = getattr(app, "antivirus_scan_results", [])
+        # Bounds-check against the filtered slice the table renders.
+        items = getattr(self, "_filtered_verdict_rows", [])
         if row >= len(items):
             return
         # Reuse the existing rich render — it already updates result_detail,
@@ -1392,7 +1409,11 @@ class AntivirusWorkspaceController:
         confirm.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
         if confirm.exec() != QMessageBox.Ok:
             return
-        reason = self._capture_reason(f"bulk-quarantine ({len(selected)} target(s))")
+        # MUST be the canonical token — ReasonCapture only prompts when
+        # the action is in RESPONSE_ACTION_ALLOWLIST. A formatted string
+        # silently returns {} and disables the mandatory reason modal
+        # the confirm dialog just promised.
+        reason = self._capture_reason("quarantine")
         if reason is None:
             return
 
@@ -2681,7 +2702,11 @@ class AntivirusWorkspaceController:
             confirm.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
             if confirm.exec() != QMessageBox.Ok:
                 return
-            reason = self._capture_reason("kill" if not forcing else "kill --force")
+            # Canonical token only ("kill --force" is not in the
+            # allowlist → {} → no modal → reason['reason_summary']
+            # KeyError below). The force flag is recorded separately in
+            # the audit action field.
+            reason = self._capture_reason("kill")
             if reason is None:
                 return
 
@@ -2790,7 +2815,7 @@ class AntivirusWorkspaceController:
         def _release() -> None:
             if not self._check_response_gate("release"):
                 return
-            reason = self._capture_reason("release (network)")
+            reason = self._capture_reason("release")  # canonical token (see _kill)
             if reason is None:
                 return
 
@@ -3105,6 +3130,7 @@ class AntivirusWorkspaceController:
                     resp = app._get(f"/antivirus/lists/{kind}", timeout=10).json()
                 except Exception:
                     return
+                resp = resp if isinstance(resp, dict) else {}
                 items = resp.get("items", []) if isinstance(resp.get("items"), list) else []
                 table.setRowCount(len(items))
                 for r, item in enumerate(items):
@@ -3113,7 +3139,7 @@ class AntivirusWorkspaceController:
                         str(item.get("kind", "")),
                         str(item.get("note", "")),
                         str(item.get("actor", "")),
-                        datetime.fromtimestamp(float(item.get("added_at", 0) or 0)).strftime("%Y-%m-%d %H:%M") if item.get("added_at") else "—",
+                        self._safe_epoch_str(item.get("added_at")),
                     ]
                     for c, v in enumerate(cells):
                         table.setItem(r, c, QTableWidgetItem(v))
@@ -4476,7 +4502,7 @@ class AntivirusWorkspaceController:
         self._filtered_verdict_rows = filtered
         table.setRowCount(len(filtered))
         for row, item in enumerate(filtered):
-            verdict_low = str(item["verdict"]).lower()
+            verdict_low = str(item.get("verdict", "")).lower()
             dot = "●" if verdict_low in {"infected", "malicious"} else "◐" if verdict_low == "suspicious" else "○"
             sha = str(item.get("sha256", "") or "")
             sha_display = (sha[:12] + "…") if sha else "—"
@@ -4515,7 +4541,11 @@ class AntivirusWorkspaceController:
         if row < 0:
             self._set_scan_empty_state()
             return
-        items = getattr(self.app, "antivirus_scan_results", [])
+        # Index the SAME filtered slice the table renders from. The
+        # table is built from _filtered_verdict_rows (default 24h
+        # window), so a visual currentRow() against the unfiltered
+        # antivirus_scan_results would act on a different sample.
+        items = getattr(self, "_filtered_verdict_rows", [])
         if row >= len(items):
             self._set_scan_empty_state()
             return
@@ -4573,7 +4603,11 @@ class AntivirusWorkspaceController:
         if row < 0:
             self.app.statusBar().showMessage("Select a detection result first")
             return
-        items = getattr(self.app, "antivirus_scan_results", [])
+        # Index the SAME filtered slice the table renders from. The
+        # table is built from _filtered_verdict_rows (default 24h
+        # window), so a visual currentRow() against the unfiltered
+        # antivirus_scan_results would act on a different sample.
+        items = getattr(self, "_filtered_verdict_rows", [])
         if row >= len(items):
             return
         if not self._check_response_gate("quarantine"):
@@ -4643,7 +4677,11 @@ class AntivirusWorkspaceController:
         if row < 0:
             self.app.statusBar().showMessage("Select a scan result first")
             return
-        items = getattr(self.app, "antivirus_scan_results", [])
+        # Index the SAME filtered slice the table renders from. The
+        # table is built from _filtered_verdict_rows (default 24h
+        # window), so a visual currentRow() against the unfiltered
+        # antivirus_scan_results would act on a different sample.
+        items = getattr(self, "_filtered_verdict_rows", [])
         if row >= len(items):
             return
         payload = items[row]["payload"]
@@ -4689,7 +4727,11 @@ class AntivirusWorkspaceController:
         if row < 0:
             self.app.statusBar().showMessage("Select a scan result first")
             return
-        items = getattr(self.app, "antivirus_scan_results", [])
+        # Index the SAME filtered slice the table renders from. The
+        # table is built from _filtered_verdict_rows (default 24h
+        # window), so a visual currentRow() against the unfiltered
+        # antivirus_scan_results would act on a different sample.
+        items = getattr(self, "_filtered_verdict_rows", [])
         if row >= len(items):
             return
         try:
@@ -4884,15 +4926,27 @@ class AntivirusWorkspaceController:
         if not target:
             self.app.statusBar().showMessage("No quarantine copy path available")
             return
+        # The vault by definition stores known-bad binaries. The path
+        # itself is server-supplied, and `Path.resolve()` happily
+        # follows junctions outside the vault root. Funnel through the
+        # sandbox + executable-suffix deny-list so the OS shell handler
+        # never detonates a quarantined sample on the analyst host.
+        try:
+            safe_target = ensure_under_artifact_root(target, allow_shell_open=True)
+        except UnsafeArtifactPath as exc:
+            self.app.statusBar().showMessage(
+                f"Quarantine open blocked: {exc}", 8000,
+            )
+            return
         self._record_history(
             category="response",
             action="open quarantine copy",
-            target=target,
+            target=str(safe_target),
             severity="low",
             status="opened",
             payload=items[row],
         )
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(target).resolve())))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(safe_target)))
 
     def test_alert_webhook(self) -> None:
         if not self.app.webhook_url.text().strip():

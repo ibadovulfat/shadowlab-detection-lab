@@ -107,6 +107,58 @@ class DetectionServiceTests(unittest.TestCase):
 
         self.assertIn("low_and_slow_dns_beacon", rule_ids)
 
+    def test_clean_host_with_routine_volume_scores_near_zero(self) -> None:
+        """Production guard: a host with NO true malicious indicator —
+        no Defender malware verdict, no Sysmon CreateRemoteThread — must
+        score ~0 and NOT raise a MEDIUM incident, even when routine
+        Defender/Sysmon log volume and connection counts are high (the
+        exact "looks like a simulation" false-positive)."""
+        orchestrator = DetectionOrchestrator()
+        telemetry_rows = [
+            {"cpu": 6, "proc_threads": 24, "tcp_conns": 9, "bytes_sent_rate": 1500, "bytes_recv_rate": 3000, "remote_ips": ["1.1.1.1"]},
+            {"cpu": 5, "proc_threads": 26, "tcp_conns": 11, "bytes_sent_rate": 1200, "bytes_recv_rate": 2800, "remote_ips": ["1.1.1.1"]},
+            {"cpu": 7, "proc_threads": 25, "tcp_conns": 10, "bytes_sent_rate": 1400, "bytes_recv_rate": 2600, "remote_ips": ["1.1.1.1"]},
+        ]
+        # High ROUTINE volume but zero true signal: no "Malware
+        # detected", no "Remediation failed", no "CreateRemoteThread".
+        defender_summary = {"total": 1200, "by_id": {"Configuration changed": 800, "Remediation action taken": 400}}
+        sysmon_summary = {
+            "total": 1200,
+            "by_id": {
+                "Network connection": 600,
+                "DNS query": 400,
+                "Registry set": 150,
+                "Process creation": 50,
+            },
+        }
+
+        result = orchestrator.final_score(telemetry_rows, defender_summary, sysmon_summary)
+        self.assertFalse(result.get("has_true_signal"))
+        self.assertLess(result["likelihood"], 0.45, "clean host must stay below MEDIUM")
+
+        incident = orchestrator.build_incident(telemetry_rows, defender_summary, sysmon_summary)
+        self.assertEqual(incident.severity, "low")
+        self.assertLess(incident.likelihood, 0.45)
+        self.assertEqual(incident.title, "Baseline telemetry snapshot")
+
+    def test_confirmed_defender_malware_escalates(self) -> None:
+        """A real Defender malware verdict alone must reach MEDIUM+."""
+        orchestrator = DetectionOrchestrator()
+        telemetry_rows = [
+            {"cpu": 8, "proc_threads": 22, "tcp_conns": 2, "bytes_sent_rate": 500, "bytes_recv_rate": 400, "remote_ips": ["9.9.9.9"]},
+            {"cpu": 9, "proc_threads": 23, "tcp_conns": 2, "bytes_sent_rate": 600, "bytes_recv_rate": 420, "remote_ips": ["9.9.9.9"]},
+        ]
+        defender_summary = {"total": 5, "by_id": {"Malware detected (on-access)": 2}}
+        sysmon_summary = {"total": 3, "by_id": {"Process creation": 3}}
+
+        result = orchestrator.final_score(telemetry_rows, defender_summary, sysmon_summary)
+        self.assertTrue(result.get("has_true_signal"))
+        self.assertGreaterEqual(result["likelihood"], 0.45)
+
+        incident = orchestrator.build_incident(telemetry_rows, defender_summary, sysmon_summary)
+        self.assertIn(incident.severity, {"medium", "high"})
+        self.assertEqual(incident.title, "Behavioral detection incident")
+
 
 if __name__ == "__main__":
     unittest.main()

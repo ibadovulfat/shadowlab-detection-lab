@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import calendar
 import html
 import time
 from typing import Any
 
-from PySide6.QtCore import QMargins, Qt, QTimer
+from PySide6.QtCore import QMargins, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtCore import QUrl
@@ -250,11 +251,19 @@ def _coerce_epoch(value: Any) -> float:
     except (TypeError, ValueError):
         pass
     text = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+    # A trailing "Z" means the timestamp is UTC: it must be converted with
+    # calendar.timegm (UTC), not time.mktime (local), or every age/dwell/
+    # heatmap value is skewed by the operator's UTC offset.
+    for fmt, is_utc in (
+        ("%Y-%m-%d %H:%M:%S", False),
+        ("%Y-%m-%dT%H:%M:%S", False),
+        ("%Y-%m-%dT%H:%M:%SZ", True),
+    ):
         try:
-            return time.mktime(time.strptime(text, fmt))
+            parsed = time.strptime(text, fmt)
         except (TypeError, ValueError):
             continue
+        return calendar.timegm(parsed) if is_utc else time.mktime(parsed)
     return 0.0
 
 
@@ -344,6 +353,7 @@ class DashboardWorkspaceController:
         # dynamic refresh doesn't override the operator's choice.
         self._view_combo: "QComboBox | None" = None
         self._panel_card_refs: dict[str, QWidget] = {}
+        self._dash_grid = None
 
     # ------------------------------------------------------------------ #
     # Dashboard tab build
@@ -463,49 +473,14 @@ class DashboardWorkspaceController:
         cards["auth"]        = app._panel_card("Access & Policy",   app.dash_auth,     app._open_dashboard_auth_panel)
         cards["audit"]       = app._panel_card("Audit Trail",        app.dash_audit,    self.open_dashboard_audit_panel)
 
-        grid.addWidget(cards["incidents"], 0, 0)
-        grid.addWidget(cards["engines"],   0, 1)
-        grid.addWidget(cards["mitre"],     0, 2)
-        grid.addWidget(cards["rules"],     1, 0)
-        grid.addWidget(cards["fleet"],     1, 1)
-        grid.addWidget(cards["heatmap"],   1, 2)
-
-        # Wide row 2: split Recent Alerts | Telemetry Gaps | Integrations | SLA
-        wide_split = QSplitter(Qt.Horizontal)
-        wide_split.setHandleWidth(6)
-        wide_split.addWidget(cards["alerts"])
-        wide_split.addWidget(cards["gaps"])
-        wide_split.addWidget(cards["connectors"])
-        wide_split.addWidget(cards["sla"])
-        for index in range(4):
-            wide_split.setStretchFactor(index, 1)
-        wide_split.setSizes([550, 500, 500, 450])
-        cards["wide_split"] = wide_split
-
-        grid.addWidget(wide_split,        2, 0, 1, 3)
-        # Detailed-view extra row — Access & Policy + Audit Trail side-by-side
-        detail_split = QSplitter(Qt.Horizontal)
-        detail_split.setHandleWidth(6)
-        detail_split.addWidget(cards["auth"])
-        detail_split.addWidget(cards["audit"])
-        detail_split.setStretchFactor(0, 1)
-        detail_split.setStretchFactor(1, 2)
-        detail_split.setSizes([500, 1000])
-        cards["detail_split"] = detail_split
-        grid.addWidget(detail_split,      3, 0, 1, 3)
-        detail_split.setVisible(False)   # Detailed-view only by default
-
-        for col in range(3):
-            grid.setColumnStretch(col, 1)
-
-        # The two top rows hold the dense data panels; the wide alerts
-        # row gets a slightly smaller share. The optional Detailed-view
-        # row (Access & Policy) sits at min height when shown.
-        grid.setRowStretch(0, 4)
-        grid.setRowStretch(1, 4)
-        grid.setRowStretch(2, 3)
-        grid.setRowStretch(3, 0)
-
+        # Cards are positioned dynamically by `_relayout_dashboard` so
+        # each view preset packs ONLY its visible panels, with no
+        # QSplitter nesting. The previous static 3-col grid + a 4-way
+        # `wide_split` + a 2-way `detail_split` produced the uneven
+        # "3 / 3 / 4 / 2" rows the operator flagged. Now every view is a
+        # uniform N-column grid (Detailed = 4 equal columns, 12 panels →
+        # 4×3) with all cells the same size.
+        self._dash_grid = grid
         root.addLayout(grid, 1)
         # Apply whichever view preset is currently selected — must run
         # after the grid is built and the cards exist.
@@ -1257,6 +1232,7 @@ class DashboardWorkspaceController:
         ("mitre",           "/enterprise/mitre/summary",             {}),
         ("rules_raw",       "/enterprise/detections/lifecycle",      []),
         ("hosts_raw",       "/hosts",                                []),
+        ("telemetry_raw",   "/history/telemetry?limit=300",          []),
         ("gaps_raw",        "/enterprise/telemetry/gaps",            {}),
         ("connectors_raw",  "/enterprise/connectors",                []),
         ("sla_raw",         "/antivirus/sla",                        {}),
@@ -1326,31 +1302,14 @@ class DashboardWorkspaceController:
             self._refresh_queue = []
             self._refresh_step_data = {}
 
-    def _collect_refresh_data(self) -> dict:
-        """Pure-fetch half — runs in the worker thread.  Returns a dict
-        of pre-fetched payloads that `_apply_refresh_data` can render
-        without further IO.
-        """
-        now = time.time()
-        return {
-            "now":           now,
-            "incidents_raw": self._api_get("/incidents", default=[]) or [],
-            "alerts_raw":    self._api_get("/history/alerts", default=[]) or [],
-            "av_status":     self._api_get("/antivirus/status", default={}) or {},
-            "mitre":         self._api_get("/enterprise/mitre/summary", default={}) or {},
-            "rules_raw":     self._api_get("/enterprise/detections/lifecycle", default=[]) or [],
-            "hosts_raw":     self._api_get("/hosts", default=[]) or [],
-            "gaps_raw":      self._api_get("/enterprise/telemetry/gaps", default={}) or {},
-            "connectors_raw":self._api_get("/enterprise/connectors", default=[]) or [],
-            "sla_raw":       self._api_get("/antivirus/sla", default={}) or {},
-            "auth_log_raw":  self._api_get("/history/auth", default=[]) or [],
-            "action_log_raw":self._api_get("/history/actions", default=[]) or [],
-        }
-
     def _apply_refresh_data(self, data: dict) -> None:
         """Render half — runs on the main thread, safe to touch widgets.
-        Takes the dict produced by `_collect_refresh_data` so the worker
-        has zero coupling to Qt widgets (only the http client).
+
+        Consumes the dict assembled incrementally by
+        `_process_refresh_step` (one endpoint per QTimer tick, keys
+        defined in `_REFRESH_STEPS`) so the render path has zero
+        coupling to the HTTP fetch beyond the already-materialised
+        payload.
         """
         app = self.app
         try:
@@ -1364,6 +1323,7 @@ class DashboardWorkspaceController:
             mitre         = data.get("mitre") or {}
             rules_raw     = data.get("rules_raw") or []
             hosts_raw     = data.get("hosts_raw") or []
+            telemetry_raw = data.get("telemetry_raw") or []
             gaps_raw      = data.get("gaps_raw") or {}
             connectors_raw = data.get("connectors_raw") or []
             sla_raw       = data.get("sla_raw") or {}
@@ -1396,6 +1356,40 @@ class DashboardWorkspaceController:
             latest_result = getattr(app, "latest_monitor_result", {}) or {}
             telemetry_rows = latest_result.get("telemetry_rows", getattr(app, "latest_monitor_rows", []))
             telemetry_rows = telemetry_rows if isinstance(telemetry_rows, list) else []
+            derived_from_history = False
+            if not telemetry_rows and isinstance(telemetry_raw, list):
+                # Mirror `_within_window`'s contract: a row whose `ts`
+                # can't be coerced to an epoch (0.0) is kept rather than
+                # silently dropped, so a single malformed timestamp can't
+                # blank the entire Telemetry Trend. The endpoint already
+                # caps the set at limit=300 and orders ts DESC, so the
+                # [:300] + reversed() yields oldest→newest for the chart.
+                def _telemetry_in_window(row: Any) -> bool:
+                    if not isinstance(row, dict):
+                        return False
+                    epoch = _coerce_epoch(row.get("ts"))
+                    return epoch == 0 or epoch >= cutoff
+
+                telemetry_rows = list(reversed([
+                    row for row in telemetry_raw if _telemetry_in_window(row)
+                ][:300]))
+                derived_from_history = True
+
+            # Persist the history-derived rows so the SOC Overview's own
+            # render path (`refresh_overview_widgets` → chart / Signal
+            # Coverage / status pill) can consume the SAME data the KPI
+            # strip just used. Without this the `telemetry_raw` refresh
+            # step only fed the KPI tiles: the Overview chart reads
+            # `app.latest_history_telemetry_rows`, which is otherwise set
+            # ONLY when the History tab is rendered — so a dashboard
+            # refresh that ran without a History-tab visit (or where the
+            # /history call failed but /history/telemetry succeeded) left
+            # the KPI strip showing "300 samples" while the chart stayed
+            # stuck on "waiting for monitor". Guarded so we never shadow
+            # a live monitor session or wipe an existing fallback with an
+            # empty fetch.
+            if derived_from_history and telemetry_rows and not latest_result:
+                app.latest_history_telemetry_rows = telemetry_rows
 
             # --- Update KPI strip ------------------------------------ #
             self._update_kpi_strip(
@@ -1460,6 +1454,18 @@ class DashboardWorkspaceController:
                     if err_count:
                         parts.append(f"errors:{err_count}")
                     app.dashboard_status_label.setText("  -  ".join(parts))
+
+            # NOTE: deliberately NOT calling refresh_overview_widgets()
+            # here. Wiring the QtCharts series mutation into the high-
+            # frequency dashboard auto-refresh drain segfaults PySide6
+            # (QtCharts series replaced while the chart is mid-paint on
+            # the same event-loop turn). The original architecture keeps
+            # Overview chart updates on explicit, infrequent triggers
+            # (monitor_ops.refresh_overview / run_monitor) — respect
+            # that. The minor one-click data-lag is an acceptable trade
+            # vs. a hard crash. Bug-1 (persisting
+            # latest_history_telemetry_rows below) still ensures the
+            # data is present when the explicit trigger fires.
         except Exception:
             # Render-side failures should never crash the worker callback —
             # the next refresh tick will recover. Log via status pill.
@@ -1626,12 +1632,19 @@ class DashboardWorkspaceController:
         self._set_label_html(app.dashboard_kpi_mitre_bar, _progress_bar(coverage_pct, coverage_color))
 
         # --- Telemetry pressure ------------------------------------ #
-        if telemetry_rows:
-            avg_cpu = sum(float(r.get("cpu", 0) or 0) for r in telemetry_rows) / max(1, len(telemetry_rows))
-            avg_mem = sum(float(r.get("mem_percent", 0) or 0) for r in telemetry_rows) / max(1, len(telemetry_rows))
+        # Guard `isinstance(r, dict)` to match the defensive style used
+        # at the CPU-sparkline builder below (line ~1765). Without it a
+        # single non-dict element in a malformed history payload raises
+        # AttributeError, aborting the WHOLE KPI strip + the rest of
+        # _apply_refresh_data (outer except → "render error"), i.e. one
+        # bad row silently blanks the entire dashboard.
+        telemetry_dicts = [r for r in telemetry_rows if isinstance(r, dict)]
+        if telemetry_dicts:
+            avg_cpu = sum(float(r.get("cpu", 0) or 0) for r in telemetry_dicts) / max(1, len(telemetry_dicts))
+            avg_mem = sum(float(r.get("mem_percent", 0) or 0) for r in telemetry_dicts) / max(1, len(telemetry_dicts))
             pressure = max(avg_cpu, avg_mem)
             label = f"{pressure:.0f}%"
-            sub = f"CPU {avg_cpu:.1f}% - MEM {avg_mem:.1f}% - n={len(telemetry_rows)}"
+            sub = f"CPU {avg_cpu:.1f}% - MEM {avg_mem:.1f}% - n={len(telemetry_dicts)}"
             color = "#7fe39d" if pressure < 50 else ("#f4c26b" if pressure < 80 else "#ff6b8a")
         else:
             pressure, label = 0.0, "--"
@@ -1861,12 +1874,23 @@ class DashboardWorkspaceController:
 
         # Apply filters BEFORE the active-only narrowing so the operator
         # can also pull up closed incidents via the chip.
+        # The rest of the panel treats {"acknowledged","ack"} and
+        # {"closed","resolved","suppressed"} as equivalent; the filter
+        # predicate must canonicalize the same way or the "Ack"/"Closed"
+        # chips silently hide incidents whose API status is an alias.
+        _status_alias = {
+            "ack": "acknowledged",
+            "resolved": "closed",
+            "suppressed": "closed",
+        }
+
         def _passes(inc: dict) -> bool:
             if sev_filter != "all":
                 if str(inc.get("severity", "unknown")).lower() != sev_filter:
                     return False
             if status_filter != "all":
-                if str(inc.get("status", "open")).lower() != status_filter:
+                raw = str(inc.get("status", "open")).lower()
+                if _status_alias.get(raw, raw) != status_filter:
                     return False
             return True
 
@@ -2160,17 +2184,26 @@ class DashboardWorkspaceController:
 
         sev_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
+        # Day axis must be a *calendar*-day offset, not an elapsed-24h
+        # bucket: the row label is a weekday and the hour comes from the
+        # event's local clock, so both axes have to use the same local
+        # calendar or cells land under the wrong weekday.
+        def _local_midnight(t: float) -> float:
+            lt = time.localtime(t)
+            return time.mktime(
+                (lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)
+            )
+
+        today_midnight = _local_midnight(now)
+
         def _bucket(event: dict, default_sev: str = "info") -> None:
             ts = _coerce_epoch(event.get("created_at"))
             if ts <= 0:
                 return
-            age_seconds = now - ts
-            if age_seconds < 0 or age_seconds > 7 * 86_400:
-                return
-            day = int(age_seconds // 86_400)
+            local_struct = time.localtime(ts)
+            day = int((today_midnight - _local_midnight(ts)) // 86_400)
             if day < 0 or day >= 7:
                 return
-            local_struct = time.localtime(ts)
             hour = local_struct.tm_hour
             matrix[day][hour] += 1
             sev = str(event.get("severity") or default_sev or "info").strip().lower()
@@ -2208,7 +2241,7 @@ class DashboardWorkspaceController:
 
         max_count = max((max(row) for row in matrix), default=0) or 1
         for day_idx in range(6, -1, -1):  # render oldest → newest
-            label = self._DAY_LABELS[time.localtime(now - day_idx * 86_400).tm_wday]
+            label = self._DAY_LABELS[time.localtime(today_midnight - day_idx * 86_400).tm_wday]
             cells.append(f"<tr><td style='padding:0 4px 0 0;color:#7a8a9c;font-size:9px;text-align:right;'>{label}</td>")
             for hour in range(24):
                 count = matrix[day_idx][hour]
@@ -3566,6 +3599,19 @@ class DashboardWorkspaceController:
                      "alerts", "gaps", "connectors", "sla", "auth", "audit"},
     }
 
+    # Stable display order — visible cards are packed row-major into the
+    # per-view column count so there are never empty/gappy cells.
+    _DASH_PANEL_ORDER = (
+        "incidents", "engines", "mitre", "rules", "fleet", "heatmap",
+        "alerts", "gaps", "connectors", "sla", "auth", "audit",
+    )
+
+    # Columns per view, all uniform equal-size grids.
+    #   Default  = 4 cols → 10 panels flow 4 / 4 / 2 (operator's layout).
+    #   Detailed = 4 cols → 12 panels → a clean 4×3 grid.
+    #   Compact  = 2 cols → dense two-up.
+    _VIEW_COLUMNS = {"Default": 4, "Compact": 2, "Detailed": 4}
+
     # P3-21 — minimum role required to see each panel.  When the
     # operator's role doesn't meet the bar, the card is hidden even if
     # the active view-preset requests it.  This is layered on TOP of
@@ -3619,16 +3665,88 @@ class DashboardWorkspaceController:
             }
         else:
             rbac_filtered = set(visible)
+        self._relayout_dashboard(view, rbac_filtered)
+
+    def _relayout_dashboard(self, view: str, visible_keys: set[str]) -> None:
+        """Pack the visible cards into a uniform N-column grid.
+
+        Every view is now a clean equal-cell grid with NO QSplitter
+        nesting: visible panels (in stable display order) flow
+        row-major into `_VIEW_COLUMNS[view]` columns, so there are never
+        gappy/empty cells regardless of which panels RBAC or the preset
+        hides. Detailed = 4 equal columns (12 panels → 4×3).
+        """
+        grid = self._dash_grid
+        if grid is None:
+            # Layout not built yet — just toggle visibility so state is
+            # consistent when the grid is created.
+            for key, card in self._panel_card_refs.items():
+                card.setVisible(key in visible_keys)
+            return
+
+        cols = self._VIEW_COLUMNS.get(view, 3)
+
+        # Persistent bottom spacer — absorbs leftover vertical space so
+        # cards stay at their COMPACT min height instead of every row
+        # stretching to fill the viewport. Without it a partially-filled
+        # last row (e.g. a lone "Compliance & SLA" when 10 panels don't
+        # divide evenly by 3) ballooned to a full empty row height and
+        # looked broken.
+        if getattr(self, "_dash_spacer", None) is None:
+            spacer = QWidget()
+            spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            spacer.setMinimumHeight(0)
+            self._dash_spacer = spacer
+
+        # Detach every card + the spacer first, then re-place only the
+        # visible ones. removeWidget keeps the widget alive (no reparent
+        # / no QtCharts churn) — we just reposition.
         for key, card in self._panel_card_refs.items():
-            if key == "wide_split":
-                want = bool({"alerts", "gaps", "connectors", "sla"} & rbac_filtered)
-                card.setVisible(want)
-                continue
-            if key == "detail_split":
-                want = bool({"auth", "audit"} & rbac_filtered)
-                card.setVisible(want)
-                continue
-            card.setVisible(key in rbac_filtered)
+            grid.removeWidget(card)
+            card.setVisible(False)
+        grid.removeWidget(self._dash_spacer)
+
+        ordered_visible = [
+            k for k in self._DASH_PANEL_ORDER
+            if k in visible_keys and k in self._panel_card_refs
+        ]
+        n = len(ordered_visible)
+        full_rows = n // cols
+        remainder = n % cols
+        rows = full_rows + (1 if remainder else 0)
+
+        for index, key in enumerate(ordered_visible):
+            card = self._panel_card_refs[key]
+            r = index // cols
+            if r < full_rows:
+                # A complete row — one card per column.
+                grid.addWidget(card, r, index % cols, 1, 1)
+            else:
+                # The final, partially-filled row: stretch its cards to
+                # span the FULL width so no dead space is left on the
+                # right (e.g. Default's last row of 2 → each spans 2
+                # columns = equal full halves). Columns are split as
+                # evenly as possible across the remaining cards.
+                pos = index - full_rows * cols
+                base, extra = divmod(cols, remainder)
+                col_start = pos * base + min(pos, extra)
+                span = base + (1 if pos < extra else 0)
+                grid.addWidget(card, r, col_start, 1, span)
+            card.setVisible(True)
+
+        # Equal column widths so every cell is the same size across.
+        max_cols = max(self._VIEW_COLUMNS.values())
+        for c in range(max_cols):
+            grid.setColumnStretch(c, 1 if c < cols else 0)
+        # Content rows take their natural (compact) height — NOT an equal
+        # share of the viewport. All leftover height drops into the
+        # spacer row at the bottom, so a half-empty final row no longer
+        # inflates its lone card.
+        for r in range(64):
+            grid.setRowStretch(r, 0)
+        grid.addWidget(self._dash_spacer, rows, 0, 1, max(cols, 1))
+        grid.setRowStretch(rows, 1)
+        self._dash_spacer.setVisible(True)
 
     # ------------------------------------------------------------------ #
     # P1-13 — Notification stream (bell + extended high-sev toast)
@@ -4160,6 +4278,26 @@ class DashboardWorkspaceController:
 
     def refresh_overview_widgets(self, result: dict | None = None) -> None:
         app = self.app
+        # Re-entrancy guard. This is now invoked from several call sites
+        # (monitor_ops.run_monitor / update_cpu_chart, the post-drain
+        # hook in _apply_refresh_data, and the Refresh Overview button).
+        # If one invocation is still mutating the QtCharts QLineSeries
+        # when another fires (e.g. a QTimer tick landing during a
+        # synchronous monitor-run refresh), the overlapping clear/replace
+        # on a series that Qt is mid-paint on segfaults the process.
+        # A plain bool flag serialises them — the loser just skips this
+        # cycle; the data is already current for the next legitimate
+        # refresh.
+        if getattr(self, "_overview_refresh_active", False):
+            return
+        self._overview_refresh_active = True
+        try:
+            self._refresh_overview_widgets_impl(result)
+        finally:
+            self._overview_refresh_active = False
+
+    def _refresh_overview_widgets_impl(self, result: dict | None = None) -> None:
+        app = self.app
         result = result if isinstance(result, dict) else getattr(app, "latest_monitor_result", {}) or {}
         incident = result.get("incident", {}) if isinstance(result.get("incident", {}), dict) else {}
         final_score = result.get("final_score", {}) if isinstance(result.get("final_score", {}), dict) else {}
@@ -4167,6 +4305,10 @@ class DashboardWorkspaceController:
         rows = result.get("telemetry_rows", getattr(app, "latest_monitor_rows", []))
         if not isinstance(rows, list):
             rows = []
+        from_live_monitor = bool(rows)
+        if not rows:
+            rows = getattr(app, "latest_history_telemetry_rows", []) or []
+            rows = rows if isinstance(rows, list) else []
 
         defender = event_summaries.get("defender", {}) if isinstance(event_summaries.get("defender", {}), dict) else {}
         sysmon   = event_summaries.get("sysmon", {})   if isinstance(event_summaries.get("sysmon", {}),   dict) else {}
@@ -4221,16 +4363,53 @@ class DashboardWorkspaceController:
                 if actions else "response queue"
             )
 
-        # --- MEM series (CPU is updated by monitor_ops.update_cpu_chart) #
+        # --- Telemetry Trend series --------------------------------- #
+        # For a LIVE monitor session, monitor_ops.update_cpu_chart owns
+        # the CPU series (with spike-sanitisation + title) and we only
+        # add the MEM overlay. But for the history / dashboard fallback
+        # path, update_cpu_chart is driven by a DIFFERENT dataset
+        # (history_ops' reversed [:200] slice) than the rows resolved
+        # here (latest_history_telemetry_rows, up to 300 from
+        # /history/telemetry). Rebuilding only MEM there left CPU and
+        # MEM sourced from two different windows — different lengths and
+        # X scaling on the same chart. When the data is NOT live, drive
+        # BOTH series from the SAME `recent` slice so the trend is
+        # internally consistent regardless of which pipeline filled it.
         if hasattr(app, "mem_series") and hasattr(app, "cpu_axis_x"):
             try:
-                app.mem_series.clear()
-                if rows:
-                    recent = rows[-60:]
-                    for idx, item in enumerate(recent):
-                        if not isinstance(item, dict):
-                            continue
-                        app.mem_series.append(idx, float(item.get("mem_percent", 0) or 0))
+                recent = [item for item in rows[-60:] if isinstance(item, dict)] if rows else []
+                # Atomic `replace(list[QPointF])` instead of clear() +
+                # per-point append(). The clear()+append loop forces
+                # QtCharts to recompute geometry and repaint on every
+                # single point; doing that on a series Qt may be mid-
+                # paint on is the classic PySide6 QtCharts segfault.
+                # replace() swaps the whole point vector in one call.
+                mem_points = [
+                    QPointF(idx, float(item.get("mem_percent", 0) or 0))
+                    for idx, item in enumerate(recent)
+                ]
+                app.mem_series.replace(mem_points)
+                if recent and not from_live_monitor and hasattr(app, "cpu_series"):
+                    cpu_vals = [
+                        max(0.0, min(100.0, float(item.get("cpu", 0) or 0)))
+                        for item in recent
+                    ]
+                    app.cpu_series.replace([
+                        QPointF(idx, value) for idx, value in enumerate(cpu_vals)
+                    ])
+                    app.cpu_axis_x.setRange(0, max(1, len(recent) - 1))
+                    if hasattr(app, "cpu_axis_y"):
+                        # Shared axis with the MEM series — scale to
+                        # whichever peaks so a low CPU / high MEM mix
+                        # doesn't clip the MEM line off-chart.
+                        mem_y = [p.y() for p in mem_points]
+                        max_util = max(cpu_vals + mem_y) if mem_y else max(cpu_vals)
+                        app.cpu_axis_y.setRange(0, max(25, min(100, max_util + 10)))
+                    if hasattr(app, "cpu_chart"):
+                        avg_cpu = sum(cpu_vals) / max(1, len(cpu_vals))
+                        app.cpu_chart.setTitle(
+                            f"Telemetry CPU Trend - {len(recent)} samples | avg {avg_cpu:.1f}%"
+                        )
             except Exception:
                 pass
 
@@ -4274,7 +4453,12 @@ class DashboardWorkspaceController:
         avg_cpu = sum(float(item.get("cpu", 0) or 0) for item in rows) / max(1, len(rows)) if rows else 0.0
         avg_mem = sum(float(item.get("mem_percent", 0) or 0) for item in rows) / max(1, len(rows)) if rows else 0.0
         avg_tcp = sum(float(item.get("tcp_conns", 0) or 0) for item in rows) / max(1, len(rows)) if rows else 0.0
-        proc_avg = sum(_coerce_int(item.get("process_count")) for item in rows) / max(1, len(rows)) if rows else 0.0
+        # Telemetry rows (both live monitor and `/history/telemetry`)
+        # carry `proc_threads` — there is NO `process_count` field
+        # anywhere in `TelemetrySample`/`insert_telemetry`. The old key
+        # silently coerced to 0 for EVERY row, so this tile always read
+        # "0" with a "ready" badge regardless of real activity.
+        proc_avg = sum(_coerce_int(item.get("proc_threads")) for item in rows) / max(1, len(rows)) if rows else 0.0
 
         def_total = _coerce_int(defender.get("total"))
         sys_total = _coerce_int(sysmon.get("total"))
@@ -4286,7 +4470,19 @@ class DashboardWorkspaceController:
                 return "warning"
             return "healthy"
 
-        peak = max([float(x or 0) for x in timeline_scores], default=0.0)
+        # `timeline_scores` is a list[float] on the happy path
+        # (api/routes/monitor.py), but refresh_overview_widgets has no
+        # outer try/except — a single non-numeric element from a
+        # corrupted/hostile payload would otherwise crash the entire
+        # Overview render (chart + KPIs + panels). Coerce defensively to
+        # match the isinstance-guarded style used everywhere else here.
+        numeric_scores: list[float] = []
+        for _score in timeline_scores:
+            try:
+                numeric_scores.append(float(_score or 0))
+            except (TypeError, ValueError):
+                continue
+        peak = max(numeric_scores, default=0.0)
         readiness = "ready" if rows else "idle"
 
         rows_html = (
@@ -4301,7 +4497,7 @@ class DashboardWorkspaceController:
             f"<td style='padding:3px 6px;text-align:right;'>{_badge(_src_status(sys_total), _src_status(sys_total))}</td>"
             "</tr>"
             "<tr>"
-            f"<td style='padding:3px 6px;color:#c8d8ea;font-size:11px;'>Process inventory (avg)</td>"
+            f"<td style='padding:3px 6px;color:#c8d8ea;font-size:11px;'>Process threads (avg)</td>"
             f"<td style='padding:3px 6px;color:#f4f7fb;font-size:11px;text-align:right;'>{proc_avg:.0f}</td>"
             f"<td style='padding:3px 6px;text-align:right;'>{_badge(readiness, readiness)}</td>"
             "</tr>"
@@ -4359,9 +4555,15 @@ class DashboardWorkspaceController:
                 f"{line}</div>"
             )
 
+        shown = min(len(chain), 8)
+        coverage = (
+            f"{len(chain)} step(s) in the kill-chain"
+            if shown >= len(chain)
+            else f"showing top {shown} of {len(chain)} kill-chain step(s)"
+        )
         return (
             f"<p style='color:#96a5b8;margin:0 0 6px;font-size:11px;'>"
-            f"{len(chain)} step(s) in the kill-chain &middot; ordered by scoring sequence.</p>"
+            f"{coverage} &middot; ordered by scoring sequence.</p>"
             + "".join(steps)
         )
 
@@ -4420,9 +4622,19 @@ class DashboardWorkspaceController:
                 + finding_summary
             )
 
+        # Count the *valid* normalised actions (raw `actions` may carry
+        # non-dict/non-str junk that was filtered out), and flag when the
+        # table is truncated to the top 6 so the header isn't misleading.
+        total_actions = len(normalised)
+        shown_actions = len(action_rows)
+        action_coverage = (
+            f"{total_actions} recommended action(s)"
+            if shown_actions >= total_actions
+            else f"showing top {shown_actions} of {total_actions} recommended action(s)"
+        )
         return (
             f"<p style='color:#96a5b8;margin:0 0 6px;font-size:11px;'>"
-            f"{len(actions)} recommended action(s) &middot; sorted by priority.</p>"
+            f"{action_coverage} &middot; sorted by priority.</p>"
             "<table width='100%' cellspacing='0' cellpadding='0' style='border-collapse:collapse;font-size:11px;'>"
             "<thead><tr style='color:#96a5b8;text-align:left;'>"
             "<th></th><th style='padding:0 6px 4px;'>Action</th>"

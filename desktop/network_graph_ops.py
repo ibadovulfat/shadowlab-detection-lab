@@ -1019,8 +1019,21 @@ class NetworkGraphWorkspaceController:
         except Exception as exc:
             app._show_error(app.graph_detail, "Snapshot load failed", exc)
             return
-        live_nodes = {str(n.get("label", "")): n for n in live.get("nodes", [])}
-        snap_nodes = {str(n.get("label", "")): n for n in snapshot.get("nodes", [])}
+        # The snapshot file is operator-chosen and may be hand-edited or
+        # an unrelated JSON: tolerate a non-object root and non-dict node
+        # entries instead of raising AttributeError out of the handler.
+        if not isinstance(snapshot, dict):
+            app._show_error(app.graph_detail, "Snapshot load failed",
+                            Exception("Snapshot root is not a graph object"))
+            return
+        live_nodes = {
+            str(n.get("label", "")): n
+            for n in (live.get("nodes", []) or []) if isinstance(n, dict)
+        }
+        snap_nodes = {
+            str(n.get("label", "")): n
+            for n in (snapshot.get("nodes", []) or []) if isinstance(n, dict)
+        }
         added = sorted(set(live_nodes) - set(snap_nodes))
         removed = sorted(set(snap_nodes) - set(live_nodes))
         risk_deltas: list[tuple[str, float, float]] = []
@@ -1348,6 +1361,9 @@ class NetworkGraphWorkspaceController:
         app = self.app
         try: items = app._get("/network/connections").json()
         except Exception as exc: app._show_error(app.net_out, "Failed to load network", exc); return
+        # Backend may return an error envelope ({...}) or null; iterating
+        # it would yield dict keys and crash on item.get(...).
+        items = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
         app.net_table.setRowCount(len(items))
         for row, item in enumerate(items):
             for col, value in enumerate([item.get("local_addr",""), item.get("remote_addr",""), item.get("status",""), item.get("pid","")]):
@@ -1370,6 +1386,7 @@ class NetworkGraphWorkspaceController:
         except Exception as exc:
             app.statusBar().showMessage(f"Hosts load failed: {exc}")
             return
+        hosts = [h for h in hosts if isinstance(h, dict)] if isinstance(hosts, list) else []
         tables = [table for table in [getattr(app, "network_host_table", None), getattr(app, "host_inventory_table", None)] if table is not None]
         for table in tables:
             table.setRowCount(len(hosts))
@@ -1419,11 +1436,24 @@ class NetworkGraphWorkspaceController:
         finally:
             if hasattr(self, "_graph_busy"):
                 self._graph_busy.set_busy(False)
+        # A list/scalar/null body (error envelope, empty array) would
+        # make every graph.get() below raise. Other refresh paths in
+        # this file already guard with isinstance — match that.
+        if not isinstance(graph, dict):
+            graph = {}
         app.entity_graph = graph
         summary = graph.get("summary", {})
+        summary = summary if isinstance(summary, dict) else {}
         ad = graph.get("ad_context", {})
+        ad = ad if isinstance(ad, dict) else {}
         overall_risk = int(float(summary.get("overall_risk", 0) or 0))
         exposure = summary.get("remote_exposure", {}) if isinstance(summary.get("remote_exposure"), dict) else {}
+        # Resolve nodes/edges up-front: the empty-state check at the top
+        # of the render path references `nodes` long before the table
+        # population below, so a late assignment is a guaranteed
+        # NameError on every refresh.
+        nodes = graph.get("nodes", []) or []
+        edges = graph.get("edges", []) or []
         # KPI strip - five chips matching the strip we instantiated in
         # build_graph_tab(). Tone scales tighten as numbers grow so a
         # 200-node graph doesn't render the same as a 5-node one.
@@ -1503,9 +1533,9 @@ class NetworkGraphWorkspaceController:
             f"<h2>ShadowLab Attack Surface Graph</h2>"
             f"<p><b>Nodes:</b> {summary.get('node_count', 0)} | <b>Edges:</b> {summary.get('edge_count', 0)}<br>"
             f"<b>Overall Risk:</b> <span style='color:{app._severity_color('high' if overall_risk >= 75 else 'medium' if overall_risk >= 45 else 'low').name()};font-weight:700;'>{overall_risk}</span><br>"
-            f"<b>Exposure:</b> {json.dumps(exposure)}<br>"
-            f"<b>Domain Joined:</b> {summary.get('domain_joined', False)} | <b>Domain:</b> {summary.get('domain', 'n/a')}<br>"
-            f"<b>User:</b> {ad.get('user', 'n/a')} | <b>Logon Server:</b> {ad.get('logon_server', 'n/a')}</p>"
+            f"<b>Exposure:</b> {html.escape(json.dumps(exposure))}<br>"
+            f"<b>Domain Joined:</b> {html.escape(str(summary.get('domain_joined', False)))} | <b>Domain:</b> {html.escape(str(summary.get('domain', 'n/a')))}<br>"
+            f"<b>User:</b> {html.escape(str(ad.get('user', 'n/a')))} | <b>Logon Server:</b> {html.escape(str(ad.get('logon_server', 'n/a')))}</p>"
         )
         findings = graph.get("priority_findings", []) or summary.get("priority_findings", [])
         findings_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in findings[:8])
@@ -1517,7 +1547,11 @@ class NetworkGraphWorkspaceController:
             tbl.setSortingEnabled(False)
         groups = summary.get("groups", {}) if isinstance(summary.get("groups"), dict) else {}
         app.graph_group_table.setRowCount(len(groups))
-        for row, (group, count) in enumerate(sorted(groups.items(), key=lambda item: item[1], reverse=True)):
+        for row, (group, count) in enumerate(sorted(
+            groups.items(),
+            key=lambda item: item[1] if isinstance(item[1], (int, float)) else -1,
+            reverse=True,
+        )):
             app.graph_group_table.setItem(row, 0, QTableWidgetItem(str(group)))
             app.graph_group_table.setItem(row, 1, QTableWidgetItem(str(count)))
         top_processes = summary.get("top_processes", []) if isinstance(summary.get("top_processes"), list) else []
@@ -1530,8 +1564,6 @@ class NetworkGraphWorkspaceController:
                 app._paint_row(app.graph_focus_table, row, QColor("#d64550"))
             elif risk_value >= 45:
                 app._paint_row(app.graph_focus_table, row, QColor("#e0a640"))
-        nodes = graph.get("nodes", [])
-        edges = graph.get("edges", [])
         # Track every newly-seen high-risk node so we can flash them at
         # the end of the render — gives the operator a visual hook
         # when a fresh anomaly appears between two refreshes.
@@ -1715,7 +1747,11 @@ class NetworkGraphWorkspaceController:
         )
         if QMessageBox.question(app, "Confirm Network Blocker", prompt) != QMessageBox.Yes:
             return
-        reason = self._capture_reason(f"network-block ({target_raw})")
+        # MUST be the canonical action name — ReasonCapture only prompts
+        # when the name is in NETWORK_REASON_REQUIRED. A formatted string
+        # silently short-circuits to {} and disables the reason control
+        # on this destructive ARP-spoof action.
+        reason = self._capture_reason("block-start")
         if reason is None:
             return
 
@@ -1766,7 +1802,7 @@ class NetworkGraphWorkspaceController:
         # Stop is a recovery action - capture a reason because the
         # blocker was started with one. Pairing the two reasons in
         # the audit chain makes incident timeline clean.
-        reason = self._capture_reason("network-block-stop")
+        reason = self._capture_reason("block-stop")  # canonical name (see start_network_blocker)
         if reason is None:
             return
         app.net_out.setPlainText("Network blocker stop request running (async)...")
@@ -1819,7 +1855,7 @@ class NetworkGraphWorkspaceController:
         # P0: packet capture is a privacy event - analyst can see
         # user-plane traffic. Capture a structured reason so the
         # forensic chain explains why this was authorised.
-        reason = self._capture_reason(f"packet-sniff ({duration}s)")
+        reason = self._capture_reason("sniff")  # canonical name — packet capture is a privacy event
         if reason is None:
             return
 

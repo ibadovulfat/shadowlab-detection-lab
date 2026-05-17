@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 import time
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
@@ -126,7 +127,13 @@ class ShadowLabApiClient:
         request_kwargs = kwargs or {}
         canonical_path, canonical_query, body_hash = self.canonical_request_components(path, request_kwargs)
         timestamp = str(int(time.time()))
-        nonce = hashlib.sha256(f"{timestamp}:{path}:{time.time_ns()}".encode("utf-8")).hexdigest()[:24]
+        # 16 bytes of CSPRNG-grade entropy. The previous derivation
+        # (`sha256(ts:path:time_ns)[:24]`) is fully predictable to any
+        # attacker who knows the path and can sample wall-clock — two
+        # parallel clients on the same host can collide on the same
+        # nonce inside a single second, defeating the server-side
+        # replay guard.
+        nonce = secrets.token_hex(16)
         payload = "\n".join([method.upper(), canonical_path, canonical_query, body_hash, timestamp, nonce])
         # HKDF-derived signing secret — see _derive_signing_secret().
         signing_key = _derive_signing_secret(api_key)

@@ -1099,15 +1099,21 @@ class SecurityOpsWorkspaceController:
             app._show_error(app.security_ops_detail, "Rotation status fetch failed", exc)
             self._focus_panel("ops_detail")
             return
-        recent = (data or {}).get("recent_rotations", []) if isinstance(data, dict) else []
+        # A non-object body (list/scalar/null) would make the data.get()
+        # calls below raise AttributeError — the try above only wraps
+        # .json(). Coerce once and use the guarded dict everywhere.
+        info = data if isinstance(data, dict) else {}
+        recent = info.get("recent_rotations", [])
+        if not isinstance(recent, list):
+            recent = []
         # Build a small human-readable summary first; reverse so newest
         # is on top, cap at 5 rows.
         lines: list[str] = [
             "═══ Rotation History (newest first) ═══",
-            f"Worker enabled: {bool(data.get('enabled'))}    "
-            f"Interval: {int(data.get('interval_seconds', 0))}s    "
-            f"Max age: {int(data.get('max_age_seconds', 0))}s",
-            f"Last pass: {self._format_relative_time(data.get('last_run_at'))}",
+            f"Worker enabled: {bool(info.get('enabled'))}    "
+            f"Interval: {int(info.get('interval_seconds', 0) or 0)}s    "
+            f"Max age: {int(info.get('max_age_seconds', 0) or 0)}s",
+            f"Last pass: {self._format_relative_time(info.get('last_run_at'))}",
             "",
         ]
         if not recent:
@@ -1279,7 +1285,7 @@ class SecurityOpsWorkspaceController:
             # Toast - fire only when the count crosses 0 → N, so an
             # always-broken environment doesn't nag the operator on
             # every refresh.
-            if previous_error_count == 0 or previous_error_count == -1 and yara_errors > 0:
+            if (previous_error_count == 0 or previous_error_count == -1) and yara_errors > 0:
                 self._show_toast(
                     f"YARA compile errors detected: {yara_errors}",
                     tone="crit",

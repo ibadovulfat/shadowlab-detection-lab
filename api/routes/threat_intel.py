@@ -19,14 +19,22 @@ def register_routes(app: FastAPI, ctx: dict[str, Any]) -> None:
     check_file_vt = ctx["check_file_vt"]
     malware_analyst_service = ctx["malware_analyst_service"]
 
-    @app.get("/threat-intel/ip/{ip}")
+    # Role gate: every other intel route in the codebase (malware
+    # analyst, persistence, hunt) requires analyst-or-admin. Without
+    # the same `Depends(require_analyst_or_admin)` here, a viewer (or
+    # any unauthenticated principal in `SHADOWLAB_REQUIRE_AUTH=false`
+    # mode) can drive arbitrary outbound lookups to VirusTotal /
+    # MalwareBazaar / YARAify — burning quota, scanning the operator's
+    # network from inside, and on the POST variant supplying
+    # attacker-controlled API keys whose responses are echoed back.
+    @app.get("/threat-intel/ip/{ip}", dependencies=[Depends(require_analyst_or_admin)])
     def threat_intel_lookup(request: Request, ip: str) -> dict[str, Any]:
         apply_rate_limit(request, bucket="threat_intel", detail="Too many threat-intelligence lookups. Wait briefly and retry.")
         ip = validated_ip_address(ip)
         result = check_ip(ip)
         return {"ip": ip, "result": result}
 
-    @app.get("/threat-intel/hash/{file_hash}")
+    @app.get("/threat-intel/hash/{file_hash}", dependencies=[Depends(require_analyst_or_admin)])
     def threat_hash_lookup(request: Request, file_hash: str) -> dict[str, Any]:
         apply_rate_limit(request, bucket="threat_intel", detail="Too many threat-intelligence lookups. Wait briefly and retry.")
         file_hash = validated_sha256(file_hash)
@@ -36,7 +44,7 @@ def register_routes(app: FastAPI, ctx: dict[str, Any]) -> None:
             "yaraify": check_file_yaraify(file_hash),
         }
 
-    @app.post("/threat-intel/hash/lookup")
+    @app.post("/threat-intel/hash/lookup", dependencies=[Depends(require_analyst_or_admin)])
     def threat_hash_lookup_with_auth(request: Request, payload: ThreatHashLookupRequest) -> dict[str, Any]:
         apply_rate_limit(request, bucket="threat_intel", detail="Too many threat-intelligence lookups. Wait briefly and retry.")
         return {

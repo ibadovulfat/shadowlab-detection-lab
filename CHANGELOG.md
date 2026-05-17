@@ -79,6 +79,71 @@ and the project version scheme follows [Semantic Versioning](https://semver.org/
 - **LOW** OIDC token rejection emits a `WARNING` log and a
   `shadowlab_oidc_rejections_total{reason=...}` Prometheus counter,
   bucketed by exception class.
+- **HIGH** The three `/threat-intel/*` routes now require the
+  analyst-or-admin role like every other intel route. Before this, a
+  viewer (or any caller when `SHADOWLAB_REQUIRE_AUTH=false`) could drive
+  unbounded outbound lookups to VirusTotal, MalwareBazaar, and YARAify,
+  burning quota and scanning from inside the operator network. The
+  authorization check runs before input validation so it holds even on
+  malformed input.
+- **HIGH** Server-supplied filesystem paths consumed by the desktop
+  client (artifact open, delete, hash, integration export) now pass
+  through a single `desktop/_safe_paths.py` chokepoint. Paths that do
+  not resolve under a configured artifact root are rejected, UNC paths
+  are refused outright, and the shell-open helper blocks executable and
+  scripting suffixes. A compromised or MitM backend can no longer return
+  an absolute path and ride the desktop's filesystem permissions to
+  read, delete, or detonate arbitrary files. The realpath check is
+  symmetric so a junction or symlink planted inside the artifact root is
+  still blocked.
+- **HIGH** The outbound allow-list no longer trusts a loopback IP that a
+  public hostname resolves to. A name like `lvh.me`, `localtest.me`, or
+  an attacker-controlled domain that answers `127.0.0.1` is rejected;
+  loopback is only accepted when the URL hostname is itself a literal
+  loopback name. This closes a DNS-rebinding path to the operator's own
+  admin API that the earlier resolve-then-connect pinning did not cover.
+- **MEDIUM** The desktop signed-request nonce is now 16 bytes of
+  CSPRNG output (`secrets.token_hex`). The previous derivation,
+  `sha256(timestamp:path:time_ns)` truncated to 24 hex characters, was
+  predictable to anyone who knew the path and could sample the clock,
+  and two parallel clients on one host could collide inside the same
+  second and defeat the server-side replay guard.
+- **MEDIUM** The Bandit gate no longer globally skips `B404`, `B603`,
+  and `B607`. Those skips were masking every subprocess finding across
+  the tree; subprocess risk now re-enters CI and is acknowledged per
+  line only where it has been audited. `B602` (`shell=True`) stays in
+  the gate so any future shell invocation fails the build.
+- **MEDIUM** `.gitignore` and `.dockerignore` now exclude timestamped
+  database backups (`*.db.bak`, `shadowlab.db.bak*`) and crypto or
+  secret material (`*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.sqlite*`).
+  A full copy of operator and incident data, such as a
+  `shadowlab.db.bak-...` snapshot left in the working tree, can no
+  longer be committed by accident or baked into a container image.
+- **LOW** The test suite isolates the database to a throwaway temp file
+  via `tests/conftest.py`. Running `pytest` previously read and wrote
+  the live `shadowlab.db`, seeding it with fixture incidents that then
+  surfaced in the desktop UI and letting real operator data flake the
+  tests. Isolation is applied at collection time so connections opened
+  during import also land in the sandbox.
+
+### Changed (Detection scoring)
+
+- **HIGH** Behavioral likelihood and incident severity are now gated on
+  a true malicious indicator: a Defender malware verdict, a failed
+  remediation, or cross-process injection telemetry. CPU, thread, TCP,
+  and raw Sysmon volume are baseline-relative modifiers capped well
+  below the MEDIUM threshold, so a clean production host scores near
+  zero instead of floating into a permanent phantom MEDIUM incident on
+  routine log volume. A window with no true signal is reported as a
+  baseline telemetry snapshot rather than an incident.
+- The per-workspace resource baseline is learned with an EWMA and only
+  from benign windows, persisted as a small JSON document under
+  `shadowlab_out`. A real incident can no longer shift the host's
+  notion of normal and mask follow-on activity. Baseline write failures
+  are advisory and never break scoring.
+- `GET /history/telemetry` accepts an optional bounded `limit`, and the
+  monitor scoring path threads `workspace_id` end to end so the right
+  baseline is applied per workspace.
 
 ### Changed (Antivirus pipeline)
 

@@ -11,6 +11,11 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import QListWidgetItem, QTableWidget, QTableWidgetItem
 
+try:
+    from _safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
+except ImportError:  # pragma: no cover - frozen build / non-sys.path layout
+    from desktop._safe_paths import UnsafeArtifactPath, ensure_under_artifact_root
+
 
 def _format_size(n: int) -> str:
     n = int(n or 0)
@@ -167,14 +172,15 @@ def _build_record(name: str, raw_path: str, *, integrity_map: dict | None = None
     # in the Signature column as `tampered` and recolour the row.
     sha256 = ""
     signature_status = "unsigned"
+    expected_sha256 = ""
     if exists:
         sha256 = _sha256_file(path)
         if integrity_map:
             manifest_entry = (integrity_map or {}).get(name) or {}
-            expected = str(manifest_entry.get("sha256", "") or "").lower()
-            if expected and sha256:
-                signature_status = "valid" if expected == sha256 else "tampered"
-            elif expected:
+            expected_sha256 = str(manifest_entry.get("sha256", "") or "").lower()
+            if expected_sha256 and sha256:
+                signature_status = "valid" if expected_sha256 == sha256 else "tampered"
+            elif expected_sha256:
                 signature_status = "unverifiable"
     return {
         "name": name,
@@ -189,6 +195,7 @@ def _build_record(name: str, raw_path: str, *, integrity_map: dict | None = None
         "modified_epoch": int(stat.st_mtime) if stat else 0,
         "sha256": sha256,
         "sha256_short": sha256[:12] if sha256 else "",
+        "expected_sha256": expected_sha256,
         "signature_status": signature_status,
         "category_label": category_label,
         "category_key": category_key,
@@ -268,11 +275,17 @@ def refresh_artifacts(window) -> None:
         except Exception as exc:
             window._show_error(window.art_detail, "Failed to load artifacts", exc)
             return
+        # A list/null/error-envelope body would make manifest.items()
+        # below raise into the Qt event loop (the except above only
+        # wraps .json()). The /integrity block right after is already
+        # isinstance-guarded — match it.
+        if not isinstance(manifest, dict):
+            manifest = {}
         # Best-effort pull of the integrity manifest so SHA-256 columns can
         # surface signature status without an extra round-trip per row.
         integrity_map: dict = {}
         try:
-            payload = window._get("/integrity/manifest", timeout=15).json()
+            payload = window._get("/integrity", timeout=15).json()
             files = (payload or {}).get("files") if isinstance(payload, dict) else None
             if isinstance(files, dict):
                 # Normalise to short basenames so the lookup matches the
@@ -487,5 +500,15 @@ def open_selected_artifact(window) -> None:
     if record is None:
         return
     path = str(record.get("path", ""))
-    if path:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+    if not path:
+        return
+    # The path arrives in server JSON — a hostile or MitM'd backend can
+    # otherwise direct the OS shell handler at any file the operator can
+    # read/execute. Funnel through the artifact-root sandbox and reject
+    # executable suffixes outright.
+    try:
+        safe_target = ensure_under_artifact_root(path, allow_shell_open=True)
+    except UnsafeArtifactPath as exc:
+        window.statusBar().showMessage(f"Artifact open blocked: {exc}", 8000)
+        return
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(safe_target)))

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextEdit,
     QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -350,6 +352,8 @@ class ProcessHuntWorkspaceController:
         actions_layout.setSpacing(0)
         process_capabilities = self.command_capability_map()
         action_items = [
+            ("Run Monitor", app.run_monitor),
+            ("Load Processes", app.refresh_processes),
             ("Refresh Processes", app.refresh_processes),
             ("Auto Triage", app.run_auto_triage),
             ("AI Analyst", app.run_ai_analysis),
@@ -382,9 +386,11 @@ class ProcessHuntWorkspaceController:
             ("Quarantine", lambda: app.process_action("quarantine")),
         ]
         button_labels = {
+            "Run Monitor": "Run Monitor",
+            "Load Processes": "Load Proc",
             "Refresh Processes": "Refresh",
             "Auto Triage": "Auto Triage",
-            "AI Analyst": "AI",
+            "AI Analyst": "AI Analyst",
             "Clear Output": "Clear",
             "Scan Selected": "Scan Sel",
             "Scan All": "Scan All",
@@ -450,11 +456,22 @@ class ProcessHuntWorkspaceController:
                         btn.setToolTip(capability_hints.get(capability, "Requires an authorized role."))
                     btn.setFixedHeight(27)
                     btn.setFixedWidth(self.command_button_width(action_name, btn.sizeHint().width()))
-                    color = "#3f2430" if danger else "#1a2a3d"
-                    border = "#6b3a4d" if danger else "#2c4260"
+                    if danger:
+                        base, border = "#3f2430", "#6b3a4d"
+                        hover_bg, hover_bd = "#542e3c", "#8a2a2a"
+                        press_bg, press_bd = "#6b2436", "#a83232"
+                        dis_bg, dis_fg, dis_bd = "#241419", "#7a5a5a", "#3a2024"
+                    else:
+                        base, border = "#1a2a3d", "#2c4260"
+                        hover_bg, hover_bd = "#23394f", "#4a6c95"
+                        press_bg, press_bd = "#2f4f70", "#5d8aa8"
+                        dis_bg, dis_fg, dis_bd = "#141d28", "#5e6f80", "#23303f"
                     btn.setStyleSheet(
-                        f"background:{color};color:#c8d8ea;border:1px solid {border};"
-                        "border-radius:7px;padding:2px 6px;font-weight:700;font-size:10px;"
+                        f"QPushButton{{background:{base};color:#c8d8ea;border:1px solid {border};"
+                        "border-radius:7px;padding:2px 6px;font-weight:700;font-size:10px;}"
+                        f"QPushButton:hover{{background:{hover_bg};border-color:{hover_bd};color:#eaf2fb;}}"
+                        f"QPushButton:pressed{{background:{press_bg};border-color:{press_bd};padding-top:3px;padding-bottom:1px;}}"
+                        f"QPushButton:disabled{{background:{dis_bg};color:{dis_fg};border-color:{dis_bd};}}"
                     )
                     group_layout.addWidget(btn)
                 row_layout.addWidget(group)
@@ -558,7 +575,7 @@ class ProcessHuntWorkspaceController:
             "Refresh Processes": 86,
             "Clear Output": 78,
             "Auto Triage": 94,
-            "AI Analyst": 62,
+            "AI Analyst": 104,
             "Scan Selected": 82,
             "Scan All": 78,
             "Scan Executable": 82,
@@ -591,7 +608,7 @@ class ProcessHuntWorkspaceController:
     def command_group_rows(self) -> list[list[tuple[str, list[str], bool]]]:
         return [
             [
-                ("Load", ["Refresh Processes", "Clear Output"], False),
+                ("Load", ["Run Monitor", "Load Processes", "Refresh Processes", "Clear Output"], False),
                 ("Triage", ["Auto Triage", "AI Analyst", "Scan Selected", "Scan All", "Scan Executable"], False),
                 ("Intel", ["Use Process Hash", "Use Process IP", "Copy Command", "Export Package", "Clear Reputation", "Lookup Hash", "Lookup IP"], False),
             ],
@@ -610,6 +627,8 @@ class ProcessHuntWorkspaceController:
             "Lookup Hash", "Lookup IP", "Investigating", "Suspicious", "Benign", "Contained",
         }
         mapping = {name: "can_run_hunt" for name in hunt_actions}
+        mapping["Run Monitor"] = "can_run_monitor"
+        mapping["Load Processes"] = "can_run_hunt"
         mapping["Auto Triage"] = "can_run_triage"
         for name in {"Triage Respond", "Suspend", "Resume", "Kill", "Kill Tree", "Quarantine"}:
             mapping[name] = "can_manage_process_actions"
@@ -854,7 +873,7 @@ class ProcessHuntWorkspaceController:
                 continue
             if action_name in {"Scan Selected", "Scan All", "Scan Executable", "Lookup Hash", "Lookup IP"} and not providers_ready:
                 btn.setToolTip(f"{policy} Provider missing: configure VT, MalwareBazaar, or YARAify first.")
-            elif action_name not in {"Refresh Processes", "Clear Output", "Scan All"} and not selected:
+            elif action_name not in {"Run Monitor", "Load Processes", "Refresh Processes", "Clear Output", "Scan All"} and not selected:
                 btn.setToolTip(f"{policy} No target selected: click a process row first.")
             else:
                 btn.setToolTip(f"{policy} {hint}")
@@ -1933,7 +1952,7 @@ class ProcessHuntWorkspaceController:
             return
         primary_pid, primary_name = targets[0]
         process_profile = app.selected_process or {}
-        protected_names = {"system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe"}
+        protected_names = {"system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe"}
         protected_targets = [f"{name} ({pid})" for pid, name in targets if str(name).strip().lower() in protected_names]
         if protected_targets and action in {"kill", "kill-tree", "quarantine", "suspend"}:
             detail = "Blocked protected target(s): " + ", ".join(protected_targets[:6])
@@ -2046,6 +2065,15 @@ class ProcessHuntWorkspaceController:
         protected_count = sum(1 for _pid, name in targets if self.is_protected_process(name))
         dry_run = bool(getattr(self.app, "process_dry_run_toggle", None) and self.app.process_dry_run_toggle.isChecked())
         policy = "dry-run simulation" if dry_run else "admin dangerous-action policy"
+        # `profile` is the last detail-fetched process; it only describes
+        # the action target if its PID matches the primary target. Showing
+        # a stale exe here would make the operator confirm a destructive
+        # action against misleading evidence.
+        primary_pid = str(targets[0][0]).strip() if targets else ""
+        if profile and primary_pid and str(profile.get("pid", "")).strip() == primary_pid:
+            exe_line = profile.get("exe", "n/a")
+        else:
+            exe_line = "n/a (open the target row to load its profile)"
         return (
             f"Target count: {len(targets)}\n"
             f"Protected targets: {protected_count}\n"
@@ -2053,7 +2081,7 @@ class ProcessHuntWorkspaceController:
             f"Backend policy: {policy}\n"
             f"Impact preview: {impact}\n"
             f"Rollback confidence: {rollback}\n"
-            f"Executable: {profile.get('exe', 'n/a')}\n"
+            f"Executable: {exe_line}\n"
         )
 
     def scan_selected_process(self) -> None:

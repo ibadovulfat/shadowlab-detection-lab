@@ -94,41 +94,95 @@ class TelemetrySampler:
             **network_sample,
         }
 
-def read_windows_events(max_events: int = 1200):
+def read_windows_events(window_seconds: int = 600, max_events: int = 5000):
+    """Read recent Defender/Sysmon events bounded by a TIME WINDOW.
+
+    Production change: the old version blindly grabbed the last 1200
+    records per channel regardless of age. On any busy host that's
+    ~seconds of routine log noise, and treating that volume as "events"
+    made a clean machine look like an active incident. We now walk the
+    log newest-first and STOP once events fall outside `window_seconds`
+    (default 10 min), so the summary reflects "what happened recently"
+    rather than "the log is large". `max_events` is only a memory guard.
+
+    `EVENTLOG_BACKWARDS_READ` yields newest-first, so the first event
+    older than the cutoff means everything after it is older too — we
+    can stop the whole channel immediately.
+    """
     if not (on_windows() and win32evtlog):
         return [], []
+
+    cutoff = time.time() - max(30, int(window_seconds))
+
+    def _event_epoch(ev) -> float:
+        # pywin32 PyTime supports int() -> Unix epoch. Fall back to 0.0
+        # (treated as "unknown age", kept) if conversion fails so a
+        # locale/format quirk never silently drops real events.
+        try:
+            return float(int(ev.TimeGenerated))
+        except Exception:
+            return 0.0
+
     def read_channel(channel: str):
-        h = win32evtlog.OpenEventLog(None, channel)
+        try:
+            h = win32evtlog.OpenEventLog(None, channel)
+        except Exception:
+            return []
         flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
         got = []
-        while True:
-            recs = win32evtlog.ReadEventLog(h, flags, 0)
-            if not recs:
-                break
-            for ev in recs:
-                try:
-                    got.append({
-                        "TimeGenerated": ev.TimeGenerated.Format(),
-                        "EventID": ev.EventID & 0xFFFF,
-                        "SourceName": ev.SourceName,
-                        "RecordNumber": ev.RecordNumber,
-                    })
-                    if len(got) >= max_events:
-                        win32evtlog.CloseEventLog(h)
-                        return got
-                except Exception:
-                    continue
-        win32evtlog.CloseEventLog(h)
+        try:
+            while True:
+                recs = win32evtlog.ReadEventLog(h, flags, 0)
+                if not recs:
+                    break
+                for ev in recs:
+                    try:
+                        epoch = _event_epoch(ev)
+                        if epoch and epoch < cutoff:
+                            # Newest-first: this and everything after it
+                            # is outside the window — stop the channel.
+                            return got
+                        got.append({
+                            "TimeGenerated": ev.TimeGenerated.Format(),
+                            "EventID": ev.EventID & 0xFFFF,
+                            "SourceName": ev.SourceName,
+                            "RecordNumber": ev.RecordNumber,
+                        })
+                        if len(got) >= max_events:
+                            return got
+                    except Exception:
+                        continue
+        finally:
+            try:
+                win32evtlog.CloseEventLog(h)
+            except Exception:
+                pass
         return got
+
     return read_channel(DEFENDER_CHANNEL), read_channel(SYSMON_CHANNEL)
 
 def summarize_events(raw, interesting: dict) -> dict:
-    counts = {}
+    """Summarise events counting ONLY the configured interesting IDs.
+
+    Production change: `total` used to be `len(raw)` — every routine OS
+    event inflated the count (the "2400 events" that made a benign host
+    look active). It now counts only events whose ID is in the
+    `interesting` map (config defender_ids/sysmon_ids), so the summary
+    reflects security-relevant activity, not raw log volume. Uninteresting
+    IDs are dropped entirely instead of being labelled "Event <id>".
+    """
+    counts: dict[int, int] = {}
     for ev in raw:
         eid = int(ev.get("EventID", 0))
         counts[eid] = counts.get(eid, 0) + 1
-    labeled = {interesting.get(k, f"Event {k}"): v for k, v in sorted(counts.items())}
-    return {"total": len(raw), "by_id": labeled}
+    interesting = interesting or {}
+    labeled: dict[str, int] = {}
+    interesting_total = 0
+    for eid, n in sorted(counts.items()):
+        if eid in interesting:
+            labeled[interesting[eid]] = labeled.get(interesting[eid], 0) + n
+            interesting_total += n
+    return {"total": interesting_total, "by_id": labeled}
 
 def get_all_processes() -> list[dict]:
     """

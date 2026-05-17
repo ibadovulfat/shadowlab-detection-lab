@@ -739,10 +739,25 @@ class AuthApiTests(unittest.TestCase):
         self.assertIn("already owned by workspace", response.text)
 
     def test_threat_hash_lookup_rejects_invalid_sha256(self) -> None:
-        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        # `/threat-intel/*` now requires analyst-or-admin (defense in
+        # depth: authz runs before input validation). Use the admin
+        # no-auth role — like test_connector_configuration_rejects_invalid_name
+        # — so the request reaches the SHA-256 validator this test targets.
+        settings = make_settings(
+            auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin"
+        )
         with mock.patch.object(security, "security_settings", settings):
             response = self.client.post("/threat-intel/hash/lookup", json={"file_hash": "abc"})
         self.assertEqual(response.status_code, 422)
+
+    def test_threat_intel_lookup_requires_analyst_role(self) -> None:
+        # Regression guard for the role-gate fix: a viewer (default
+        # no-auth role) must NOT be able to drive outbound threat-intel
+        # lookups.
+        settings = make_settings(auth_required=False, enable_dangerous_actions=True)
+        with mock.patch.object(security, "security_settings", settings):
+            response = self.client.get("/threat-intel/ip/8.8.8.8")
+        self.assertEqual(response.status_code, 403)
 
     def test_connector_configuration_rejects_invalid_name(self) -> None:
         settings = make_settings(auth_required=False, enable_dangerous_actions=True, noauth_default_role="admin")

@@ -65,12 +65,18 @@ def register_routes(app: FastAPI, ctx: dict[str, Any]) -> None:
             while time.time() - start < payload.duration:
                 row = telemetry_service.sample_once()
                 telemetry_rows.append(row)
-                score = detection_service.incremental_score(telemetry_rows, defender_summary, sysmon_summary)
+                score = detection_service.incremental_score(
+                    telemetry_rows, defender_summary, sysmon_summary, workspace_id=workspace_id
+                )
                 timeline_scores.append(float(score["likelihood"]))
                 time.sleep(max(0.1, float(payload.interval)))
 
-            final = detection_service.final_score(telemetry_rows, defender_summary, sysmon_summary)
-            incident = detection_service.build_incident(telemetry_rows, defender_summary, sysmon_summary)
+            final = detection_service.final_score(
+                telemetry_rows, defender_summary, sysmon_summary, workspace_id=workspace_id
+            )
+            incident = detection_service.build_incident(
+                telemetry_rows, defender_summary, sysmon_summary, workspace_id=workspace_id
+            )
 
             write_monitor_artifacts(
                 artifact_dir,

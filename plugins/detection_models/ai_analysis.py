@@ -8,7 +8,7 @@ try:
 except Exception:
     OpenAI = None  # handled gracefully
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "o4-mini")
 
 def _client():
     api_key = os.getenv("OPENAI_API_KEY")
